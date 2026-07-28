@@ -141,6 +141,14 @@ interface GeckoModule {
   HEAP32: Int32Array;
   ENV: Record<string, string>;
   FS: any;
+  /**
+   * emscripten's selector->element override map (library_html5.js), consulted by
+   * findEventTarget/findCanvasEventTarget BEFORE document.querySelector. Exported
+   * via -sEXPORTED_RUNTIME_METHODS in build-lib.sh; optional here so a bundle built
+   * against an older link (without the export) degrades to a clear warning instead
+   * of a TypeError.
+   */
+  specialHTMLTargets?: Record<string, HTMLElement>;
   _xul_cmd_ptr(): number;
   addRunDependency(id: string): void;
   removeRunDependency(id: string): void;
@@ -198,6 +206,12 @@ export class Gecko {
   // buffer; we draw that onto a 2D canvas stacked above #glout. (Software mode
   // composites popups into the main buffer, so this is GPU-only.)
   private popupCtx: CanvasRenderingContext2D | null = null;
+  // The overlay element itself, held by reference rather than re-found with
+  // document.getElementById: the embedder's canvas may live in a SHADOW ROOT (the
+  // overlay is created as its sibling, so a document-level lookup can't see it), and
+  // a document-wide id is not per-instance -- two Gecko instances on one page would
+  // both resolve to whichever overlay was created first.
+  private popupCanvas: HTMLCanvasElement | null = null;
   private popupImg: ImageData | null = null;
   private popupDst32: Uint32Array | null = null;
   private popupShown = false;
@@ -275,6 +289,10 @@ export class Gecko {
       printErr,
       onAbort: (w: unknown) => printErr('[libxul] abort: ' + w),
       preRun: [(m: GeckoModule) => {
+        // GPU mode resolves its compositor canvas by SELECTOR ("#screen", hardcoded
+        // in GLContextProviderEmscripten). Hand the engine our actual element before
+        // it looks, so an embedder whose canvas lives in a shadow root works.
+        if (this.gpu) this.registerGlTarget(m);
         // Mount selection (done in xul_init, gated on these ENV vars since the JS
         // geckoProviders object isn't visible on the engine pthreads):
         //  - string path  -> native OPFS backend at /opfs (GECKO_OPFS_MOUNT); the
@@ -401,6 +419,38 @@ export class Gecko {
     this.running = false;
     for (const d of this.detach) d();
     this.detach = [];
+  }
+
+  // Register our canvas in emscripten's selector override map, so the engine's
+  // emscripten_webgl_create_context("#screen") resolves to THIS element instead of
+  // going through document.querySelector.
+  //
+  // Why it matters: findCanvasEventTarget(target) checks
+  // GL.offscreenCanvases[target.slice(1)], then findEventTarget(target) ->
+  // specialHTMLTargets[target] || document.querySelector(target). An embedder that
+  // mounts the canvas inside a SHADOW ROOT (an isolated app window, a web component)
+  // is invisible to querySelector, so without this the lookup returns null and
+  // WebRenderAPI::Create dereferences a null GL context -> trap. Registering the
+  // element directly also makes the id="screen" assignment in the constructor
+  // non-load-bearing, so two Gecko instances on one page no longer fight over a
+  // document-unique id -- each engine instance has its own map.
+  //
+  // Must run before the engine creates its GL context; preRun is the latest safe
+  // point (it runs before main).
+  private registerGlTarget(m: GeckoModule): void {
+    const targets = m.specialHTMLTargets;
+    if (!targets) {
+      (this.opts.printErr ?? ((s: string) => console.warn(s)))(
+        '[libxul] specialHTMLTargets is not exported by this engine build; GPU mode ' +
+        'will fall back to document.querySelector("#screen") and cannot find a canvas ' +
+        'inside a shadow root. Rebuild with specialHTMLTargets in ' +
+        '-sEXPORTED_RUNTIME_METHODS (see gecko.js/build-lib.sh).');
+      return;
+    }
+    // Both spellings: findEventTarget keys on the raw selector ("#screen"), while
+    // findCanvasEventTarget strips the leading '#' before its offscreen-canvas lookup.
+    targets['#screen'] = this.canvas;
+    targets['screen'] = this.canvas;
   }
 
   // ---- command protocol --------------------------------------------------
@@ -605,9 +655,12 @@ export class Gecko {
     // Popup overlay: a 2D canvas stacked ABOVE #screen (popups must draw over the main
     // scene). zIndex 2 so it wins; pointer-events none so input still reaches #screen.
     // drawPopupOverlay() paints the engine's popup buffer here.
-    let ov = document.getElementById('popup-overlay') as HTMLCanvasElement | null;
+    let ov = this.popupCanvas;
     if (!ov) {
       ov = document.createElement('canvas');
+      // Kept for debuggability only -- nothing looks the overlay up by id (see the
+      // popupCanvas field). Inside a shadow root the id is scoped to that root, so
+      // per-instance overlays don't collide.
       ov.id = 'popup-overlay';
       ov.style.position = 'absolute';
       ov.style.left = '0';
@@ -615,6 +668,7 @@ export class Gecko {
       ov.style.zIndex = '2';
       ov.style.pointerEvents = 'none';
       wrap.appendChild(ov);
+      this.popupCanvas = ov;
     }
     this.popupCtx = ov.getContext('2d');
     this.syncGpuSize();
@@ -631,7 +685,7 @@ export class Gecko {
     }
     c.style.width = this.W + 'px';
     c.style.height = this.H + 'px';
-    const el = document.getElementById('popup-overlay') as HTMLCanvasElement | null;
+    const el = this.popupCanvas;
     if (el) {
       el.width = this.W;
       el.height = this.H;

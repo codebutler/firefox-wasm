@@ -88,7 +88,13 @@ EMSETTINGS=(
   -pthread -sPTHREAD_POOL_SIZE=20 -sPTHREAD_POOL_SIZE_STRICT=0
   -sMODULARIZE=1 -sEXPORT_NAME=createGecko
   -sEXPORTED_FUNCTIONS=_main,_xul_init,_free,_malloc,_WasmXPTCStubDispatch,_xul_cmd_ptr,_wisp_wakeword,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error,_wasmfs_create_provider_backend,_provider_record_entry,_wasmhost_invoke_import,_wjhelp,_wasmjit_invoke,_WJTraceRoots,_InterpTraceRoots,_b_help,_hostimg_renderer_tid,_gecko_coarse_now_ptr
-  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,addFunction,removeFunction,ENV,addRunDependency,removeRunDependency,HEAPU8,HEAP32,HEAPF32,UTF8ToString
+  # specialHTMLTargets is emscripten's selector->element override map, consulted by
+  # findEventTarget/findCanvasEventTarget BEFORE document.querySelector. Exporting it
+  # lets the embedder hand the engine its canvas directly (js/index.ts, registerGlTarget),
+  # which is the only way GPU mode can resolve "#screen" when the canvas lives inside a
+  # SHADOW ROOT -- querySelector cannot pierce one, so the lookup returns null and
+  # WebRenderAPI::Create then traps on a null GL context.
+  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,addFunction,removeFunction,ENV,addRunDependency,removeRunDependency,HEAPU8,HEAP32,HEAPF32,UTF8ToString,specialHTMLTargets
   # WasmFS (the new FS impl). Its socket syscalls are reinstated by the WISP
   # backend patched into libwasmfs (emsdk-patches/wisp_socket.h); wisp-net.js is
   # the JS transport. Legacy SOCKFS/MEMFS/IDBFS are gone under WASMFS.
