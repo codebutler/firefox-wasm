@@ -51,7 +51,7 @@ env:
 
 jobs:
   build:
-    runs-on: firefox
+    runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
       - name: Checkout the embedder + build harness (this repo)
@@ -81,15 +81,17 @@ jobs:
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo ">> version=${PKG_VERSION} tag=${TAG} new_version=${NEW_VERSION}"
 
-      # - name: Free up disk space (Gecko objdir is ~26 GB)
-      #   uses: jlumbroso/free-disk-space@main
-      #   with:
-      #     tool-cache: true
-      #     android: true
-      #     dotnet: true
-      #     haskell: true
-      #     large-packages: true
-      #     swap-storage: true
+      - name: Free up disk space (Gecko objdir is ~26 GB)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          # Keep swap: the final emcc relink (wasm-opt over the ~245 MB module)
+          # spikes past what 16 GB of RAM alone can absorb.
+          swap-storage: false
 
       - name: Install build prerequisites (clang/libclang for bindgen, etc.)
         run: |
