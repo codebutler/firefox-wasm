@@ -171,4 +171,37 @@ if (!src.includes('[manual JSPI] promising entry')) {
   console.log('patch-gecko-shaderfix: made the pthread entry (invokeEntryPoint) promising in ' + path);
 }
 
+// ── 5. Shadow-DOM canvas transfer ────────────────────────────────────────────
+// pthread_create transfers the canvases named in the thread's transfer list
+// (NSPR's _pr_emscripten_next_canvas hands "#screen" to the Renderer thread) by
+// resolving each name with a BARE document.querySelector. That cannot pierce a
+// shadow root, so an embedder that mounts the canvas inside one (a web
+// component, an app window) never gets the transfer.
+//
+// The failure is silent and looks like a renderer bug: GLContextProviderEmscripten
+// asks for PROXY_FALLBACK, so a missing OffscreenCanvas quietly downgrades the
+// compositor to a proxied context -- which it deliberately creates with
+// renderViaOffscreenBackBuffer = EM_FALSE ("implicit present does NOT work for a
+// proxied context, so without it the canvas stays black"). Everything logs
+// success: the GL context is created, WebRender initializes, the document loads
+// -- and the surface stays blank forever.
+//
+// findCanvasEventTarget consults GL.offscreenCanvases and specialHTMLTargets
+// (emscripten's selector override map) before touching the document, so routing
+// the lookup through it lets an embedder register its canvas and be found. The
+// Module.canvas fast path above it can never match here: `name` carries the
+// leading '#' ("#screen") while an element id cannot.
+const XFER_FROM =
+  'var canvas = (Module["canvas"] && Module["canvas"].id === name) ? Module["canvas"] : document.querySelector(name);';
+const XFER_TO =
+  'var canvas = (Module["canvas"] && Module["canvas"].id === name) ? Module["canvas"] : (findCanvasEventTarget(name) || document.querySelector(name));';
+if (!src.includes('findCanvasEventTarget(name) ||')) {
+  if (!src.includes(XFER_FROM)) {
+    console.error('patch-gecko-shaderfix: pthread canvas-transfer lookup not found; emscripten output may have changed -- update this patch.');
+    process.exit(1);
+  }
+  src = src.replace(XFER_FROM, XFER_TO);
+  console.log('patch-gecko-shaderfix: routed the pthread canvas transfer through findCanvasEventTarget (shadow-DOM embedders) in ' + path);
+}
+
 writeFileSync(path, src);

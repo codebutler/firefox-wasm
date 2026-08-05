@@ -336,6 +336,15 @@ export class Gecko {
     // never fetches by filename -- locateFile is only honored if the consumer overrides it.
     moduleOpts.mainScriptUrlOrBlob = geckoBlobUrl();
     if (this.opts.locateFile) moduleOpts.locateFile = this.opts.locateFile;
+    // Hand the runtime our canvas as Module.canvas — emscripten's canonical
+    // "this is the app's canvas" slot. The OffscreenCanvas transfer path checks
+    // `Module.canvas && Module.canvas.id === name` BEFORE falling back to
+    // document.querySelector(name), and that querySelector is the one lookup
+    // specialHTMLTargets does not cover. Without this, an embedder whose canvas
+    // lives in a shadow root never gets the transfer: the worker then finds no
+    // canvas and silently takes the proxied-context path, which renders but
+    // never implicit-presents to the placeholder — a permanently blank surface.
+    moduleOpts.canvas = this.canvas;
 
     // Decode the inlined gecko.data.zst with zstddec and feed it to emscripten via
     // getPreloadedPackage (so the .data is never fetched). The engine wasm comes from
