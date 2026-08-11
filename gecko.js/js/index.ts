@@ -216,8 +216,58 @@ export class Gecko {
   private popupDst32: Uint32Array | null = null;
   private popupShown = false;
   private detach: Array<() => void> = [];
+  /**
+   * Resolves when the engine's FIRST frame has actually reached the canvas.
+   *
+   * `load()` resolving only means the DOCUMENT finished loading; in GPU mode the
+   * compositor presents autonomously off the refresh driver, so pixels can arrive
+   * seconds later (RenderThread's device init is slow under software GL). An
+   * embedder that uncovers its surface when load() resolves therefore shows a blank
+   * window for that whole gap. Await this instead:
+   *
+   *   await gecko.load(url);
+   *   await gecko.firstPaint;   // now there is something to look at
+   *
+   * Signalled once per instance from gl_present_yield (lib/gl-present.js), the only
+   * place that observes the present. It stays resolved afterwards, so awaiting it on
+   * every load is fine. SOFTWARE mode has no such gap -- the paint loop pulls and
+   * blits each frame itself -- so there it resolves as soon as the engine is up.
+   */
+  readonly firstPaint: Promise<void>;
+  private resolveFirstPaint!: () => void;
+
+  /**
+   * firstPaint needs BOTH of these, because measurement says each alone is wrong:
+   *
+   *  - `loadSettled` -- the first load() has returned, so a present can carry
+   *    this document rather than whatever preceded it.
+   *  - present index >= 2 -- the compositor's OPENING present is a device-init
+   *    frame that never carries content.
+   *
+   * Two software-GL traces, with the load landing on opposite sides of present #1:
+   *   A: present #1 t=27.6s, load stop t=27.8s, present #2 t=29.3s
+   *   B: load stop t=24.2s, present #1 t=27.5s, present #2 t=29.8s
+   * Resolving on "first present" alone was blank in A; on "first present after
+   * the load" alone it was blank in B (that present is #1). Only the conjunction
+   * is right in both. The `>= 2` is empirical, not derived -- gecko exposes no
+   * first-contentful-paint to the embedder, so this is the honest approximation.
+   */
+  private loadSettled = false;
+
+  private onPresent(n: number): void {
+    if (this.opts.env?.GECKO_PRESENT_DEBUG) {
+      (this.opts.printErr ?? ((s: string) => console.warn(s)))(
+        `present #${n}${this.loadSettled ? ' (load settled)' : ' (pre-load)'}`);
+    }
+    // PRESENT_REPORT_CAP -- MUST stay in sync with lib/gl-present.js, which stops
+    // reporting there. Resolving at the cap means a pathologically long first
+    // load degrades to "uncover anyway" instead of leaving firstPaint pending
+    // forever, which would wedge an embedder that waits on it.
+    if ((this.loadSettled && n >= 2) || n >= 600) this.resolveFirstPaint();
+  }
 
   constructor(opts: GeckoOptions) {
+    this.firstPaint = new Promise<void>((r) => (this.resolveFirstPaint = r));
     this.opts = opts;
     this.canvas = opts.canvas;
     this.W = opts.width ?? this.canvas.width ?? 800;
@@ -288,6 +338,10 @@ export class Gecko {
       },
       printErr,
       onAbort: (w: unknown) => printErr('[libxul] abort: ' + w),
+      // Called from the Renderer worker via CMD_CALL_HANDLER for the first few
+      // presents (lib/gl-present.js). MUST exist before any thread starts:
+      // emscripten's dispatch does a bare `Module[d.handler](...)`, no null check.
+      geckoOnPresent: (n: number) => this.onPresent(n),
       preRun: [(m: GeckoModule) => {
         // GPU mode resolves its compositor canvas by SELECTOR ("#screen", hardcoded
         // in GLContextProviderEmscripten). Hand the engine our actual element before
@@ -387,6 +441,12 @@ export class Gecko {
     await ready;
     this.cmd = this.mod._xul_cmd_ptr();
 
+    // Software mode never calls gl_present_yield (no compositor present to wait
+    // for -- the paint loop pulls each frame and blits it), so nothing would ever
+    // resolve firstPaint. The engine is up and the loop is about to start, which is
+    // as close to "there will be pixels" as this mode gets.
+    if (!this.gpu) this.resolveFirstPaint();
+
     if (this.opts.forwardInput !== false) this.attachInput();
     this.startPaintLoop();
   }
@@ -394,6 +454,9 @@ export class Gecko {
   /** Navigate the embedded engine to a URL (http(s):// fetched over WISP). */
   async load(url: string): Promise<void> {
     await this.run({ op: OP_LOAD, url });
+    // Arms firstPaint: from here, the next present is one that can carry this
+    // document. (Presents that already happened may predate it.)
+    this.loadSettled = true;
   }
 
   /**
