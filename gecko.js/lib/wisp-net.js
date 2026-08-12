@@ -16,6 +16,12 @@
 //
 // WISP framing: [type:u8][streamId:u32-le][payload]. CONNECT payload =
 // [streamType:u8][port:u16-le][host...]; CLOSE payload = [reason:u8].
+//
+// Optional embedder transport — Module.tcpTransport:
+//   connect(host, port, { onData, onConnected, onEof, onError }) → { send, close }
+// When set, every stream routes through that factory and the WISP WebSocket is
+// never opened. Absent → current WISP path, byte-for-byte. Generic embedder API
+// (no host-app imports); pc uses it to bridge onto its own hostConnect() seam.
 
 mergeInto(LibraryManager.library, {
   // --- DNS: keep the synthetic-IP <-> hostname map on the main thread R -------
@@ -36,6 +42,19 @@ mergeInto(LibraryManager.library, {
   $WISP__deps: ['$DNS'],
   $WISP: {
     conn: null,
+    // Streams opened via Module.tcpTransport — keyed by C++ socket id, same as
+    // WISP stream ids. Kept separate so a custom-transport connect never opens
+    // the WISP WebSocket (and a WISP connect never looks here).
+    customStreams: null,
+    customFactory: function () {
+      return (typeof Module !== 'undefined' && typeof Module.tcpTransport === 'function')
+        ? Module.tcpTransport
+        : null;
+    },
+    ensureCustomStreams: function () {
+      if (!WISP.customStreams) WISP.customStreams = new Map();
+      return WISP.customStreams;
+    },
     // Lazily open the single WebSocket to Module.wispUrl (set by index.ts).
     ensureConn: function () {
       if (WISP.conn) return WISP.conn;
@@ -91,14 +110,65 @@ mergeInto(LibraryManager.library, {
       // type 3 (CONTINUE): server->client flow-control credit; ignored (we never
       // overrun a stream's window for normal request sizes).
     },
+    _deliverCustom: function (id, chunk) {
+      if (!chunk) return;
+      var u8 = (chunk instanceof Uint8Array)
+        ? chunk
+        : (chunk instanceof ArrayBuffer)
+          ? new Uint8Array(chunk)
+          : null;
+      if (!u8 || !u8.length) return;
+      var streams = WISP.customStreams;
+      if (!streams || !streams.has(id)) return;
+      var ptr = _malloc(u8.length);
+      HEAPU8.set(u8, ptr);
+      try { _wisp_deliver(id, ptr, u8.length); } finally { _free(ptr); }
+    },
+    doConnectCustom: function (id, host, port, factory) {
+      var streams = WISP.ensureCustomStreams();
+      try {
+        var handle = factory(host, port & 0xffff, {
+          onData: function (chunk) { WISP._deliverCustom(id, chunk); },
+          onConnected: function () {
+            if (!streams.has(id)) return;
+            try { _wisp_set_connected(id); } catch (e) {}
+          },
+          onEof: function () {
+            if (!streams.has(id)) return;
+            streams.delete(id);
+            try { _wisp_set_eof(id); } catch (e) {}
+          },
+          onError: function (code) {
+            if (!streams.has(id)) return;
+            streams.delete(id);
+            try { _wisp_set_error(id, (code >>> 0) || 111 /* ECONNREFUSED */); } catch (e) {}
+          },
+        });
+        if (!handle || typeof handle.send !== 'function' || typeof handle.close !== 'function') {
+          try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {}
+          return;
+        }
+        streams.set(id, handle);
+      } catch (e) {
+        err('[wisp] Module.tcpTransport connect failed: ' + e);
+        try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e2) {}
+      }
+    },
     doConnect: function (id, ipBe, port) {
-      var conn = WISP.ensureConn();
-      if (!conn) { try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {} return; }
       // ipBe is network order; on little-endian wasm byte 0 is the first octet.
       var dotted = (ipBe & 0xff) + '.' + ((ipBe >>> 8) & 0xff) + '.' +
                    ((ipBe >>> 16) & 0xff) + '.' + ((ipBe >>> 24) & 0xff);
       var host = dotted;
       try { if (DNS.lookup_addr) { var nm = DNS.lookup_addr(dotted); if (nm) host = nm; } } catch (e) {}
+
+      var factory = WISP.customFactory();
+      if (factory) {
+        WISP.doConnectCustom(id, host, port, factory);
+        return;
+      }
+
+      var conn = WISP.ensureConn();
+      if (!conn) { try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {} return; }
       var go = function () {
         conn.streams.add(id);
         var hb = new TextEncoder().encode(host);
@@ -113,6 +183,16 @@ mergeInto(LibraryManager.library, {
       if (conn.ready) go(); else conn.pending.push(go);
     },
     doSend: function (id, ptr, len) {
+      var streams = WISP.customStreams;
+      if (streams && streams.has(id)) {
+        var handle = streams.get(id);
+        // sync-proxied: the calling worker is blocked, so the heap view is stable;
+        // copy out before returning so the embedder can hold the bytes async.
+        var copy = new Uint8Array(len);
+        copy.set(HEAPU8.subarray(ptr, ptr + len));
+        try { handle.send(copy); } catch (e) { err('[wisp] tcpTransport send failed: ' + e); }
+        return;
+      }
       var conn = WISP.conn;
       if (!conn || !conn.streams.has(id)) return;
       // sync-proxied: the calling worker is blocked, so the heap view is stable;
@@ -120,6 +200,13 @@ mergeInto(LibraryManager.library, {
       WISP._frame(conn, id, 2 /* DATA */, HEAPU8.subarray(ptr, ptr + len));
     },
     doClose: function (id) {
+      var streams = WISP.customStreams;
+      if (streams && streams.has(id)) {
+        var handle = streams.get(id);
+        streams.delete(id);
+        try { handle.close(); } catch (e) {}
+        return;
+      }
       var conn = WISP.conn;
       if (!conn || !conn.streams.has(id)) return;
       conn.streams.delete(id);
@@ -132,7 +219,15 @@ mergeInto(LibraryManager.library, {
   // --- C++ -> JS hooks (proxied to R, where the WebSocket lives) -------------
   wisp_open__proxy: 'sync',
   wisp_open__deps: ['$WISP'],
-  wisp_open: function (id) { WISP.ensureConn(); },
+  wisp_open: function (id) {
+    // With Module.tcpTransport, sockets never need the WISP WebSocket — skip
+    // ensureConn so a missing Module.wispUrl isn't a hard error.
+    if (WISP.customFactory()) {
+      WISP.ensureCustomStreams();
+      return;
+    }
+    WISP.ensureConn();
+  },
 
   wisp_connect__proxy: 'sync',
   wisp_connect__deps: ['$WISP'],

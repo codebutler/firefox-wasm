@@ -89,6 +89,23 @@ export interface GeckoOptions {
   /** WISP websocket endpoint; Necko fetches http(s):// over it. */
   wispUrl?: string;
   /**
+   * Optional TCP transport factory. When set, Necko sockets route through it
+   * instead of the WISP WebSocket (`Module.wispUrl` is unused). Signature:
+   *   connect(host, port, { onData, onConnected, onEof, onError }) → { send, close }
+   * Return the handle synchronously; fire `onConnected` when the duplex is
+   * ready (may be async). Generic embedder API — see gecko.js/lib/wisp-net.js.
+   */
+  tcpTransport?: (
+    host: string,
+    port: number,
+    handlers: {
+      onData: (chunk: Uint8Array) => void;
+      onConnected: () => void;
+      onEof: () => void;
+      onError: (code?: number) => void;
+    },
+  ) => { send: (chunk: Uint8Array) => void; close: () => void };
+  /**
    * Async fallback for GRE files beyond the baked-in minimal set (mounted at /gre).
    * Either an FsProvider, or a string OPFS path (-> a built-in OPFS-backed provider
    * rooted there). Omit for baked-only.
@@ -367,8 +384,14 @@ export class Gecko {
         for (const [k, v] of Object.entries(this.opts.env ?? {})) m.ENV[k] = v;
         // The WISP transport (build/wisp-net.js, a --js-library) reads the
         // endpoint from Module.wispUrl and lazily opens the single WebSocket on
-        // the runtime main thread when the first socket connects.
+        // the runtime main thread when the first socket connects. When
+        // tcpTransport is set, sockets route through that factory instead and
+        // the WebSocket is never opened (wispUrl is unused).
         if (this.opts.wispUrl) (m as unknown as { wispUrl: string }).wispUrl = this.opts.wispUrl;
+        if (this.opts.tcpTransport) {
+          (m as unknown as { tcpTransport: typeof this.opts.tcpTransport }).tcpTransport =
+            this.opts.tcpTransport;
+        }
 
         // Custom provider OBJECTS only: register them for the WasmFS ProviderBackend
         // (emsdk-patches/provider_backend.h + provider-fs.js). Its hooks run on the
