@@ -73,6 +73,18 @@ const GRE_MOUNT = 0;
 // the proxy-to-R ProviderBackend (the only way to drive arbitrary consumer JS).
 const opfsAbs = (p: string) => '/opfs/' + p.replace(/^\/+|\/+$/g, '');
 
+/** Optional embedder TCP transport — see Module.tcpTransport in wisp-net.js. */
+export type TcpTransportFactory = (
+  host: string,
+  port: number,
+  handlers: {
+    onData: (chunk: Uint8Array) => void;
+    onConnected: () => void;
+    onEof: () => void;
+    onError: (code?: number) => void;
+  },
+) => { send: (chunk: Uint8Array) => void; close: () => void };
+
 export interface GeckoOptions {
   /**
    * The page canvas the engine composites into. In software mode it receives
@@ -95,16 +107,7 @@ export interface GeckoOptions {
    * Return the handle synchronously; fire `onConnected` when the duplex is
    * ready (may be async). Generic embedder API — see gecko.js/lib/wisp-net.js.
    */
-  tcpTransport?: (
-    host: string,
-    port: number,
-    handlers: {
-      onData: (chunk: Uint8Array) => void;
-      onConnected: () => void;
-      onEof: () => void;
-      onError: (code?: number) => void;
-    },
-  ) => { send: (chunk: Uint8Array) => void; close: () => void };
+  tcpTransport?: TcpTransportFactory;
   /**
    * Async fallback for GRE files beyond the baked-in minimal set (mounted at /gre).
    * Either an FsProvider, or a string OPFS path (-> a built-in OPFS-backed provider
@@ -389,7 +392,7 @@ export class Gecko {
         // the WebSocket is never opened (wispUrl is unused).
         if (this.opts.wispUrl) (m as unknown as { wispUrl: string }).wispUrl = this.opts.wispUrl;
         if (this.opts.tcpTransport) {
-          (m as unknown as { tcpTransport: typeof this.opts.tcpTransport }).tcpTransport =
+          (m as unknown as { tcpTransport: TcpTransportFactory }).tcpTransport =
             this.opts.tcpTransport;
         }
 
