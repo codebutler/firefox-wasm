@@ -60,7 +60,10 @@ NS_IMETHODIMP RenderLoadListener::OnLocationChange(nsIWebProgress* aWebProgress,
   // the same way gl_present_yield reports presents. Lets hosts drop the evalChrome
   // location poller when they wire the callback.
   if (!aURI) return NS_OK;
-  if (aWebProgress && !aWebProgress->GetIsTopLevel()) return NS_OK;
+  if (aWebProgress) {
+    bool isTop = false;
+    if (NS_FAILED(aWebProgress->GetIsTopLevel(&isTop)) || !isTop) return NS_OK;
+  }
   nsAutoCString spec;
   if (NS_FAILED(aURI->GetSpec(spec)) || spec.IsEmpty()) return NS_OK;
   EM_ASM(
