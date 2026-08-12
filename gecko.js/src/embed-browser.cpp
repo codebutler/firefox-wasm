@@ -53,8 +53,26 @@ NS_IMETHODIMP RenderLoadListener::OnStateChange(nsIWebProgress*, nsIRequest* aRe
 NS_IMETHODIMP RenderLoadListener::OnProgressChange(nsIWebProgress*, nsIRequest*,
                                                    int32_t, int32_t, int32_t,
                                                    int32_t) { return NS_OK; }
-NS_IMETHODIMP RenderLoadListener::OnLocationChange(nsIWebProgress*, nsIRequest*,
-                                                   nsIURI*, uint32_t) { return NS_OK; }
+NS_IMETHODIMP RenderLoadListener::OnLocationChange(nsIWebProgress* aWebProgress,
+                                                   nsIRequest*, nsIURI* aURI,
+                                                   uint32_t) {
+  // Top-level location only — report to the embedder (Module.geckoOnLocationChange)
+  // the same way gl_present_yield reports presents. Lets hosts drop the evalChrome
+  // location poller when they wire the callback.
+  if (!aURI) return NS_OK;
+  if (aWebProgress && !aWebProgress->GetIsTopLevel()) return NS_OK;
+  nsAutoCString spec;
+  if (NS_FAILED(aURI->GetSpec(spec)) || spec.IsEmpty()) return NS_OK;
+  EM_ASM(
+      {
+        if (typeof Module !== 'undefined' &&
+            typeof Module['geckoOnLocationChange'] === 'function') {
+          Module['geckoOnLocationChange'](UTF8ToString($0));
+        }
+      },
+      spec.get());
+  return NS_OK;
+}
 NS_IMETHODIMP RenderLoadListener::OnStatusChange(nsIWebProgress*, nsIRequest*,
                                                  nsresult, const char16_t*) { return NS_OK; }
 NS_IMETHODIMP RenderLoadListener::OnSecurityChange(nsIWebProgress*, nsIRequest*,

@@ -109,6 +109,12 @@ export interface GeckoOptions {
    */
   tcpTransport?: TcpTransportFactory;
   /**
+   * Optional: called on top-level location changes (nsIWebProgressListener).
+   * When set, an embedder can drop its evalChrome location poller. Absent on
+   * discs built before this callback existed — poller remains the fallback.
+   */
+  onLocationChange?: (url: string) => void;
+  /**
    * Async fallback for GRE files beyond the baked-in minimal set (mounted at /gre).
    * Either an FsProvider, or a string OPFS path (-> a built-in OPFS-backed provider
    * rooted there). Omit for baked-only.
@@ -362,6 +368,15 @@ export class Gecko {
       // presents (lib/gl-present.js). MUST exist before any thread starts:
       // emscripten's dispatch does a bare `Module[d.handler](...)`, no null check.
       geckoOnPresent: (n: number) => this.onPresent(n),
+      // Called from RenderLoadListener::OnLocationChange (embed-browser.cpp) on
+      // the main thread via EM_ASM. Optional — older discs never fire it.
+      geckoOnLocationChange: (url: string) => {
+        try {
+          this.opts.onLocationChange?.(url);
+        } catch {
+          /* embedder bugs must not tear the engine */
+        }
+      },
       preRun: [(m: GeckoModule) => {
         // GPU mode resolves its compositor canvas by SELECTOR ("#screen", hardcoded
         // in GLContextProviderEmscripten). Hand the engine our actual element before
@@ -510,6 +525,16 @@ export class Gecko {
   async evalChrome(js: string): Promise<string> {
     const r = await this.run({ op: OP_EVAL, url: js });
     return typeof r === 'string' ? r : '';
+  }
+
+  /** Session history back (content `history.back()`). */
+  async goBack(): Promise<void> {
+    await this.evalChrome('history.back(); ""');
+  }
+
+  /** Session history forward. */
+  async goForward(): Promise<void> {
+    await this.evalChrome('history.forward(); ""');
   }
 
   /** Stop loops, detach input handlers. (The wasm module is not torn down.) */
