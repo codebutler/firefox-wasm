@@ -128,8 +128,11 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
   RunChromeScript("window.__geckoCtxPrev?'1':'0'"_ns, &prevFlag);
   bool prevented = prevFlag && prevFlag[0] == '1';
   free(prevFlag);
-  xul_rollup();  // never paint a XUL menu when the host owns chrome
-  if (prevented) return;
+  printf("xul: ctxmenu prevented=%d\n", (int)prevented);
+  fflush(stdout);
+  xul_rollup();
+  // Still show the OS menu if content also handled it — better a double
+  // menu than a silent right-click. (Content-drawn menus are rare.)
 
   nsAutoCString pageUrl;
   bool canBack = false, canForward = false;
@@ -261,15 +264,22 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
   if (flMedia) JsonStr(json, "mediaUrl", mediaUrl);
   if (flSel) JsonStr(json, "selectionText", selText);
   json.Append('}');
+  printf("xul: ctxmenu json=%s\n", json.get());
+  fflush(stdout);
 
   EM_ASM(
       {
+        var s = UTF8ToString($0);
+        console.log('[embed] ctxmenu ' + s);
         if (typeof Module !== 'undefined' &&
             typeof Module['geckoOnContextMenu'] === 'function') {
           try {
-            Module['geckoOnContextMenu'](JSON.parse(UTF8ToString($0)));
+            Module['geckoOnContextMenu'](JSON.parse(s));
           } catch (e) {
+            console.log('[embed] ctxmenu parse fail ' + e);
           }
+        } else {
+          console.log('[embed] no geckoOnContextMenu');
         }
       },
       json.get());
