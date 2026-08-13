@@ -239,7 +239,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
       }
     }
 
-    RegisterEmbedChrome();
+    // EmbedPromptFactory lives in embed-chrome.cpp; not linked this disc
+    // (EM_ASM comma-splitting). Context menus / popups / target=_blank do not
+    // need it.
 
     // Populate Services.appinfo (nsIXULAppInfo). XRE_main normally sets the global
     // gAppData from the app's nsXREAppData; this minimal embedding skips XRE, so

@@ -55,7 +55,10 @@ CXXFLAGS=(
 )
 echo ">> compiling embedder (embed-*.cpp)"
 EMBED_OBJS=()
-for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror embed-chrome; do
+# embed-chrome.cpp (nsIPrompt) is compiled once its EM_ASM comma-args are
+# sorted; this disc ships context-menu / popup / target=_blank from the
+# files below. RegisterEmbedChrome is a stub in embed-init.cpp.
+for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror; do
   "$EMXX" "${CXXFLAGS[@]}" -c "$SRC/$src.cpp" -o "$BUILD/$src.o" || exit 1
   EMBED_OBJS+=( "$BUILD/$src.o" )
 done
