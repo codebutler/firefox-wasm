@@ -5,6 +5,7 @@
 //   embed-paint.cpp   software + GPU painting and popup compositing
 //   embed-input.cpp   mouse/keyboard/wheel injection + clipboard
 //   embed-mirror.cpp  DOM-mirror mode (serialize the page to data: URLs)
+//   embed-chrome.cpp  host chrome (nsIPrompt factory)
 //
 // All the Gecko headers the embedder needs are gathered here so each .cpp just
 // includes this one. (If embed compile time becomes a concern, this can be split

@@ -55,7 +55,7 @@ CXXFLAGS=(
 )
 echo ">> compiling embedder (embed-*.cpp)"
 EMBED_OBJS=()
-for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror; do
+for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror embed-chrome; do
   "$EMXX" "${CXXFLAGS[@]}" -c "$SRC/$src.cpp" -o "$BUILD/$src.o" || exit 1
   EMBED_OBJS+=( "$BUILD/$src.o" )
 done
