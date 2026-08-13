@@ -433,6 +433,15 @@ export class Gecko {
           /* embedder bugs must not tear the engine */
         }
       },
+      // Always a function so C++ HostWantsContextMenu / EM_ASM on the
+      // Gecko pthread sees it on Module (same as geckoOnLocationChange).
+      geckoOnContextMenu: (info: GeckoContextMenuInfo) => {
+        try {
+          this.opts.onContextMenu?.(info);
+        } catch {
+          /* embedder bugs must not tear the engine */
+        }
+      },
       preRun: [(m: GeckoModule) => {
         // GPU mode resolves its compositor canvas by SELECTOR ("#screen", hardcoded
         // in GLContextProviderEmscripten). Hand the engine our actual element before
@@ -534,11 +543,6 @@ export class Gecko {
       };
     }
 
-    if (this.opts.onContextMenu) {
-      moduleOpts.geckoOnContextMenu = (info: GeckoContextMenuInfo) => {
-        try { this.opts.onContextMenu?.(info); } catch { /* embedder bugs */ }
-      };
-    }
     if (this.hostPopups) {
       // C++ HostWantsPopups() only checks typeof === 'function'. Pixel delivery
       // is the command-result protocol decoded in blit(), not this stub.

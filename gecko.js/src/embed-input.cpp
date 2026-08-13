@@ -120,7 +120,7 @@ static void JsonStr(nsACString& json, const char* key, const nsACString& val) {
 
 static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
   using namespace mozilla;
-  if (!HostWantsContextMenu() || !ps) return;
+  if (!ps) return;
 
   // Page handlers run during SynthesizeMouseEvent. Read defaultPrevented from
   // a bubble-phase window listener installed just before dispatch (do_mouse).
