@@ -5,6 +5,63 @@
 #include "nsIContent.h"
 #include "nsIRollupListener.h"
 
+static bool HostWantsNewWindow() {
+  return EM_ASM_INT({
+           return (typeof Module !== 'undefined' &&
+                   typeof Module['geckoOnNewWindow'] === 'function')
+                      ? 1
+                      : 0;
+         }) != 0;
+}
+
+// Consume left-clicks on <a target=_blank|_new> and ask the host to open a
+// window. Gecko has one docshell; it cannot host a second content window.
+static bool MaybeHostBlankTarget(mozilla::PresShell* ps, int x, int y) {
+  using namespace mozilla;
+  if (!HostWantsNewWindow() || !ps) return false;
+  int32_t a = AppUnitsPerCSSPixel();
+  nsPoint rootPt(x * a, y * a);
+  nsIContent* content = nullptr;
+  if (nsIFrame* root = ps->GetRootFrame()) {
+    if (nsIFrame* target =
+            nsLayoutUtils::GetFrameForPoint(RelativeTo{root}, rootPt)) {
+      content = target->GetContent();
+    }
+  }
+  nsAutoCString spec;
+  for (nsIContent* n = content; n; n = n->GetParent()) {
+    if (!n->IsHTMLElement(nsGkAtoms::a)) continue;
+    nsAutoString tgt;
+    if (n->IsElement()) {
+      n->AsElement()->GetAttr(kNameSpaceID_None, nsGkAtoms::target, tgt);
+    }
+    if (!(tgt.LowerCaseEqualsLiteral("_blank") ||
+          tgt.LowerCaseEqualsLiteral("_new"))) {
+      continue;
+    }
+    if (nsGenericHTMLElement* html = nsGenericHTMLElement::FromNode(n)) {
+      if (nsCOMPtr<nsIURI> href = html->GetHrefURI()) {
+        href->GetSpec(spec);
+      }
+    }
+    if (spec.IsEmpty()) continue;
+    EM_ASM(
+        {
+          if (typeof Module !== 'undefined' &&
+              typeof Module['geckoOnNewWindow'] === 'function') {
+            try {
+              Module['geckoOnNewWindow'](
+                  {url : UTF8ToString($0), features : ""});
+            } catch (e) {
+            }
+          }
+        },
+        spec.get());
+    return true;
+  }
+  return false;
+}
+
 static bool HostWantsContextMenu() {
   return EM_ASM_INT({
            return (typeof Module !== 'undefined' &&
@@ -259,6 +316,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
         }
       }
     }
+    if (button == 0 && MaybeHostBlankTarget(ps, x, y)) return;
   }
 
   LayoutDeviceIntPoint ref =

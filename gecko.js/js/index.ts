@@ -158,6 +158,8 @@ export interface GeckoOptions {
    * canvas overlay (standalone demo).
    */
   onPopups?: (popups: GeckoPopup[]) => void;
+  /** Optional: `<a target=_blank>` (and later window.open). Unset → engine tries (and fails) to open another docshell. */
+  onNewWindow?: (info: { url: string; features?: string }) => void;
   /**
    * Async fallback for GRE files beyond the baked-in minimal set (mounted at /gre).
    * Either an FsProvider, or a string OPFS path (-> a built-in OPFS-backed provider
@@ -534,6 +536,11 @@ export class Gecko {
       // C++ HostWantsPopups() only checks typeof === 'function'. Pixel delivery
       // is the command-result protocol decoded in blit(), not this stub.
       moduleOpts.geckoOnPopups = () => {};
+    }
+    if (this.opts.onNewWindow) {
+      moduleOpts.geckoOnNewWindow = (info: { url: string; features?: string }) => {
+        try { this.opts.onNewWindow?.(info); } catch { /* embedder bugs */ }
+      };
     }
 
     this.mod = await createGecko(moduleOpts);
