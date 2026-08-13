@@ -190,6 +190,9 @@ int main() {
         case 9:  // set clipboard text (system-clipboard prime before a native paste)
           ok = set_clipboard_text(g_cmd->url);
           break;
+        case 10:  // roll up XUL popups (host dismissed a Yore Surface)
+          xul_rollup();
+          break;
       }
       // Build the result for this op: string ops (5-8) return a UTF-8 buffer; op 9
       // and mirror mode paint nothing; everything else paints a frame (GPU present
@@ -202,9 +205,9 @@ int main() {
         g_cmd->result = buf;
         g_cmd->resultLen = buf ? (uint32_t)strlen((char*)buf) : 0;
         g_cmd->state = ok ? 3 : -1;
-      } else if (g_cmd->op == 9 || g_mirror) {
-        // op 9 (clipboard set) and DOM-mirror produce no painted frame: Gecko did
-        // its work above; we don't blit. (Mirror mode pulls the DOM via op=5.)
+      } else if (g_cmd->op == 9 || g_cmd->op == 10 || g_mirror) {
+        // op 9 (clipboard set), op 10 (rollup), and DOM-mirror produce no painted
+        // frame.
         g_cmd->result = nullptr;
         g_cmd->resultLen = 0;
         g_cmd->state = ok ? 3 : -1;

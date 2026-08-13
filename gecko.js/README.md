@@ -35,6 +35,9 @@ trees that a basic embed doesn't need — notably the Firefox front-end (`browse
 | `fs` | `{ readFile, readdir }` supplying GRE files beyond the baked set (mounted under `/gre`) |
 | `wispUrl` | WISP websocket endpoint; Necko fetches `http(s)://` over it |
 | `assetBase` | URL prefix where you serve `gecko.wasm` + `gecko.data` (default `./`, relative to the page) |
+| `tcpTransport` | optional embedder TCP factory (Necko sockets); when set, WISP is unused |
+| `onLocationChange` | optional; top-level location changes (`nsIWebProgressListener`) |
+| `onContextMenu` | optional; content context-menu payload (engine rolls up XUL first). Unset → XUL menus paint on the canvas |
 | `locateFile`, `print`, `printErr`, `width`, `height`, `forwardInput` | as named |
 
 ### The `fs` provider

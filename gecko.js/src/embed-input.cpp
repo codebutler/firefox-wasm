@@ -1,6 +1,224 @@
 // Input injection (synthesized mouse/keyboard/wheel) + clipboard priming. Split
 // from embed-xul.cpp. See embed-xul.h.
 #include "embed-xul.h"
+#include "mozilla/dom/Selection.h"
+#include "nsIContent.h"
+#include "nsIRollupListener.h"
+
+static bool HostWantsContextMenu() {
+  return EM_ASM_INT({
+           return (typeof Module !== 'undefined' &&
+                   typeof Module['geckoOnContextMenu'] === 'function')
+                      ? 1
+                      : 0;
+         }) != 0;
+}
+
+void xul_rollup() {
+  if (nsXULPopupManager* pm = nsXULPopupManager::GetInstance()) {
+    nsIRollupListener::RollupOptions opts;
+    opts.mCount = 0;
+    pm->Rollup(opts, nullptr);
+  }
+}
+
+static void JsonEsc(const nsACString& in, nsACString& out) {
+  for (uint32_t i = 0; i < in.Length(); i++) {
+    unsigned char c = static_cast<unsigned char>(in[i]);
+    switch (c) {
+      case '"':
+        out.AppendLiteral("\\\"");
+        break;
+      case '\\':
+        out.AppendLiteral("\\\\");
+        break;
+      case '\n':
+        out.AppendLiteral("\\n");
+        break;
+      case '\r':
+        out.AppendLiteral("\\r");
+        break;
+      case '\t':
+        out.AppendLiteral("\\t");
+        break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          snprintf(buf, sizeof(buf), "\\u%04x", c);
+          out.AppendASCII(buf);
+        } else {
+          out.Append(c);
+        }
+    }
+  }
+}
+
+static void JsonStr(nsACString& json, const char* key, const nsACString& val) {
+  json.AppendLiteral(",\"");
+  json.AppendASCII(key);
+  json.AppendLiteral("\":\"");
+  JsonEsc(val, json);
+  json.AppendLiteral("\"");
+}
+
+static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
+  using namespace mozilla;
+  if (!HostWantsContextMenu() || !ps) return;
+
+  // Page handlers run during SynthesizeMouseEvent. Read defaultPrevented from
+  // a bubble-phase window listener installed just before dispatch (do_mouse).
+  char* flag = nullptr;
+  RunChromeScript("window.__geckoCtxPrev?'1':'0'"_ns, &flag);
+  bool prevented = flag && flag[0] == '1';
+  free(flag);
+  xul_rollup();  // never paint a XUL menu when the host owns chrome
+  if (prevented) return;
+
+  nsAutoCString pageUrl;
+  bool canBack = false, canForward = false;
+  nsCOMPtr<nsIWebNavigation> nav = do_QueryInterface(g_docShell);
+  if (nav) {
+    nav->GetCanGoBack(&canBack);
+    nav->GetCanGoForward(&canForward);
+    nsCOMPtr<nsIURI> cur;
+    if (NS_SUCCEEDED(nav->GetCurrentURI(getter_AddRefs(cur))) && cur) {
+      cur->GetSpec(pageUrl);
+    }
+  }
+
+  bool flLink = false, flImage = false, flMedia = false, flSel = false,
+       flEdit = false;
+  nsAutoCString linkUrl, linkText, imageUrl, imageAlt, mediaUrl, selText;
+
+  int32_t a = AppUnitsPerCSSPixel();
+  nsPoint rootPt(x * a, y * a);
+  nsIContent* content = nullptr;
+  if (nsIFrame* root = ps->GetRootFrame()) {
+    if (nsIFrame* target =
+            nsLayoutUtils::GetFrameForPoint(RelativeTo{root}, rootPt)) {
+      content = target->GetContent();
+    }
+  }
+  for (nsIContent* n = content; n; n = n->GetParent()) {
+    if (n->IsHTMLElement(nsGkAtoms::a)) {
+      if (nsGenericHTMLElement* html = nsGenericHTMLElement::FromNode(n)) {
+        if (nsCOMPtr<nsIURI> href = html->GetHrefURI()) {
+          href->GetSpec(linkUrl);
+          flLink = !linkUrl.IsEmpty();
+        }
+      }
+      if (linkText.IsEmpty()) {
+        nsAutoString t;
+        ErrorResult rv;
+        n->GetTextContent(t, rv);
+        rv.SuppressException();
+        if (!t.IsEmpty()) {
+          NS_ConvertUTF16toUTF8 u(t);
+          if (u.Length() > 512) u.Truncate(512);
+          linkText = u;
+        }
+      }
+    }
+    nsCOMPtr<nsIImageLoadingContent> img = do_QueryInterface(n);
+    if (img) {
+      nsCOMPtr<nsIURI> src;
+      img->GetCurrentURI(getter_AddRefs(src));
+      if (src) {
+        src->GetSpec(imageUrl);
+        flImage = !imageUrl.IsEmpty();
+      }
+      if (n->IsElement()) {
+        nsAutoString alt;
+        n->AsElement()->GetAttr(kNameSpaceID_None, nsGkAtoms::alt, alt);
+        if (!alt.IsEmpty()) {
+          NS_ConvertUTF16toUTF8 u(alt);
+          if (u.Length() > 256) u.Truncate(256);
+          imageAlt = u;
+        }
+      }
+    }
+    if (n->IsAnyOfHTMLElements(nsGkAtoms::video, nsGkAtoms::audio)) {
+      nsAutoString src;
+      if (n->IsElement()) {
+        n->AsElement()->GetAttr(kNameSpaceID_None, nsGkAtoms::src, src);
+      }
+      if (!src.IsEmpty()) {
+        NS_ConvertUTF16toUTF8 u(src);
+        mediaUrl = u;
+        flMedia = true;
+      }
+    }
+    if (n->IsAnyOfHTMLElements(nsGkAtoms::input, nsGkAtoms::textarea) ||
+        n->IsEditable()) {
+      flEdit = true;
+    }
+  }
+
+  nsCOMPtr<mozIDOMWindowProxy> winProxy = do_GetInterface(g_docShell);
+  nsPIDOMWindowOuter* outer =
+      winProxy ? nsPIDOMWindowOuter::From(winProxy) : nullptr;
+  if (outer) {
+    if (dom::Selection* sel = outer->GetSelection()) {
+      if (!sel->IsCollapsed()) {
+        nsAutoString t;
+        sel->Stringify(t);
+        if (!t.IsEmpty()) {
+          NS_ConvertUTF16toUTF8 u(t);
+          if (u.Length() > 4096) u.Truncate(4096);
+          selText = u;
+          flSel = true;
+        }
+      }
+    }
+  }
+
+  nsCString json;
+  json.AssignLiteral("{\"x\":");
+  json.AppendInt(x);
+  json.AppendLiteral(",\"y\":");
+  json.AppendInt(y);
+  json.AppendLiteral(",\"canBack\":");
+  json.AppendLiteral(canBack ? "true" : "false");
+  json.AppendLiteral(",\"canForward\":");
+  json.AppendLiteral(canForward ? "true" : "false");
+  json.AppendLiteral(",\"flags\":{");
+  bool comma = false;
+  auto flag = [&](const char* k, bool v) {
+    if (!v) return;
+    if (comma) json.Append(',');
+    comma = true;
+    json.Append('"');
+    json.AppendASCII(k);
+    json.AppendLiteral("\":true");
+  };
+  flag("link", flLink);
+  flag("image", flImage);
+  flag("media", flMedia);
+  flag("selection", flSel);
+  flag("editable", flEdit);
+  json.Append('}');
+  JsonStr(json, "pageUrl", pageUrl);
+  if (flLink) JsonStr(json, "linkUrl", linkUrl);
+  if (flLink && !linkText.IsEmpty()) JsonStr(json, "linkText", linkText);
+  if (flImage) JsonStr(json, "imageUrl", imageUrl);
+  if (flImage && !imageAlt.IsEmpty()) JsonStr(json, "imageAlt", imageAlt);
+  if (flMedia) JsonStr(json, "mediaUrl", mediaUrl);
+  if (flSel) JsonStr(json, "selectionText", selText);
+  json.Append('}');
+
+  EM_ASM(
+      {
+        if (typeof Module !== 'undefined' &&
+            typeof Module['geckoOnContextMenu'] === 'function') {
+          try {
+            Module['geckoOnContextMenu'](JSON.parse(UTF8ToString($0)));
+          } catch (e) {
+          }
+        }
+      },
+      json.get());
+}
+
 // Synthesize a mouse event (evType: 0 move, 1 down, 2 up) at CSS px (x,y) and
 // dispatch it through the full event path (hit-testing, focus, click synthesis).
 void do_mouse(int evType, int x, int y, int button, int clickCount,
@@ -55,6 +273,13 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   nsAutoString type;
   type.AssignASCII(typeStr);
 
+  if (evType == 3 && HostWantsContextMenu()) {
+    RunChromeScript(
+        "window.__geckoCtxPrev=false;"
+        "window.addEventListener('contextmenu',function(e){"
+        "window.__geckoCtxPrev=!!e.defaultPrevented;},{once:true});"_ns);
+  }
+
   dom::SynthesizeMouseEventData data;
   data.mButton = button;
   data.mModifiers = modifiers;
@@ -67,6 +292,10 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   auto rv = nsContentUtils::SynthesizeMouseEvent(ps, widget, type, ref, data,
                                                  options, noCallback);
   (void)rv;
+
+  if (evType == 3) {
+    MaybeHostContextMenu(ps, x, y);
+  }
 
   // Capture the cursor the content specifies under the pointer so the host page
   // can mirror it (cursor: pointer over links, text over inputs, resize handles,

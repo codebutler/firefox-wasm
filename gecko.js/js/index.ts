@@ -85,6 +85,27 @@ export type TcpTransportFactory = (
   },
 ) => { send: (chunk: Uint8Array) => void; close: () => void };
 
+export interface GeckoContextMenuInfo {
+  x: number;
+  y: number;
+  pageUrl?: string;
+  canBack?: boolean;
+  canForward?: boolean;
+  flags?: {
+    link?: boolean;
+    image?: boolean;
+    media?: boolean;
+    selection?: boolean;
+    editable?: boolean;
+  };
+  linkUrl?: string;
+  linkText?: string;
+  imageUrl?: string;
+  imageAlt?: string;
+  mediaUrl?: string;
+  selectionText?: string;
+}
+
 export interface GeckoOptions {
   /**
    * The page canvas the engine composites into. In software mode it receives
@@ -114,6 +135,12 @@ export interface GeckoOptions {
    * discs built before this callback existed — poller remains the fallback.
    */
   onLocationChange?: (url: string) => void;
+  /**
+   * Optional: called when content would show a context menu (right-click /
+   * ContextMenu key). The engine rolls up any XUL popup first. Unset → the
+   * engine paints XUL menus onto the canvas (standalone demo).
+   */
+  onContextMenu?: (info: GeckoContextMenuInfo) => void;
   /**
    * Async fallback for GRE files beyond the baked-in minimal set (mounted at /gre).
    * Either an FsProvider, or a string OPFS path (-> a built-in OPFS-backed provider
@@ -151,7 +178,7 @@ const OP = URLOFF + 8192,
   DX = OP + 40, DY = OP + 44, KEYVAL = OP + 48, CURSOR = KEYVAL + 64;
 
 const OP_LOAD = 0, OP_MOUSE = 1, OP_KEY = 2, OP_WHEEL = 3, OP_PAINT = 4, OP_EVAL = 5;
-const OP_CLIP_SET = 9;
+const OP_CLIP_SET = 9, OP_ROLLUP = 10;
 const MOD_ALT = 0x1, MOD_CTRL = 0x2, MOD_SHIFT = 0x4, MOD_META = 0x8;
 
 // StyleCursorKind index -> CSS cursor keyword (ServoStyleConsts.h order).
@@ -241,6 +268,7 @@ export class Gecko {
   private popupImg: ImageData | null = null;
   private popupDst32: Uint32Array | null = null;
   private popupShown = false;
+  private lastPtr = { x: 0, y: 0 };
   private detach: Array<() => void> = [];
   /**
    * Resolves when the engine's FIRST frame has actually reached the canvas.
@@ -373,6 +401,13 @@ export class Gecko {
       geckoOnLocationChange: (url: string) => {
         try {
           this.opts.onLocationChange?.(url);
+        } catch {
+          /* embedder bugs must not tear the engine */
+        }
+      },
+      geckoOnContextMenu: (info: GeckoContextMenuInfo) => {
+        try {
+          this.opts.onContextMenu?.(info);
         } catch {
           /* embedder bugs must not tear the engine */
         }
@@ -535,6 +570,11 @@ export class Gecko {
   /** Session history forward. */
   async goForward(): Promise<void> {
     await this.evalChrome('history.forward(); ""');
+  }
+
+  /** Roll up any open XUL popups (host dismissed a popup Surface). */
+  async rollup(): Promise<void> {
+    await this.run({ op: OP_ROLLUP });
   }
 
   /** Stop loops, detach input handlers. (The wasm module is not torn down.) */
@@ -839,13 +879,13 @@ export class Gecko {
       c.addEventListener(t, h as EventListener);
       this.detach.push(() => c.removeEventListener(t, h as EventListener));
     };
-    on('mousemove', (e) => { const p = this.xy(e); this.run({ op: OP_MOUSE, evType: 0, x: p.x, y: p.y, buttons: e.buttons, modifiers: this.mods(e) }); });
-    on('mousedown', (e) => { c.focus(); const p = this.xy(e); this.run({ op: OP_MOUSE, evType: 1, x: p.x, y: p.y, button: e.button, buttons: e.buttons, clickCount: e.detail, modifiers: this.mods(e) }); });
-    on('mouseup', (e) => { const p = this.xy(e); this.run({ op: OP_MOUSE, evType: 2, x: p.x, y: p.y, button: e.button, buttons: e.buttons, clickCount: e.detail, modifiers: this.mods(e) }); });
+    on('mousemove', (e) => { const p = this.xy(e); this.lastPtr = p; this.run({ op: OP_MOUSE, evType: 0, x: p.x, y: p.y, buttons: e.buttons, modifiers: this.mods(e) }); });
+    on('mousedown', (e) => { c.focus(); const p = this.xy(e); this.lastPtr = p; this.run({ op: OP_MOUSE, evType: 1, x: p.x, y: p.y, button: e.button, buttons: e.buttons, clickCount: e.detail, modifiers: this.mods(e) }); });
+    on('mouseup', (e) => { const p = this.xy(e); this.lastPtr = p; this.run({ op: OP_MOUSE, evType: 2, x: p.x, y: p.y, button: e.button, buttons: e.buttons, clickCount: e.detail, modifiers: this.mods(e) }); });
     // Forward the contextmenu (evType=3) to the engine: a synthesized right
     // mousedown/up alone doesn't generate eContextMenu in the headless build, so
     // without this no context menu ever opens (embed-xul.cpp do_mouse).
-    on('contextmenu', (e) => { e.preventDefault(); const p = this.xy(e); this.run({ op: OP_MOUSE, evType: 3, x: p.x, y: p.y, button: 2, buttons: e.buttons, modifiers: this.mods(e) }); });
+    on('contextmenu', (e) => { e.preventDefault(); const p = this.xy(e); this.lastPtr = p; this.run({ op: OP_MOUSE, evType: 3, x: p.x, y: p.y, button: 2, buttons: e.buttons, modifiers: this.mods(e) }); });
     on('wheel', (e) => { const p = this.xy(e); this.run({ op: OP_WHEEL, x: p.x, y: p.y, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: this.mods(e) }); e.preventDefault(); });
     // Printable keys carry their char code (matches the original embed-xul loader).
     // The engine doesn't insert text for Ctrl/Meta combos anyway (the editor's
@@ -866,6 +906,12 @@ export class Gecko {
           (e.key === 'v' || e.key === 'V')) {
         e.preventDefault();
         void this.pasteThenKey(keyItem(e, 0));
+        return;
+      }
+      if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+        e.preventDefault();
+        const p = this.lastPtr;
+        this.run({ op: OP_MOUSE, evType: 3, x: p.x, y: p.y, button: 2, buttons: 0, modifiers: this.mods(e) });
         return;
       }
       this.run(keyItem(e, 0));
