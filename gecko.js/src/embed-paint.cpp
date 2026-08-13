@@ -1,6 +1,8 @@
 // Painting: software RenderDocument blit, GPU/WebRender present, and popup
 // compositing/overlay. Split from embed-xul.cpp. See embed-xul.h.
 #include "embed-xul.h"
+#include <cstring>
+#include <cstdlib>
 // Paint the current document of the persistent browser to a fresh BGRA buffer
 // (width*height*4 bytes). Caller owns/free()s the buffer.
 // Composite any open popups (menus, context menus, the app-menu panel, <select>
@@ -71,6 +73,127 @@ static int composite_visible_popups(gfxContext* ctx, mozilla::PresShell* ps,
     painted++;
   }
   return painted;
+}
+
+static bool HostWantsPopups() {
+  return EM_ASM_INT({
+           return (typeof Module !== 'undefined' &&
+                   typeof Module['geckoOnPopups'] === 'function')
+                      ? 1
+                      : 0;
+         }) != 0;
+}
+
+struct PaintedPopup {
+  int32_t id, x, y, w, h;
+  uint8_t* pix;
+  uint32_t len;
+};
+
+// Tight BGRA per visible popup, packed as:
+//   u32 count
+//   repeat count: i32 id,x,y,w,h; u32 byteLength; u8 pixels[byteLength]; pad to 4
+// Caller free()s. Null when nothing is open.
+static uint8_t* paint_popup_windows(int width, int height, int32_t* outLen) {
+  using namespace mozilla;
+  using namespace mozilla::gfx;
+  using mozilla::dom::Document;
+  if (outLen) *outLen = 0;
+  if (!g_docShell) return nullptr;
+  PresShell* ps = g_docShell->GetPresShell();
+  if (!ps) return nullptr;
+  nsXULPopupManager* pm = nsXULPopupManager::GetInstance();
+  if (!pm) return nullptr;
+  nsTArray<nsMenuPopupFrame*> popups;
+  pm->GetVisiblePopups(popups);
+  if (popups.IsEmpty()) return nullptr;
+
+  int32_t appPerCss = AppUnitsPerCSSPixel();
+  // Same size/flush dance as composite_visible_popups (do not hold frame
+  // pointers across a flush).
+  bool sized = false;
+  for (auto* pf : popups) {
+    if (!pf) continue;
+    LayoutDeviceIntRect b = pf->CalcWidgetBounds();
+    if (b.width <= 0 || b.height <= 0) {
+      pf->SetSize(nsSize(width * appPerCss, height * appPerCss));
+      ps->FrameNeedsReflow(pf, mozilla::IntrinsicDirty::FrameAncestorsAndDescendants,
+                           NS_FRAME_IS_DIRTY);
+      sized = true;
+    }
+  }
+  if (sized) {
+    if (Document* d = ps->GetDocument())
+      d->FlushPendingNotifications(mozilla::FlushType::Layout);
+    popups.Clear();
+    pm->GetVisiblePopups(popups);
+    for (auto* pf : popups)
+      if (pf) pf->SetPopupPosition(false);
+    if (Document* d = ps->GetDocument())
+      d->FlushPendingNotifications(mozilla::FlushType::Layout);
+    popups.Clear();
+    pm->GetVisiblePopups(popups);
+  }
+
+  nsTArray<PaintedPopup> painted;
+  for (size_t i = popups.Length(); i-- > 0;) {
+    nsMenuPopupFrame* pf = popups[i];
+    if (!pf) continue;
+    LayoutDeviceIntRect b = pf->CalcWidgetBounds();
+    if (b.width <= 0 || b.height <= 0) continue;
+    size_t need = (size_t)b.width * (size_t)b.height * 4;
+    uint8_t* pix = (uint8_t*)calloc(need, 1);
+    if (!pix) continue;
+    RefPtr<DrawTarget> dt = Factory::CreateDrawTargetForData(
+        BackendType::SKIA, pix, IntSize(b.width, b.height), b.width * 4,
+        SurfaceFormat::B8G8R8A8);
+    if (!dt) { free(pix); continue; }
+    UniquePtr<gfxContext> ctx = gfxContext::CreateOrNull(dt);
+    if (!ctx) { free(pix); continue; }
+    nsRegion dirty(pf->InkOverflowRectRelativeToSelf());
+    nsLayoutUtils::PaintFrame(
+        ctx.get(), pf, dirty, NS_RGBA(0, 0, 0, 0),
+        static_cast<mozilla::nsDisplayListBuilderMode>(0),
+        nsLayoutUtils::PaintFrameFlags::SyncDecodeImages);
+    PaintedPopup rec;
+    rec.id = (int32_t)(uintptr_t)pf;
+    rec.x = b.x;
+    rec.y = b.y;
+    rec.w = b.width;
+    rec.h = b.height;
+    rec.pix = pix;
+    rec.len = (uint32_t)need;
+    painted.AppendElement(rec);
+  }
+  if (painted.IsEmpty()) return nullptr;
+
+  size_t total = 4;
+  for (auto& rec : painted) {
+    uint32_t pad = (4 - (rec.len % 4)) % 4;
+    total += 24 + rec.len + pad;
+  }
+  uint8_t* out = (uint8_t*)malloc(total);
+  if (!out) {
+    for (auto& rec : painted) free(rec.pix);
+    return nullptr;
+  }
+  uint32_t count = painted.Length();
+  memcpy(out, &count, 4);
+  size_t off = 4;
+  for (auto& rec : painted) {
+    memcpy(out + off, &rec.id, 4); off += 4;
+    memcpy(out + off, &rec.x, 4); off += 4;
+    memcpy(out + off, &rec.y, 4); off += 4;
+    memcpy(out + off, &rec.w, 4); off += 4;
+    memcpy(out + off, &rec.h, 4); off += 4;
+    memcpy(out + off, &rec.len, 4); off += 4;
+    memcpy(out + off, rec.pix, rec.len); off += rec.len;
+    uint32_t pad = (4 - (rec.len % 4)) % 4;
+    if (pad) { memset(out + off, 0, pad); off += pad; }
+    free(rec.pix);
+  }
+  if (outLen) *outLen = (int32_t)total;
+  return out;
 }
 
 uint8_t* xul_paint(int width, int height) {
@@ -179,9 +302,11 @@ void gpu_ensure_active(int width, int height) {
 // and re-freed it (double-free), corrupting the heap. The fault surfaced far away
 // (e.g. the GC write barrier hitting "unreachable") and only in GPU mode, since the
 // software path (xul_paint) already calloc's a fresh buffer each frame.
-uint8_t* paint_popup_overlay(int width, int height) {
+uint8_t* paint_popup_overlay(int width, int height, int32_t* outLen) {
   using namespace mozilla;
   using namespace mozilla::gfx;
+  if (outLen) *outLen = 0;
+  if (HostWantsPopups()) return paint_popup_windows(width, height, outLen);
   if (!g_docShell) return nullptr;
   PresShell* ps = g_docShell->GetPresShell();
   if (!ps) return nullptr;
@@ -206,6 +331,7 @@ uint8_t* paint_popup_overlay(int width, int height) {
   int n = composite_visible_popups(ctx.get(), ps, width, height,
                                    AppUnitsPerCSSPixel());
   if (n <= 0) { free(buf); return nullptr; }  // popups vanished mid-paint
+  if (outLen) *outLen = (int32_t)need;
   return buf;  // caller stores in g_cmd->result and free()s it next command
 }
 

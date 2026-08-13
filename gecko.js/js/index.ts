@@ -106,6 +106,16 @@ export interface GeckoContextMenuInfo {
   selectionText?: string;
 }
 
+/** Tight BGRA popup from paint_popup_windows (host-owned copy, not a HEAP view). */
+export interface GeckoPopup {
+  id: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  pixels: Uint8Array;
+}
+
 export interface GeckoOptions {
   /**
    * The page canvas the engine composites into. In software mode it receives
@@ -141,6 +151,13 @@ export interface GeckoOptions {
    * engine paints XUL menus onto the canvas (standalone demo).
    */
   onContextMenu?: (info: GeckoContextMenuInfo) => void;
+  /**
+   * Optional: called each time visible nsMenuPopupFrame popups are painted
+   * (`<select>`, autocomplete). Each entry is a tight BGRA buffer at widget
+   * bounds. Empty array = all closed. Unset → popups composite onto the
+   * canvas overlay (standalone demo).
+   */
+  onPopups?: (popups: GeckoPopup[]) => void;
   /**
    * Async fallback for GRE files beyond the baked-in minimal set (mounted at /gre).
    * Either an FsProvider, or a string OPFS path (-> a built-in OPFS-backed provider
@@ -268,6 +285,7 @@ export class Gecko {
   private popupImg: ImageData | null = null;
   private popupDst32: Uint32Array | null = null;
   private popupShown = false;
+  private hostPopups = false;
   private lastPtr = { x: 0, y: 0 };
   private detach: Array<() => void> = [];
   /**
@@ -323,6 +341,7 @@ export class Gecko {
   constructor(opts: GeckoOptions) {
     this.firstPaint = new Promise<void>((r) => (this.resolveFirstPaint = r));
     this.opts = opts;
+    this.hostPopups = typeof opts.onPopups === 'function';
     this.canvas = opts.canvas;
     this.W = opts.width ?? this.canvas.width ?? 800;
     this.H = opts.height ?? this.canvas.height ?? 600;
@@ -401,13 +420,6 @@ export class Gecko {
       geckoOnLocationChange: (url: string) => {
         try {
           this.opts.onLocationChange?.(url);
-        } catch {
-          /* embedder bugs must not tear the engine */
-        }
-      },
-      geckoOnContextMenu: (info: GeckoContextMenuInfo) => {
-        try {
-          this.opts.onContextMenu?.(info);
         } catch {
           /* embedder bugs must not tear the engine */
         }
@@ -513,6 +525,17 @@ export class Gecko {
       };
     }
 
+    if (this.opts.onContextMenu) {
+      moduleOpts.geckoOnContextMenu = (info: GeckoContextMenuInfo) => {
+        try { this.opts.onContextMenu?.(info); } catch { /* embedder bugs */ }
+      };
+    }
+    if (this.hostPopups) {
+      // C++ HostWantsPopups() only checks typeof === 'function'. Pixel delivery
+      // is the command-result protocol decoded in blit(), not this stub.
+      moduleOpts.geckoOnPopups = () => {};
+    }
+
     this.mod = await createGecko(moduleOpts);
     await ready;
     this.cmd = this.mod._xul_cmd_ptr();
@@ -575,6 +598,32 @@ export class Gecko {
   /** Roll up any open XUL popups (host dismissed a popup Surface). */
   async rollup(): Promise<void> {
     await this.run({ op: OP_ROLLUP });
+  }
+
+  /** Inject a mouse event in engine CSS px (popup Surfaces forward here). */
+  async sendMouse(opts: {
+    evType: number; x: number; y: number;
+    button?: number; buttons?: number; modifiers?: number; clickCount?: number;
+  }): Promise<void> {
+    await this.run({
+      op: OP_MOUSE,
+      evType: opts.evType,
+      x: opts.x, y: opts.y,
+      button: opts.button ?? 0,
+      buttons: opts.buttons ?? -1,
+      clickCount: opts.clickCount ?? 0,
+      modifiers: opts.modifiers ?? 0,
+    });
+  }
+
+  async sendWheel(opts: {
+    x: number; y: number; deltaX: number; deltaY: number; modifiers?: number;
+  }): Promise<void> {
+    await this.run({
+      op: OP_WHEEL, x: opts.x, y: opts.y,
+      deltaX: opts.deltaX, deltaY: opts.deltaY,
+      modifiers: opts.modifiers ?? 0,
+    });
   }
 
   /** Stop loops, detach input handlers. (The wasm module is not torn down.) */
@@ -648,6 +697,12 @@ export class Gecko {
     const m = this.mod!;
     const i32 = () => m.HEAP32, u8 = () => m.HEAPU8;
     const set = (off: number, v: number) => { i32()[(this.cmd + off) >> 2] = v | 0; };
+    try {
+      const vw = (globalThis as { innerWidth?: number }).innerWidth || this.W;
+      const vh = (globalThis as { innerHeight?: number }).innerHeight || this.H;
+      (m as unknown as { geckoScreen?: { sw: number; sh: number } }).geckoScreen =
+        { sw: vw, sh: vh };
+    } catch { /* no window */ }
     set(W, this.W); set(H, this.H);
     set(OP, item.op);
     set(EVTYPE, item.evType || 0);
@@ -702,7 +757,11 @@ export class Gecko {
     const resPtr = i32[(this.cmd + RES) >> 2], len = i32[(this.cmd + LEN) >> 2];
     // GPU mode: WebRender already presented the main scene to #glout; the result
     // buffer (if any) is the popup overlay. Draw it on the 2D overlay above #glout.
-    if (this.gpu) { this.drawPopupOverlay(resPtr, len); return 0; }
+    if (this.gpu) {
+      if (this.hostPopups) { this.emitHostPopups(resPtr, len); return 0; }
+      this.drawPopupOverlay(resPtr, len);
+      return 0;
+    }
     if (!this.ctx) return 0;
     if (!resPtr || !len) return 0;
     if (!this.blitImg) {
@@ -725,6 +784,36 @@ export class Gecko {
     }
     this.ctx.putImageData(this.blitImg, 0, 0);
     return nonWhite;
+  }
+
+  private emitHostPopups(resPtr: number, len: number): void {
+    const popups: GeckoPopup[] = [];
+    if (resPtr && len >= 4) {
+      const u8 = this.mod!.HEAPU8;
+      if (!((resPtr & 3) || resPtr + len > u8.buffer.byteLength)) {
+        const view = new DataView(u8.buffer, resPtr, len);
+        const count = view.getUint32(0, true);
+        let off = 4;
+        for (let i = 0; i < count; i++) {
+          if (off + 24 > len) break;
+          const id = view.getInt32(off, true);
+          const x = view.getInt32(off + 4, true);
+          const y = view.getInt32(off + 8, true);
+          const w = view.getInt32(off + 12, true);
+          const h = view.getInt32(off + 16, true);
+          const plen = view.getUint32(off + 20, true);
+          off += 24;
+          if (off + plen > len) break;
+          const pixels = new Uint8Array(plen);
+          pixels.set(u8.subarray(resPtr + off, resPtr + off + plen));
+          off += plen;
+          off += (4 - (plen % 4)) % 4;
+          popups.push({ id, x, y, w, h, pixels });
+        }
+      }
+    }
+    this.popupShown = popups.length > 0;
+    try { this.opts.onPopups?.(popups); } catch { /* embedder bugs */ }
   }
 
   // GPU mode: draw the engine's popup overlay buffer (BGRA: transparent backdrop +
@@ -815,6 +904,10 @@ export class Gecko {
     wrap.style.display = 'inline-block';
     wrap.style.lineHeight = '0';
     c.style.display = 'block';
+    if (this.hostPopups) {
+      this.syncGpuSize();
+      return;
+    }
     // Popup overlay: a 2D canvas stacked ABOVE #screen (popups must draw over the main
     // scene). zIndex 2 so it wins; pointer-events none so input still reaches #screen.
     // drawPopupOverlay() paints the engine's popup buffer here.

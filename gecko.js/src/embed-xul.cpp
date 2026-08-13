@@ -220,14 +220,21 @@ int main() {
             // Main scene presents autonomously (refresh driver, see gpu_ensure_active);
             // here we just keep the compositor active/sized and pull the popup overlay.
             gpu_ensure_active(g_cmd->width, g_cmd->height);
-            buf = paint_popup_overlay(g_cmd->width, g_cmd->height);  // null = no popups
+            int32_t overlayLen = 0;
+            buf = paint_popup_overlay(g_cmd->width, g_cmd->height, &overlayLen);
+            g_cmd->result = buf;
+            g_cmd->resultLen = buf ? overlayLen : 0;
+          } else {
+            g_cmd->result = nullptr;
+            g_cmd->resultLen = 0;
           }
-        } else if (ok) {
-          buf = xul_paint(g_cmd->width, g_cmd->height);
+          g_cmd->state = ok ? 3 : -1;
+        } else {
+          if (ok) buf = xul_paint(g_cmd->width, g_cmd->height);
+          g_cmd->result = buf;
+          g_cmd->resultLen = buf ? g_cmd->width * g_cmd->height * 4 : 0;
+          g_cmd->state = (buf != nullptr) ? 3 : -1;
         }
-        g_cmd->result = buf;
-        g_cmd->resultLen = buf ? g_cmd->width * g_cmd->height * 4 : 0;
-        g_cmd->state = (g_gpu ? ok : (buf != nullptr)) ? 3 : -1;  // done / error
       }
     }
   }

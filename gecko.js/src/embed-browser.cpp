@@ -92,6 +92,21 @@ NS_IMETHODIMP RenderLoadListener::OnContentBlockingEvent(nsIWebProgress*,
 static void RefreshScreen(int width, int height) {
   using namespace mozilla;
   using namespace mozilla::widget;
+  // Host may publish the desktop/viewport size on Module.geckoScreen so
+  // GetConstraintRect can place popups that hang off the content window
+  // (overflow right/bottom). Fall back to the window size.
+  int sw = EM_ASM_INT({
+    return (typeof Module !== 'undefined' && Module['geckoScreen'])
+               ? (Module['geckoScreen'].sw | 0)
+               : 0;
+  });
+  int sh = EM_ASM_INT({
+    return (typeof Module !== 'undefined' && Module['geckoScreen'])
+               ? (Module['geckoScreen'].sh | 0)
+               : 0;
+  });
+  if (sw > width) width = sw;
+  if (sh > height) height = sh;
   LayoutDeviceIntRect r(0, 0, width, height);
   nsTArray<RefPtr<Screen>> screens;
   screens.AppendElement(MakeRefPtr<Screen>(

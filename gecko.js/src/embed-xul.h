@@ -184,7 +184,7 @@ bool RunChromeScript(const nsACString& aScript, char** aOutResult = nullptr);
 
 uint8_t* xul_paint(int width, int height);                   // embed-paint.cpp
 void gpu_ensure_active(int width, int height);               // embed-paint.cpp
-uint8_t* paint_popup_overlay(int width, int height);         // embed-paint.cpp
+uint8_t* paint_popup_overlay(int width, int height, int32_t* outLen);
 void PumpEvents();                                           // embed-paint.cpp
 
 void do_mouse(int evType, int x, int y, int button, int clickCount,

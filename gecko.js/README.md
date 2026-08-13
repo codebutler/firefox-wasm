@@ -38,6 +38,7 @@ trees that a basic embed doesn't need — notably the Firefox front-end (`browse
 | `tcpTransport` | optional embedder TCP factory (Necko sockets); when set, WISP is unused |
 | `onLocationChange` | optional; top-level location changes (`nsIWebProgressListener`) |
 | `onContextMenu` | optional; content context-menu payload (engine rolls up XUL first). Unset → XUL menus paint on the canvas |
+| `onPopups` | optional; tight BGRA frames for `<select>` / autocomplete (`nsMenuPopupFrame`). Empty array = closed. Unset → canvas overlay |
 | `locateFile`, `print`, `printErr`, `width`, `height`, `forwardInput` | as named |
 
 ### The `fs` provider
