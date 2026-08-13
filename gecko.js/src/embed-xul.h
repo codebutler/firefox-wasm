@@ -194,6 +194,7 @@ void do_key(int evType, const char* keyUtf8, int keyCode, int charCode,
             int modifiers);
 bool set_clipboard_text(const char* utf8);
 void xul_rollup();
+void RegisterEmbedChrome();
 
 char* mirror_collect_images();                               // embed-mirror.cpp
 char* mirror_collect_css();

@@ -239,6 +239,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
       }
     }
 
+    RegisterEmbedChrome();
+
     // Populate Services.appinfo (nsIXULAppInfo). XRE_main normally sets the global
     // gAppData from the app's nsXREAppData; this minimal embedding skips XRE, so
     // gAppData stays null -> the nsIXULAppInfo interface is not exposed and

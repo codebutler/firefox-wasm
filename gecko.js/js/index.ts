@@ -161,6 +161,13 @@ export interface GeckoOptions {
   /** Optional: `<a target=_blank>` (and later window.open). Unset → engine tries (and fails) to open another docshell. */
   onNewWindow?: (info: { url: string; features?: string }) => void;
   /**
+   * Optional: nsIPrompt (alert/confirm/prompt). Must return a Promise
+   * `{ ok, value?, button? }`. Unset → Alert is a no-op / Confirm returns true.
+   */
+  onPrompt?: (req: Record<string, unknown>) => Promise<{
+    ok: boolean; value?: string; button?: number; user?: string; pass?: string;
+  }>;
+  /**
    * Async fallback for GRE files beyond the baked-in minimal set (mounted at /gre).
    * Either an FsProvider, or a string OPFS path (-> a built-in OPFS-backed provider
    * rooted there). Omit for baked-only.
@@ -540,6 +547,15 @@ export class Gecko {
     if (this.opts.onNewWindow) {
       moduleOpts.geckoOnNewWindow = (info: { url: string; features?: string }) => {
         try { this.opts.onNewWindow?.(info); } catch { /* embedder bugs */ }
+      };
+    }
+    if (this.opts.onPrompt) {
+      moduleOpts.geckoOnPrompt = (req: Record<string, unknown>) => {
+        try {
+          return Promise.resolve(this.opts.onPrompt!(req));
+        } catch {
+          return Promise.resolve({ ok: false });
+        }
       };
     }
 
