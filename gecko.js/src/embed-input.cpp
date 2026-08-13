@@ -124,10 +124,10 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
 
   // Page handlers run during SynthesizeMouseEvent. Read defaultPrevented from
   // a bubble-phase window listener installed just before dispatch (do_mouse).
-  char* flag = nullptr;
-  RunChromeScript("window.__geckoCtxPrev?'1':'0'"_ns, &flag);
-  bool prevented = flag && flag[0] == '1';
-  free(flag);
+  char* prevFlag = nullptr;
+  RunChromeScript("window.__geckoCtxPrev?'1':'0'"_ns, &prevFlag);
+  bool prevented = prevFlag && prevFlag[0] == '1';
+  free(prevFlag);
   xul_rollup();  // never paint a XUL menu when the host owns chrome
   if (prevented) return;
 
@@ -215,16 +215,15 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
   nsPIDOMWindowOuter* outer =
       winProxy ? nsPIDOMWindowOuter::From(winProxy) : nullptr;
   if (outer) {
-    if (dom::Selection* sel = outer->GetSelection()) {
-      if (!sel->IsCollapsed()) {
-        nsAutoString t;
-        sel->Stringify(t);
-        if (!t.IsEmpty()) {
-          NS_ConvertUTF16toUTF8 u(t);
-          if (u.Length() > 4096) u.Truncate(4096);
-          selText = u;
-          flSel = true;
-        }
+    RefPtr<dom::Selection> sel = outer->GetSelection();
+    if (sel && !sel->IsCollapsed()) {
+      nsAutoString t;
+      sel->Stringify(t);
+      if (!t.IsEmpty()) {
+        NS_ConvertUTF16toUTF8 u(t);
+        if (u.Length() > 4096) u.Truncate(4096);
+        selText = u;
+        flSel = true;
       }
     }
   }
@@ -235,12 +234,12 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
   json.AppendLiteral(",\"y\":");
   json.AppendInt(y);
   json.AppendLiteral(",\"canBack\":");
-  json.AppendLiteral(canBack ? "true" : "false");
+  json.AppendASCII(canBack ? "true" : "false");
   json.AppendLiteral(",\"canForward\":");
-  json.AppendLiteral(canForward ? "true" : "false");
+  json.AppendASCII(canForward ? "true" : "false");
   json.AppendLiteral(",\"flags\":{");
   bool comma = false;
-  auto flag = [&](const char* k, bool v) {
+  auto addFlag = [&](const char* k, bool v) {
     if (!v) return;
     if (comma) json.Append(',');
     comma = true;
@@ -248,11 +247,11 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
     json.AppendASCII(k);
     json.AppendLiteral("\":true");
   };
-  flag("link", flLink);
-  flag("image", flImage);
-  flag("media", flMedia);
-  flag("selection", flSel);
-  flag("editable", flEdit);
+  addFlag("link", flLink);
+  addFlag("image", flImage);
+  addFlag("media", flMedia);
+  addFlag("selection", flSel);
+  addFlag("editable", flEdit);
   json.Append('}');
   JsonStr(json, "pageUrl", pageUrl);
   if (flLink) JsonStr(json, "linkUrl", linkUrl);
