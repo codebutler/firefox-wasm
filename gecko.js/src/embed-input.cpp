@@ -135,15 +135,37 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   }
 
   // Non-APZ (software) path: the dispatched wheel event is "consumed" by the event
-  // manager (eConsumeNoDefault) but the scroll isn't applied. If the position didn't
-  // move and content didn't preventDefault (e.g. a custom scroller / map), apply the
-  // scroll to the root scroll frame ourselves. Use Smooth mode so the GPU compositor
-  // animates it over refresh-driver ticks.
+  // manager (eConsumeNoDefault) but the scroll isn't applied for network-loaded
+  // documents (wisp). If the root scroll frame's position didn't move and content
+  // didn't preventDefault (e.g. a custom scroller / map), apply the scroll to the
+  // root scroll frame ourselves.
+  //
+  // ScrollMode::Instant, not Smooth: Smooth animates over refresh-driver ticks on
+  // the compositor, and in headless software rendering nothing drives that
+  // animation, so a Smooth fallback never visibly moves (measured: zero motion on
+  // http(s) documents even with large deltas). Instant applies the scroll now.
   widget->DispatchEvent(&ev);
-  if (sf && sf->GetScrollPosition() == before && !ev.DefaultPrevented()) {
+
+  static int s_scrollDiag = 0;
+  if (s_scrollDiag < 10) {
+    s_scrollDiag++;
+    // Diagnose why the fallback does or doesn't fire for a given document type:
+    // sf missing -> wrong presShell; prevented -> content handled it;
+    // scrollable<=port -> the doc has no vertical overflow (print-like view).
+    printf("do_wheel: sf=%p prevented=%d rootMoved=%d scrollableH=%d portH=%d\n",
+           (void*)sf, ev.DefaultPrevented() ? 1 : 0,
+           !sf || sf->GetScrollPosition() == before
+               ? 0
+               : 1,
+           sf ? sf->GetScrollableRect().Height() : -1,
+           sf ? sf->GetScrollPortRect().Height() : -1);
+    fflush(stdout);
+  }
+  if (sf && sf->GetScrollPosition() == before && !ev.DefaultPrevented() &&
+      sf->GetScrollableRect().Height() > sf->GetScrollPortRect().Height()) {
     sf->ScrollToCSSPixels(
         CSSPoint::FromAppUnits(before) + CSSPoint((float)dx, (float)dy),
-        ScrollMode::Smooth);
+        ScrollMode::Instant);
   }
 }
 
