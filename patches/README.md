@@ -111,3 +111,13 @@ dense-number fast path with a deopt flag), `MNewPrivateName` (`#priv`),
 
 Generators still bail (`entry-alwaysBails`); async/Promise and a couple of string
 methods are unsupported by the minimal embed itself (fail in PBL too).
+
+### 7. Array/string/math/typed-array/DataView/Reflect probe
+
+Third probe (`micro kitchen-sink3`): `MIsTypedArrayConstructor` (pure class
+check) and `MGuardFuse` (deopt if the realm fuse popped; looked up by index in
+the runtime, no per-script dependency registration). Everything else in the
+probe (Array/String/Math/Date/TypedArray/DataView/Reflect/Object methods, tagged
+templates) already compiled. `new.target` (`MNewTarget`) still bails: the JIT
+entry does not plumb new.target, so it is left to PBL. `localeCompare` traps in
+the minimal embed itself (intl disabled).
