@@ -11,6 +11,7 @@ Baseline (before this session) and the three engine patches in `patches/`:
 | 2e5da97 | Date op family lowering + `MConstant` Int64/magic + `Box(Float32)` | `micro date-ops` 24.6→18.0 ms (~1.37×), 4 bails → 0 |
 | d4727f8 | mixed Int32/Double arithmetic emitted **invalid wasm** (function silently in PBL) | `micro mixed-arith` 43.5→1.7 ms (~25×) |
 | 59b0638 | `GuardHasAttachedArrayBuffer`, `ToIntegerIndex`, `MMinMax` IntPtr/Float32, IntPtr `Add/Sub/Mul`; `MTypedArraySubarray` staged off | `micro minmax-idx`; pdfjs bail chain shortened |
+| (this session, 5th) | `Math.hypot`/`Math.sign`, object-literal accessor definitions (`InitProp/ElemGetterSetter`), typed-array resizability guards | `micro kitchen-sink` (new, 10 feature groups) |
 | (this session, 4th) | conversions (`IntPtrToDouble`, `Int64<->IntPtr`, `ExtendInt32ToInt64`, `WrapInt64ToInt32`), `SameValue`/`SameValueDouble`, `Atan2`, `ArrayBufferViewByteOffset`, `NegativeToUndefined`, `LoadValueTag`, `IdToStringOrSymbol`, guards (`GuardIntPtrIsNonNegative`, `GuardInt32Range`, `GuardIsExtensible`), `Nop`/`Assert*` no-ops | `micro samevalue-atan2` 1.02× → 9.23× |
 
 All engine changes are in `patches/0001-wasmjit-lowering-improvements.patch`

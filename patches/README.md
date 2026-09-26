@@ -90,3 +90,12 @@ More whole-function bails found by `GECKO_WJ_LOGBAIL` on a probe that uses them
   (deopt on miss, passthrough on hit).
 * `MArrayBufferViewByteOffset` — inline `byteOffset` PrivateValue slot read.
 * `MNop`, `MAssertFloat32`, `MAssertCanElidePostWriteBarrier` — no-ops.
+
+### 5. `Math.hypot`/`Math.sign`, object-literal accessors, typed-array resizability
+
+Found by a broad kitchen-sink probe (`micro kitchen-sink`, 10 feature groups):
+`MHypot` (2-4 args -> `ecmaHypot`/`hypot3`/`hypot4`), `MInitPropGetterSetter` /
+`MInitElemGetterSetter` (object-literal `get x(){}` -> the VM operations, name
+atom interned in the traced pool), `MGuardIsResizableTypedArray` /
+`MGuardIsNonResizableTypedArray` (class-range check), and `MSign` (all four
+Int32/Double combinations, incl. the NaN bailout for Double->Int32).
