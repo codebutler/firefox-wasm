@@ -99,3 +99,15 @@ Found by a broad kitchen-sink probe (`micro kitchen-sink`, 10 feature groups):
 atom interned in the traced pool), `MGuardIsResizableTypedArray` /
 `MGuardIsNonResizableTypedArray` (class-range check), and `MSign` (all four
 Int32/Double combinations, incl. the NaN bailout for Double->Int32).
+
+### 6. Class/object-definition and spread ops
+
+Second kitchen-sink probe (`micro kitchen-sink2`: generators, prototypes, classes,
+symbols, BigInt, arguments/spread/rest/destructuring, switch/labels, errors/Proxy,
+JSON): `MObjectWithProto` (`Object.create`/`__proto__`),
+`MNewClassBodyEnvironmentObject`, `MMinMaxArray` (`Math.max/min(...arr)`,
+dense-number fast path with a deopt flag), `MNewPrivateName` (`#priv`),
+`MFunctionWithProto`, `MInitHomeObject`, `MCheckClassHeritage`.
+
+Generators still bail (`entry-alwaysBails`); async/Promise and a couple of string
+methods are unsupported by the minimal embed itself (fail in PBL too).
