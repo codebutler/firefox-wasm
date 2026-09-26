@@ -74,3 +74,19 @@ i32`) and the function silently stays in PBL (`host-compile-reject`, which
   default bail the function stays in PBL, which is correct.
 
 `micro minmax-idx` covers Math.min/max over indices + IntPtr index arithmetic.
+
+### 4. Conversions, small guards, `Object.is`, `Math.atan2`, typed-array offset
+
+More whole-function bails found by `GECKO_WJ_LOGBAIL` on a probe that uses them
+(`micro samevalue-atan2`: 1.02× → 9.23×):
+
+* `MIntPtrToDouble`, `MIntPtrToInt64`, `MInt64ToIntPtr`, `MExtendInt32ToInt64`,
+  `MWrapInt64ToInt32` — pointer/int64 conversions (wasm i32/i64 ops).
+* `MSameValueDouble` — `a == b || (a != a && b != b)` (Object.is on numbers).
+* `MSameValue` — `js::SameValue` helper (Object.is on values).
+* `MAtan2` — `js::ecmaAtan2` helper (Math.atan2).
+* `MNegativeToUndefined`, `MLoadValueTag`, `MIdToStringOrSymbol` (passthrough).
+* `MGuardIntPtrIsNonNegative`, `MGuardInt32Range`, `MGuardIsExtensible`
+  (deopt on miss, passthrough on hit).
+* `MArrayBufferViewByteOffset` — inline `byteOffset` PrivateValue slot read.
+* `MNop`, `MAssertFloat32`, `MAssertCanElidePostWriteBarrier` — no-ops.
