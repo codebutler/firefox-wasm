@@ -133,6 +133,20 @@ const OP_LOAD = 0, OP_MOUSE = 1, OP_KEY = 2, OP_WHEEL = 3, OP_PAINT = 4, OP_EVAL
 const OP_CLIP_SET = 9;
 const MOD_ALT = 0x1, MOD_CTRL = 0x2, MOD_SHIFT = 0x4, MOD_META = 0x8;
 
+// Wheel deltas arrive in one of three units (WheelEvent.deltaMode): PIXEL (0),
+// LINE (1) or PAGE (2). The engine protocol only carries CSS pixels (embed-input
+// sets mDeltaMode = DOM_DELTA_PIXEL unconditionally), and a mouse wheel usually
+// reports DOM_DELTA_LINE with deltaY = +-3 -- forwarding that raw makes one notch
+// scroll 3px. Convert to pixels here. LINE_PX approximates the ~100px a notch is
+// expected to scroll (3 lines * 33px); PAGE uses the viewport height.
+const WHEEL_LINE_PX = 33;
+function wheelPixels(e: WheelEvent, viewport: number): { dx: number; dy: number } {
+  const k = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? WHEEL_LINE_PX
+    : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? viewport
+    : 1;
+  return { dx: e.deltaX * k, dy: e.deltaY * k };
+}
+
 // StyleCursorKind index -> CSS cursor keyword (ServoStyleConsts.h order).
 const CURSORS = ['none', 'default', 'pointer', 'context-menu', 'help', 'progress',
   'wait', 'cell', 'crosshair', 'text', 'vertical-text', 'alias', 'copy', 'move',
@@ -676,7 +690,12 @@ export class Gecko {
     // mousedown/up alone doesn't generate eContextMenu in the headless build, so
     // without this no context menu ever opens (embed-xul.cpp do_mouse).
     on('contextmenu', (e) => { e.preventDefault(); const p = this.xy(e); this.run({ op: OP_MOUSE, evType: 3, x: p.x, y: p.y, button: 2, buttons: e.buttons, modifiers: this.mods(e) }); });
-    on('wheel', (e) => { const p = this.xy(e); this.run({ op: OP_WHEEL, x: p.x, y: p.y, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: this.mods(e) }); e.preventDefault(); });
+    on('wheel', (e) => {
+      const p = this.xy(e);
+      const { dx, dy } = wheelPixels(e, this.H);
+      this.run({ op: OP_WHEEL, x: p.x, y: p.y, deltaX: dx, deltaY: dy, modifiers: this.mods(e) });
+      e.preventDefault();
+    });
     // Printable keys carry their char code (matches the original embed-xul loader).
     // The engine doesn't insert text for Ctrl/Meta combos anyway (the editor's
     // IsInputtingText() is false when a command modifier is held), and sending the

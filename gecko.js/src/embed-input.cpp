@@ -107,6 +107,9 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   ev.mDeltaX = dx;
   ev.mDeltaY = dy;
   ev.mDeltaZ = 0.0;
+  // Always pixel mode: the JS side normalizes DOM_DELTA_LINE/PAGE wheel deltas to
+  // CSS pixels before forwarding (js/index.ts wheelPixels), since only a pixel
+  // delta crosses the command struct.
   ev.mDeltaMode = 0;  // WheelEvent.DOM_DELTA_PIXEL
   ev.mLineOrPageDeltaX = dx > 0 ? (int32_t)std::floor(dx) : (int32_t)std::ceil(dx);
   ev.mLineOrPageDeltaY = dy > 0 ? (int32_t)std::floor(dy) : (int32_t)std::ceil(dy);
