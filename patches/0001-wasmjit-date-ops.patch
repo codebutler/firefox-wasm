@@ -1,0 +1,329 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index d903469112..5d089cba29 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -706,7 +706,10 @@ static uint32_t TagWord(JSValueType t) {
+ 
+ // Box a typed value already on the stack into an i64 JS::Value.
+ static bool EmitBoxFromStack(Encoder& e, MIRType from) {
+-  if (from == MIRType::Double) {
++  if (from == MIRType::Double || from == MIRType::Float32) {
++    // Float32 is held widened to f64 in our repr, and a JS number Value is a
++    // double, so boxing either is a plain reinterpret (matches the Constant
++    // Float32 lowering, which also emits f64).
+     return e.writeOp(Op::I64ReinterpretF64);
+   }
+   if (from == MIRType::Int32 || from == MIRType::Boolean ||
+@@ -4151,6 +4154,8 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         case MIRType::IntPtr:  // wasm32: pointer-sized int constant == i32
+           return e.writeOp(Op::I32Const) &&
+                  e.writeVarS32(int32_t(c->toIntPtr()));
++        case MIRType::Int64:  // 64-bit int constant (e.g. a Date local-time operand)
++          return e.writeOp(Op::I64Const) && e.writeVarS64(c->toInt64());
+         case MIRType::Boolean:
+           return e.writeOp(Op::I32Const) && e.writeVarS32(c->toBoolean() ? 1 : 0);
+         case MIRType::Double:
+@@ -4165,6 +4170,16 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         case MIRType::Undefined:
+           return e.writeOp(Op::I64Const) &&
+                  e.writeVarS64(int64_t(JS::UndefinedValue().asRawBits()));
++        case MIRType::MagicOptimizedOut:
++        case MIRType::MagicHole:
++        case MIRType::MagicIsConstructing:
++        case MIRType::MagicUninitializedLexical: {
++          // Payload-less magic constants (e.g. an optimized-out argument, a
++          // holesentinel, JS_IS_CONSTRUCTING): bake the boxed Value bits. No GC
++          // pointer, so no traced-pool slot is needed.
++          uint64_t bits = c->toJSValue().asRawBits();
++          return e.writeOp(Op::I64Const) && e.writeVarS64(int64_t(bits));
++        }
+         case MIRType::Object: {
+           // Bake the object via the traced GC-constant pool, then load the live
+           // pointer (low 32 bits of the boxed Value) at runtime.
+@@ -4192,6 +4207,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+           return e.writeOp(Op::I32WrapI64);  // -> GC pointer
+         }
+         default:
++          if (WJGETENV("GECKO_WJ_BAILDBG"))
++            fprintf(stderr, "[wj-const-bail] unsupported MIRType %s\n",
++                    StringFromMIRType(c->type()));
+           return false;
+       }
+     }
+@@ -4230,8 +4248,19 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return e.writeOp(Op::I64Const) &&
+                e.writeVarS64(int64_t(JS::NullValue().asRawBits()));
+       }
+-      if (!GetOp(e, be, in)) return false;
+-      return EmitBoxFromStack(e, in->type());
++      if (!GetOp(e, be, in)) {
++        if (WJGETENV("GECKO_WJ_BAILDBG"))
++          fprintf(stderr, "[wj-box-nolocal] input op=%s ty=%s\n",
++                  WJOpName(in->op()), StringFromMIRType(in->type()));
++        return false;
++      }
++      if (!EmitBoxFromStack(e, in->type())) {
++        if (WJGETENV("GECKO_WJ_BAILDBG"))
++          fprintf(stderr, "[wj-box-bail] unsupported MIRType %s\n",
++                  StringFromMIRType(in->type()));
++        return false;
++      }
++      return true;
+     }
+     case MDefinition::Opcode::BoxNonStrictThis: {
+       // `this` in a sloppy function. For an object receiver this is identity;
+@@ -6476,6 +6505,72 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       if (!GetOp(e, be, ins->getOperand(0))) return false;
+       return e.writeOp(Op::F64Sqrt);
+     }
++    case MDefinition::Opcode::DateNow: {
++      // Date.now() / new Date() fast path -> double ms since epoch. VM fn
++      // (js::jit::DateNow) -- the same helper Ion's visitDateNow calls.
++      if (!EmitHelperCallResult(e, be, ins, WJH_DATENOW, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::DateParse: {
++      // Date.parse(str) -> double ms (NaN on parse failure).
++      if (!EmitStageScratch(e, be, ins->toDateParse()->string(), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_DATEPARSE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::TimeClip: {
++      // TimeClip(t): NaN if !finite or |t|>8.64e15, else trunc(t). Pure; runs
++      // before every NewDateObject (whose operand Ion requires to be clipped).
++      if (!EmitStageScratch(e, be, ins->toTimeClip()->time(), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_TIMECLIP, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::YearFromTime:
++    case MDefinition::Opcode::MonthFromTime:
++    case MDefinition::Opcode::DateFromTime: {
++      // Date's local-time field extraction (getFullYear/getMonth/getDate) -> a
++      // boxed Int32 or NaN Value. Reads the time zone -> VM fn, not movable.
++      int kind = ins->op() == MDefinition::Opcode::YearFromTime    ? WJH_YEARFROMTIME
++                 : ins->op() == MDefinition::Opcode::MonthFromTime ? WJH_MONTHFROMTIME
++                                                                   : WJH_DATEFROMTIME;
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, kind, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Value
++    }
++    case MDefinition::Opcode::NewDateObject: {
++      // new Date(utcTime): allocate the DateObject (js::NewDateObjectMsec).
++      if (!EmitStageScratch(e, be, ins->toNewDateObject()->utcTime(), 0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_NEWDATEOBJECT, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Object
++    }
++    case MDefinition::Opcode::DateHoursFromSecondsIntoYear:
++    case MDefinition::Opcode::DateMinutesFromSecondsIntoYear:
++    case MDefinition::Opcode::DateSecondsFromSecondsIntoYear: {
++      // getHours/getMinutes/getSeconds: reduce the cached seconds-into-year slot
++      // ((s/3600)%24, (s/60)%60, s%60) -> boxed Int32 (NaN passes through).
++      int kind = ins->op() == MDefinition::Opcode::DateHoursFromSecondsIntoYear
++                     ? WJH_DATEHOURSFROMSECONDS
++                 : ins->op() == MDefinition::Opcode::DateMinutesFromSecondsIntoYear
++                     ? WJH_DATEMINUTESFROMSECONDS
++                     : WJH_DATESECONDSFROMSECONDS;
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, kind, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Value
++    }
++    case MDefinition::Opcode::LocalTimeToUTC: {
++      // getTimezoneOffset: localTime (Int64) -> UTC double (js::jit::DateLocalTimeToUTC).
++      // The Int64 operand is staged in the dedicated UNTRACED gWJHelpI64 global --
++      // raw timestamp bits must not sit in the GC-traced gWJScratch.
++      MDefinition* in = ins->toLocalTimeToUTC()->localTime();
++      if (!e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(uintptr_t(static_cast<void*>(&gWJHelpI64)))))
++        return false;
++      if (!GetOp(e, be, in)) return false;
++      if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_LOCALTIMETOUTC, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
+     case MDefinition::Opcode::MathFunction: {
+       // Math.sin/cos/tan/log/exp/acos/asin/atan/log2/log10/cbrt/sinh/.../floor/ceil/
+       // round (Double). wasm has no transcendentals -> call the SAME fdlibm/native fn
+@@ -10779,6 +10874,16 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return EffectKind::Fail;
+       return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
+     }
++    case MDefinition::Opcode::DateFillLocalTimeSlots: {
++      // Cache the DateObject's local-time slots before getHours/getFullYear/...
++      // read them (WJH_DATEFILLLOCALTIMESLOTS -> DateObject::fillLocalTimeSlots).
++      // Effect op: void, non-throwing; drop the helper's boxed result.
++      if (!EmitStageScratch(e, be, ins->toDateFillLocalTimeSlots()->date(), 0))
++        return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_DATEFILLLOCALTIMESLOTS, 0))
++        return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
+     case MDefinition::Opcode::Bail:
+     case MDefinition::Opcode::Unreachable:
+     case MDefinition::Opcode::ThrowWithStack:  // `throw` variant that attaches an
+@@ -11864,7 +11969,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
+   }
+   if (!GetOp(e, be, val)) return false;
+   if (val->type() != MIRType::Value && val->type() != MIRType::Int64) {
+-    if (!EmitBoxFromStack(e, val->type())) return false;
++    if (!EmitBoxFromStack(e, val->type())) {
++      if (WJGETENV("GECKO_WJ_BAILDBG"))
++        fprintf(stderr, "[wj-return-box-bail] unsupported return MIRType %s\n",
++                StringFromMIRType(val->type()));
++      return false;
++    }
+   }
+   if (!EmitEnvRootPop(e, be)) return false;
+   if (!EmitDepthPop(e, be)) return false;
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index a55de9774e..30b0bdd943 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -179,6 +179,18 @@ enum WJHelpKind : int {
+   WJH_ASYNCRESOLVE = 113,       // scratch[0]=generator(AsyncFunctionGeneratorObject, boxed Object), [1]=value(boxed) -> Object; MAsyncResolve via js::AsyncFunctionResolve (resolves an async fn's promise at its return/resolve point). May GC/OOM. Async fns bailed whole-fn to PBL here (reddit.com).
+   WJH_CANSKIPAWAIT = 114,       // scratch[0]=value(boxed) -> Boolean; MCanSkipAwait via js::CanSkipAwait (await-skip optimization: true when the awaited value isn't a thenable). May GC (getter on .then/.constructor).
+   WJH_EXTRACTAWAITVALUE = 115,  // scratch[0]=value(boxed) -> Value; MMaybeExtractAwaitValue's can-skip branch via js::ExtractAwaitValue (unwrap the already-resolved await value). May GC.
++  WJH_DATENOW = 116,          // (no operands) -> Double; js::jit::DateNow(cx) (Date.now() / new Date())
++  WJH_DATEPARSE = 117,        // scratch[0]=string(String Value) -> Double; js::jit::DateParse(cx,str)
++  WJH_TIMECLIP = 118,         // scratch[0]=time(Double Value) -> Double; JS::TimeClip (NaN if !finite or |t|>8.64e15, else trunc)
++  WJH_YEARFROMTIME = 119,     // scratch[0]=utcTime(Double Value) -> Value; js::jit::DateYearFromTime (local-time year)
++  WJH_MONTHFROMTIME = 120,    // scratch[0]=utcTime(Double Value) -> Value; js::jit::DateMonthFromTime
++  WJH_DATEFROMTIME = 121,     // scratch[0]=utcTime(Double Value) -> Value; js::jit::DateDateFromTime
++  WJH_NEWDATEOBJECT = 122,    // scratch[0]=utcTime(Double Value) -> Object; js::NewDateObjectMsec(cx, JS::TimeClip(t))
++  WJH_DATEFILLLOCALTIMESLOTS = 123,  // scratch[0]=DateObject -> void; js::jit::DateFillLocalTimeSlots (cache local-time slots)
++  WJH_DATEHOURSFROMSECONDS = 124,    // scratch[0]=secondsIntoYear(Int32 or NaN Value) -> Value; (s/3600)%24 (getHours)
++  WJH_DATEMINUTESFROMSECONDS = 125,  // scratch[0]=secondsIntoYear -> Value; (s/60)%60 (getMinutes)
++  WJH_DATESECONDSFROMSECONDS = 126,  // scratch[0]=secondsIntoYear -> Value; s%60 (getSeconds)
++  WJH_LOCALTIMETOUTC = 127,          // gWJHelpI64=localTime(Int64) -> Double; js::jit::DateLocalTimeToUTC
+ };
+ // MNewLexicalEnvironmentObject: the LexicalScope* baked from the template object.
+ extern uint32_t gWJLexScope;
+@@ -339,6 +351,10 @@ extern uint64_t gWJConstructNewTarget;
+ extern uint32_t gWJHelpObj;
+ extern uint32_t gWJHelpSlot;
+ extern uint64_t gWJHelpVal;
++// Raw i64 staging for helpers taking an Int64 operand (WJH_LOCALTIMETOUTC). Kept
++// OUT of the GC-traced gWJScratch: a raw timestamp's bits are not a JS::Value and
++// a GC tracing them could mistake them for a GC pointer. Not traced.
++extern int64_t gWJHelpI64;
+ extern uint64_t gWJElemHits;  // DEBUG: inline typed-array element-store IC hits
+ 
+ // Monomorphic call-site IC for direct wasm->wasm calls. Per call site: the cached
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 3d1c31dcfb..c132e4b6f1 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -55,6 +55,9 @@
+ #include "vm/Shape.h"    // js::Shape
+ #include "vm/ArrayObject.h"   // js::ArrayObject
+ #include "builtin/Array.h"    // js::SetLengthProperty, IsArrayFromJit
++#include "js/Date.h"           // JS::TimeClip (WJH_TIMECLIP/WJH_NEWDATEOBJECT)
++#include "builtin/Date.h"      // js::NewDateObjectMsec (WJH_NEWDATEOBJECT)
++#include "vm/DateObject.h"     // js::DateObject::fillLocalTimeSlots (WJH_DATEFILLLOCALTIMESLOTS)
+ #include "vm/RegExpObject.h"  // js::CloneRegExpObject (MRegExp)
+ #include "builtin/String.h"   // js::StringFromCharCode
+ #include "builtin/RegExp.h"   // js::RegExpHasCaptureGroups
+@@ -229,6 +232,7 @@ uintptr_t gWJStringHeaderWord = 0; // NurseryCellHeader value for String cells (
+ uint32_t gWJHelpObj = 0;        // object ptr for WJH_SETSLOT
+ uint32_t gWJHelpSlot = 0;
+ uint64_t gWJHelpVal = 0;        // boxed value for WJH_SETSLOT
++int64_t gWJHelpI64 = 0;         // raw Int64 operand staging (WJH_LOCALTIMETOUTC); untraced
+ uint64_t gWJPreBarBadSkips = 0; // WJH_PREBARRIER: count of skipped invalid/garbage old-value cells (a store handed the barrier a bad ptr -- see discord.com pre-barrier crash)
+ uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hits
+ uint32_t gWJCallFn[kWJCallSites * kWJCallWays];     // polymorphic call IC: callee ptrs
+@@ -5122,6 +5126,94 @@ static double wjhelpImpl(double kindF, double siteF) {
+     return 0.0;
+   }
+ 
++  if (kind == js::wasm::WJH_DATENOW) {
++    // MDateNow: Date.now() / new Date() fast path -> double ms since epoch.
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(js::jit::DateNow(cx)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_DATEPARSE) {
++    // MDateParse: Date.parse(str) -> double ms (NaN on parse failure). DateParse
++    // asserts the string is linear; flatten first (matches the transpiler's
++    // MLinearizeString / Ion's OOL path).
++    JS::RootedString str(cx, JS::Value::fromRawBits(gWJScratch[0]).toString());
++    if (!str->ensureLinear(cx)) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(js::jit::DateParse(cx, str)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_TIMECLIP) {
++    // MTimeClip: ECMAScript TimeClip -- NaN if !finite or |t| > 8.64e15, else
++    // truncate toward zero. Pure (no GC/throw); matches masm.timeClip.
++    double t = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(JS::TimeClip(t).toDouble()).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_YEARFROMTIME ||
++      kind == js::wasm::WJH_MONTHFROMTIME ||
++      kind == js::wasm::WJH_DATEFROMTIME) {
++    // M{Year,Month,Date}FromTime: utcTime -> boxed Int32 field (or NaN). Reads the
++    // current time zone (UTCToLocalTime), so it is not movable -- matches Ion.
++    double t = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    JS::Value out;
++    if (kind == js::wasm::WJH_YEARFROMTIME) {
++      js::jit::DateYearFromTime(cx, t, &out);
++    } else if (kind == js::wasm::WJH_MONTHFROMTIME) {
++      js::jit::DateMonthFromTime(cx, t, &out);
++    } else {
++      js::jit::DateDateFromTime(cx, t, &out);
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = out.asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_NEWDATEOBJECT) {
++    // MNewDateObject: allocate a DateObject with the given (already time-clipped)
++    // utcTime. Clip here too so a folded-away MTimeClip can't store a fractional
++    // time (Ion's js::jit::NewDateObject asserts clipping; asserts are off in this
++    // optimized build, so clip explicitly). nullptr proto = realm Date.prototype,
++    // which is what the transpiler's template object carries.
++    double t = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    JSObject* obj = js::NewDateObjectMsec(cx, JS::TimeClip(t));
++    if (!obj) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::ObjectValue(*obj).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_DATEFILLLOCALTIMESLOTS) {
++    // MDateFillLocalTimeSlots: populate the DateObject's cached local-time slots
++    // (getHours/getFullYear/... read them). Void; non-throwing.
++    js::DateObject* d =
++        &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<js::DateObject>();
++    js::jit::DateFillLocalTimeSlots(d);
++    gWJScratch[js::wasm::kWJResultSlot] = JS::UndefinedValue().asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_DATEHOURSFROMSECONDS ||
++      kind == js::wasm::WJH_DATEMINUTESFROMSECONDS ||
++      kind == js::wasm::WJH_DATESECONDSFROMSECONDS) {
++    // getHours/getMinutes/getSeconds: pure integer reduction of the cached
++    // seconds-into-year slot, mirroring MacroAssembler::dateTimeFromSecondsIntoYear
++    // (an Int32 reduces; any other value -- NaN -- passes through unchanged).
++    JS::Value v = JS::Value::fromRawBits(gWJScratch[0]);
++    if (v.isInt32()) {
++      uint32_t s = uint32_t(v.toInt32());
++      uint32_t r = kind == js::wasm::WJH_DATEHOURSFROMSECONDS     ? (s / 3600u) % 24u
++                   : kind == js::wasm::WJH_DATEMINUTESFROMSECONDS ? (s / 60u) % 60u
++                                                                  : s % 60u;
++      v = JS::Int32Value(int32_t(r));
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = v.asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_LOCALTIMETOUTC) {
++    // getTimezoneOffset: localTime (Int64) -> UTC double. The raw i64 operand is
++    // staged in the untraced gWJHelpI64 (not gWJScratch); DateLocalTimeToUTC is
++    // AutoUnsafeCallWithABI (no GC/throw).
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(js::jit::DateLocalTimeToUTC(cx, gWJHelpI64)).asRawBits();
++    return 0.0;
++  }
++
+   return 1.0;
+ }
+ 

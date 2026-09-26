@@ -1,0 +1,21 @@
+diff --git a/config/run_spidermonkey_checks.py b/config/run_spidermonkey_checks.py
+index 1d7ed98af3..e83e8242da 100644
+--- a/config/run_spidermonkey_checks.py
++++ b/config/run_spidermonkey_checks.py
+@@ -2,6 +2,7 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
++import os
+ import subprocess
+ import sys
+ 
+@@ -9,6 +10,8 @@ import buildconfig
+ 
+ 
+ def main(output, lib_file, *scripts):
++    if os.environ.get("WJ_SKIP_STYLE_CHECKS"):
++        return
+     for script in scripts:
+         retcode = subprocess.call([sys.executable, script], cwd=buildconfig.topsrcdir)
+         if retcode != 0:

@@ -58,3 +58,7 @@ demo/chrome/public/chrome-assets.json
 
 # node deps (also as symlinks, e.g. a demo's node_modules)
 node_modules
+
+# mach state dir (MOZBUILD_STATE_PATH) used by the JS-only dev build
+docs/.mozbuild
+.mozbuild
