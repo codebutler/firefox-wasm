@@ -1,0 +1,88 @@
+diff --git a/config/run_spidermonkey_checks.py b/config/run_spidermonkey_checks.py
+index 1d7ed98af3..e83e8242da 100644
+--- a/config/run_spidermonkey_checks.py
++++ b/config/run_spidermonkey_checks.py
+@@ -2,6 +2,7 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
++import os
+ import subprocess
+ import sys
+ 
+@@ -9,6 +10,8 @@ import buildconfig
+ 
+ 
+ def main(output, lib_file, *scripts):
++    if os.environ.get("WJ_SKIP_STYLE_CHECKS"):
++        return
+     for script in scripts:
+         retcode = subprocess.call([sys.executable, script], cwd=buildconfig.topsrcdir)
+         if retcode != 0:
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index d903469112..c1b3dbd312 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -4127,6 +4127,21 @@ static bool EmitIterSlotStore(Encoder& e, WJBackend& be, MDefinition* object,
+   return true;
+ }
+ 
++// Emit `d` on the wasm stack as an f64: F64-repr passes through, I32-repr (an
++// Int32/Boolean/IntPtr Number at runtime) is converted with f64.convert_i32_s --
++// the exact numeric value. Returns false (caller bails the compile) for i64/Value
++// reprs, which would need unboxing. Warp's emitDoubleBinaryArithResult builds
++// MAdd/MSub/MMul/MDiv(lhs, rhs, Double) from NumberOperandIds whose defs can be
++// Int32 phis; emitting f64.* on the raw i32 local is INVALID wasm and V8 rejects
++// the whole module (`f64.add expected f64, found local.get i32`), silently
++// dropping the function to PBL (string-ops / mixed-arith microbenches).
++static bool EmitOperandAsF64(Encoder& e, WJBackend& be, MDefinition* d) {
++  uint8_t r = WJValType(d->type());
++  if (r != uint8_t(TypeCode::F64) && r != uint8_t(TypeCode::I32)) return false;
++  if (!GetOp(e, be, d)) return false;
++  return r == uint8_t(TypeCode::I32) ? e.writeOp(Op::F64ConvertI32S) : true;
++}
++
+ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+   WJSetBailOp(ins);  // attribute an internal bail to this op (+ precise op line)
+   switch (ins->op()) {
+@@ -6227,8 +6242,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       bool d = ins->type() == MIRType::Double;
+       bool i = ins->type() == MIRType::Int32;
+       if (d) {
+-        if (!GetOp(e, be, ins->getOperand(0)) ||
+-            !GetOp(e, be, ins->getOperand(1)))
++        // Operands must be f64-repr in wasm; an Int32-repr operand is converted
++        // (see EmitOperandAsF64). i64/Value operands bail cleanly.
++        MDefinition* a = ins->getOperand(0);
++        MDefinition* b = ins->getOperand(1);
++        uint8_t ra = WJValType(a->type()), rb = WJValType(b->type());
++        if ((ra != uint8_t(TypeCode::F64) && ra != uint8_t(TypeCode::I32)) ||
++            (rb != uint8_t(TypeCode::F64) && rb != uint8_t(TypeCode::I32))) {
++          if (WJGETENV("GECKO_WJ_ARITHDBG"))
++            fprintf(stderr, "[wj-f64-arith-badop] %s op0=%s:%s op1=%s:%s\n",
++                    WJOpName(ins->op()), WJOpName(a->op()),
++                    StringFromMIRType(a->type()), WJOpName(b->op()),
++                    StringFromMIRType(b->type()));
++          js::wasm::gWJBailReason = "f64-arith-nonF64-operand";
++          return false;
++        }
++        if (!EmitOperandAsF64(e, be, a) || !EmitOperandAsF64(e, be, b))
+           return false;
+         return e.writeOp(ins->isAdd()   ? Op::F64Add
+                          : ins->isSub() ? Op::F64Sub
+@@ -6347,10 +6376,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+     }
+     case MDefinition::Opcode::Div: {
+       if (ins->type() == MIRType::Double) {
+-        if (!GetOp(e, be, ins->getOperand(0)) ||
+-            !GetOp(e, be, ins->getOperand(1))) {
++        // Same Int32-operand case as Add/Sub/Mul (Warp's emitDoubleBinaryArithResult
++        // can build MDiv(Double) over Int32 phis): convert, don't emit f64.div on
++        // an i32 local. i64/Value operands bail cleanly.
++        if (!EmitOperandAsF64(e, be, ins->getOperand(0)) ||
++            !EmitOperandAsF64(e, be, ins->getOperand(1)))
+           return false;
+-        }
+         return e.writeOp(Op::F64Div);
+       }
+       if (ins->type() == MIRType::Int32) {

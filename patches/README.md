@@ -10,6 +10,7 @@ Apply after `make firefox`:
 ```bash
 git -C firefox apply ../patches/0000-build-skip-spidermonkey-style-checks.patch
 git -C firefox apply ../patches/0001-wasmjit-date-ops.patch
+git -C firefox apply ../patches/0002-wasmjit-f64-arith-operands.patch
 ```
 
 ## 0000-build-skip-spidermonkey-style-checks.patch
@@ -51,3 +52,21 @@ Plus two general backend fixes the Date work surfaced:
 
 Measured on `node bench/main.ts micro date-ops --ab`: JIT 24.6 ms → 18.0 ms
 (~1.37×) with `bails: -` (was 4 distinct bails), checksum identical to PBL.
+
+## 0002-wasmjit-f64-arith-operands.patch
+
+Fixes invalid wasm for mixed Int32/Double arithmetic. Warp's
+`emitDoubleBinaryArithResult` builds `MAdd/MSub/MMul/MDiv(lhs, rhs, Double)` from
+`NumberOperandId`s whose defs can be **Int32 phis** (no `MToDouble` inserted). The
+backend emitted `f64.add`/`f64.div` directly on the i32 local; V8 rejects the
+whole module (`f64.add expected f64, found local.get i32`), so the function
+silently stayed in PBL (`host-compile-reject`, which `--bails` does not even
+report). Now an Int32-repr operand is converted with `f64.convert_i32_s` (the
+exact numeric value); i64/Value operands still bail cleanly.
+
+This is a general coverage fix: any function that accumulates int loop counters
+into a double, hashes with mixed types, etc. was dropped to the interpreter.
+
+Measured on the new `micro mixed-arith` bench: JIT 43.5 ms → 1.7 ms (~25×) with
+an identical checksum; `micro string-ops` also stops bailing (was
+`host-compile-reject`).
