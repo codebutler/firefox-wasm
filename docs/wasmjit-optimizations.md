@@ -101,3 +101,22 @@ machine (`dasd` can peg a core); single-run ratios are noisy.
 5. The weak octane benches (gbemu ~1.1×, box2d ~1.25×, splay ~1.9×) have **no
    bails** — they are limited by megamorphic dispatch / boxing / helper hops, so
    they need codegen or IC work, not coverage.
+
+## GECKO_WJ_MAXLEN (default 4096) — measured trade-off
+
+Interleaved A/B (same binary, env var only, medians of 3) of MAXLEN 4096 vs 8192:
+
+| bench | 4096 | 8192 | delta |
+|---|---|---|---|
+| `bench/site` ssr (preact) | 157 ms | 98 ms | **+60%** (its 5.7 KB renderToString is never compiled at 4096) |
+| octane box2d | 752 | 899 | **+19.5%** |
+| octane richards/deltablue/splay/gbemu/regexp | — | — | ±1% |
+| octane navier | 11518 | 9993 | **−13%** |
+| octane earley | 6525 | 6388 | −2% |
+| ubo | 1684 ms | 1917 ms | **−13%** |
+
+So 8192 is a real win for workloads whose hot function is a large literal-builder
+(preact SSR, box2d) and a real loss for others (navier, ubo). The 4096 default is
+kept; the `GECKO_WJ_MAXLEN` knob is the per-deployment choice. `GECKO_WJ_SIZEWARMUP`
+(scale the warmup threshold by bytecode length) can delay large-function compiles
+but regresses medium-hot throughput.
