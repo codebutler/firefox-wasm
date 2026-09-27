@@ -62,3 +62,10 @@ node_modules
 # mach state dir (MOZBUILD_STATE_PATH) used by the JS-only dev build
 docs/.mozbuild
 .mozbuild
+
+# bench/site: fetched data + bundled workloads (regenerate with bench/site/build.sh)
+bench/site/data/
+bench/site/build/
+bench/site/node_modules/
+bench/site/package.json
+bench/site/package-lock.json

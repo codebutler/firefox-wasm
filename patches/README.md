@@ -137,3 +137,26 @@ arg-count-related `Call` bail also disappeared. octane earley (9-arg
 `deriv_trees`): 6.7x -> 9.0x, no bails. The cost is 8 extra wasm params per JIT
 call: interleaved A/B shows octane deltablue ~2% slower (7.44 -> 7.15 ratio) and
 richards/splay neutral. Net clearly positive.
+
+### 10. Realistic site workload (thirdlf03.com + real libraries)
+
+`bench/site/` runs parse5 / htmlparser2+css-select / a hand-written search index /
+preact-render-to-string / lodash over the real page content. It found:
+
+* `MMapObjectSize` / `MSetObjectSize` (+ the whole Map/Set get/has/set/delete/add
+  group) via the `js::jit::MapObject*` / `SetObject*` VM helpers.
+* `MObjectState` / `MArrayState` — Ion's recover-only literal summaries (Ion
+  never lowers them). A passthrough of the summarized object/array. This was
+  blocking compilation of *large* functions that build object/array literals
+  (preact's 5.7 KB `renderToString`).
+* **for-in loop-head deopt-resume**: the bail was also firing for an *exception
+  exit* inside a try region (`EmitExceptionExit` -> `EmitDeoptResume`), where the
+  resume is in error mode and PBL `goto error` -> `HandleException` (it does NOT
+  re-run `MoreIter`). Skipping the bail for error resumes is sound and unblocks
+  such functions. The genuine guard-miss case (a GuardShape deopt at a for-in
+  LoopHead, e.g. acorn) still bails.
+
+With `GECKO_WJ_MAXLEN=8192` the preact SSR bench goes 90 ms -> 50 ms (1.80x,
+identical checksum). The 4096 default is kept: raising it regresses octane
+(richards 7975 -> 6358) and ubo (999 -> 1132 ms) because their large functions
+are net-negative to compile.

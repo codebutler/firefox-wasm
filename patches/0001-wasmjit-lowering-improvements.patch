@@ -1,5 +1,5 @@
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index d903469112..a37743af61 100644
+index d903469112..644887feee 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
 @@ -247,6 +247,9 @@ static bool WJTypeMaybeGC(jit::MIRType t) {
@@ -27,7 +27,19 @@ index d903469112..a37743af61 100644
                                   // per-arg-index GC-ROOTED copy local (or -1). GetFrameArgument
                                   // MUST read this, not the raw wasm param -- the raw param goes
                                   // stale when a GC moves an object arg (the copy is reloaded by
-@@ -706,7 +711,10 @@ static uint32_t TagWord(JSValueType t) {
+@@ -320,6 +325,11 @@ struct WJBackend {
+   // deoptSiteLocal and runs the matching resume. Only active on the dispatch path.
+   bool oolDeopt = false;          // out-of-line mode enabled
+   bool hasCatchTrynote = false;   // try/catch: the script has a Catch/Finally trynote
++  // Compile-time flag: the resume currently being emitted is an ERROR resume (an
++  // exception exit that hands the pending exception to PBL, which unwinds to the
++  // catch). Such a resume does NOT re-execute the op's pc, so the for-in
++  // loop-head re-run hazard does not apply (see EmitDeoptResumeInline).
++  bool resumeInError = false;
+                                   // (only compiled when GECKO_WJ_NOTRYBAIL removes the
+                                   // bail). Routes call/helper exceptions through
+                                   // deopt-in-error so PBL's HandleException runs the
+@@ -706,7 +716,10 @@ static uint32_t TagWord(JSValueType t) {
  
  // Box a typed value already on the stack into an i64 JS::Value.
  static bool EmitBoxFromStack(Encoder& e, MIRType from) {
@@ -39,7 +51,29 @@ index d903469112..a37743af61 100644
      return e.writeOp(Op::I64ReinterpretF64);
    }
    if (from == MIRType::Int32 || from == MIRType::Boolean ||
-@@ -4127,6 +4135,21 @@ static bool EmitIterSlotStore(Encoder& e, WJBackend& be, MDefinition* object,
+@@ -1402,8 +1415,8 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+     // the function runs in PBL. Narrow: only for-in loop heads (iterator
+     // operand on the rp stack), not every loop head.
+     static int noForinBail = WJGETENV("GECKO_WJ_NOFORINBAIL") ? 1 : 0;
+-    if (!noForinBail && f == 0 && !IsResumeAfter(rp->mode()) &&
+-        JSOp(*rp->pc()) == JSOp::LoopHead) {
++    if (!be.resumeInError && !noForinBail && f == 0 &&
++        !IsResumeAfter(rp->mode()) && JSOp(*rp->pc()) == JSOp::LoopHead) {
+       uint32_t nfixed = info.nlocals();
+       uint32_t base = 1 + info.nargs() + nfixed;  // this + args + locals
+       for (uint32_t i = base; i < rp->numOperands(); i++) {
+@@ -2095,7 +2108,10 @@ static bool EmitExceptionExit(Encoder& e, WJBackend& be) {
+     // the OOL br-depth would be wrong) -- mirror the Throw case's inDispatchBody save.
+     bool saved = be.inDispatchBody;
+     be.inDispatchBody = false;
++    bool savedErr = be.resumeInError;
++    be.resumeInError = true;  // error resume: PBL unwinds to the catch, no pc re-run
+     bool ok = EmitDeoptResume(e, be);
++    be.resumeInError = savedErr;
+     be.inDispatchBody = saved;
+     return ok;
+   }
+@@ -4127,6 +4143,21 @@ static bool EmitIterSlotStore(Encoder& e, WJBackend& be, MDefinition* object,
    return true;
  }
  
@@ -61,7 +95,7 @@ index d903469112..a37743af61 100644
  static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
    WJSetBailOp(ins);  // attribute an internal bail to this op (+ precise op line)
    switch (ins->op()) {
-@@ -4151,6 +4174,8 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4151,6 +4182,8 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          case MIRType::IntPtr:  // wasm32: pointer-sized int constant == i32
            return e.writeOp(Op::I32Const) &&
                   e.writeVarS32(int32_t(c->toIntPtr()));
@@ -70,7 +104,7 @@ index d903469112..a37743af61 100644
          case MIRType::Boolean:
            return e.writeOp(Op::I32Const) && e.writeVarS32(c->toBoolean() ? 1 : 0);
          case MIRType::Double:
-@@ -4165,6 +4190,16 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4165,6 +4198,16 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          case MIRType::Undefined:
            return e.writeOp(Op::I64Const) &&
                   e.writeVarS64(int64_t(JS::UndefinedValue().asRawBits()));
@@ -87,7 +121,7 @@ index d903469112..a37743af61 100644
          case MIRType::Object: {
            // Bake the object via the traced GC-constant pool, then load the live
            // pointer (low 32 bits of the boxed Value) at runtime.
-@@ -4192,6 +4227,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4192,6 +4235,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            return e.writeOp(Op::I32WrapI64);  // -> GC pointer
          }
          default:
@@ -97,7 +131,7 @@ index d903469112..a37743af61 100644
            return false;
        }
      }
-@@ -4230,8 +4268,19 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4230,8 +4276,19 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          return e.writeOp(Op::I64Const) &&
                 e.writeVarS64(int64_t(JS::NullValue().asRawBits()));
        }
@@ -119,7 +153,7 @@ index d903469112..a37743af61 100644
      }
      case MDefinition::Opcode::BoxNonStrictThis: {
        // `this` in a sloppy function. For an object receiver this is identity;
-@@ -6227,8 +6276,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -6227,8 +6284,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        bool d = ins->type() == MIRType::Double;
        bool i = ins->type() == MIRType::Int32;
        if (d) {
@@ -144,7 +178,7 @@ index d903469112..a37743af61 100644
            return false;
          return e.writeOp(ins->isAdd()   ? Op::F64Add
                           : ins->isSub() ? Op::F64Sub
-@@ -6252,6 +6315,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -6252,6 +6323,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            return false;
          return e.writeOp(Op::F32DemoteF64) && e.writeOp(Op::F64PromoteF32);
        }
@@ -166,7 +200,7 @@ index d903469112..a37743af61 100644
        if (!i) return false;
        // Operands MUST be i32-repr in wasm. An Int32-result op can have a non-i32
        // operand (a Value/Int64 local) -- emitting i32.add/sub/mul on an i64
-@@ -6347,10 +6425,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -6347,10 +6433,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
      }
      case MDefinition::Opcode::Div: {
        if (ins->type() == MIRType::Double) {
@@ -182,7 +216,7 @@ index d903469112..a37743af61 100644
          return e.writeOp(Op::F64Div);
        }
        if (ins->type() == MIRType::Int32) {
-@@ -6476,6 +6556,512 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -6476,6 +6564,572 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        if (!GetOp(e, be, ins->getOperand(0))) return false;
        return e.writeOp(Op::F64Sqrt);
      }
@@ -626,6 +660,66 @@ index d903469112..a37743af61 100644
 +      if (!EmitHelperCallResult(e, be, ins, WJH_ISTYPEDARRAYCTOR, 0)) return false;
 +      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
 +    }
++    case MDefinition::Opcode::MapObjectSize: {
++      if (!EmitStageScratch(e, be, ins->toMapObjectSize()->mapObject(), 0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPSIZE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Int32
++    }
++    case MDefinition::Opcode::SetObjectSize: {
++      if (!EmitStageScratch(e, be, ins->toSetObjectSize()->setObject(), 0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETSIZE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Int32
++    }
++    case MDefinition::Opcode::MapObjectGetValue:
++    case MDefinition::Opcode::MapObjectGetValueVMCall:
++    case MDefinition::Opcode::MapObjectGetNonBigInt: {
++      // Map.get(key) (the fast-path variants carry a precomputed hash we ignore).
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPGET, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Value
++    }
++    case MDefinition::Opcode::MapObjectHasValue:
++    case MDefinition::Opcode::MapObjectHasValueVMCall:
++    case MDefinition::Opcode::MapObjectHasNonBigInt: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPHAS, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::MapObjectDelete: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPDELETE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::SetObjectHasValue:
++    case MDefinition::Opcode::SetObjectHasValueVMCall:
++    case MDefinition::Opcode::SetObjectHasNonBigInt: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETHAS, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::SetObjectDelete: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETDELETE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::ObjectState: {
++      // Recover-only node (Ion never lowers it; it summarizes an object literal
++      // for bailout reconstruction). Our deopt resumes to PBL and re-executes
++      // the literal, so this is a passthrough of the summarized object. It blocked
++      // compiling large real-world functions (preact renderToString, 5.7KB).
++      return GetOp(e, be, ins->toObjectState()->object());
++    }
++    case MDefinition::Opcode::ArrayState: {
++      // Recover-only array-literal summary -> passthrough of the array.
++      return GetOp(e, be, ins->toArrayState()->array());
++    }
 +    case MDefinition::Opcode::DateNow: {
 +      // Date.now() / new Date() fast path -> double ms since epoch. VM fn
 +      // (js::jit::DateNow) -- the same helper Ion's visitDateNow calls.
@@ -695,7 +789,7 @@ index d903469112..a37743af61 100644
      case MDefinition::Opcode::MathFunction: {
        // Math.sin/cos/tan/log/exp/acos/asin/atan/log2/log10/cbrt/sinh/.../floor/ceil/
        // round (Double). wasm has no transcendentals -> call the SAME fdlibm/native fn
-@@ -6762,16 +7348,30 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -6762,16 +7416,30 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        return pushRounded() && e.writeOp(Op::I32TruncF64S);
      }
      case MDefinition::Opcode::MinMax: {
@@ -732,7 +826,7 @@ index d903469112..a37743af61 100644
        }
        return false;
      }
-@@ -10779,6 +11379,57 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10779,6 +11447,70 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
          return EffectKind::Fail;
        return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
      }
@@ -744,6 +838,19 @@ index d903469112..a37743af61 100644
 +        return EffectKind::Fail;
 +      if (!EmitHelperCallResult(e, be, ins, WJH_DATEFILLLOCALTIMESLOTS, 0))
 +        return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::MapObjectSet: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, ins->getOperand(2), 2)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPSET, 0)) return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::SetObjectAdd: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETADD, 0)) return EffectKind::Fail;
 +      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
 +    }
 +    case MDefinition::Opcode::SetFunName: {
@@ -790,7 +897,7 @@ index d903469112..a37743af61 100644
      case MDefinition::Opcode::Bail:
      case MDefinition::Opcode::Unreachable:
      case MDefinition::Opcode::ThrowWithStack:  // `throw` variant that attaches an
-@@ -10797,9 +11448,29 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10797,9 +11529,29 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
        be.inDispatchBody = savedDispatch;
        return ok ? EffectKind::Emitted : EffectKind::Fail;
      }
@@ -820,7 +927,7 @@ index d903469112..a37743af61 100644
        return EffectKind::Skip;  // prologue / ignored (host stack guards depth)
      case MDefinition::Opcode::AddAndStoreSlot: {
        // Add an own property: transition obj->shape to the new shape (which has the
-@@ -11864,7 +12535,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
+@@ -11864,7 +12616,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
    }
    if (!GetOp(e, be, val)) return false;
    if (val->type() != MIRType::Value && val->type() != MIRType::Int64) {
@@ -834,7 +941,7 @@ index d903469112..a37743af61 100644
    }
    if (!EmitEnvRootPop(e, be)) return false;
    if (!EmitDepthPop(e, be)) return false;
-@@ -13576,6 +14252,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -13576,6 +14333,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    be.iterIdx = uint32_t(be.reserve(uint8_t(TypeCode::I32)));    // Load/StoreSlotByIteratorIndex temps
    be.iterKind = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
    be.iterAddr = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
@@ -844,10 +951,10 @@ index d903469112..a37743af61 100644
    be.callArgBase = uint32_t(be.reserve(uint8_t(TypeCode::I64)));  // boxed this
    for (uint32_t i = 0; i < kWJMaxArgs; i++) {
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index a55de9774e..0e7db1556a 100644
+index a55de9774e..a96f576329 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -179,6 +179,36 @@ enum WJHelpKind : int {
+@@ -179,6 +179,45 @@ enum WJHelpKind : int {
    WJH_ASYNCRESOLVE = 113,       // scratch[0]=generator(AsyncFunctionGeneratorObject, boxed Object), [1]=value(boxed) -> Object; MAsyncResolve via js::AsyncFunctionResolve (resolves an async fn's promise at its return/resolve point). May GC/OOM. Async fns bailed whole-fn to PBL here (reddit.com).
    WJH_CANSKIPAWAIT = 114,       // scratch[0]=value(boxed) -> Boolean; MCanSkipAwait via js::CanSkipAwait (await-skip optimization: true when the awaited value isn't a thenable). May GC (getter on .then/.constructor).
    WJH_EXTRACTAWAITVALUE = 115,  // scratch[0]=value(boxed) -> Value; MMaybeExtractAwaitValue's can-skip branch via js::ExtractAwaitValue (unwrap the already-resolved await value). May GC.
@@ -881,10 +988,19 @@ index a55de9774e..0e7db1556a 100644
 +  WJH_ISTYPEDARRAYCTOR = 143,        // scratch[0]=object -> Boolean; js::IsTypedArrayConstructor
 +  WJH_CHECKFUSE = 144,               // site=fuse index -> f64 call flag (0 = intact, 1 = popped -> deopt); MGuardFuse
 +  WJH_SETFUNNAME = 145,              // scratch[0]=function(Object), scratch[1]=name(Value), site=prefixKind -> void; js::SetFunctionName
++  WJH_MAPSIZE = 146,                 // scratch[0]=map -> Int32; MapObject::size()
++  WJH_SETSIZE = 147,                 // scratch[0]=set -> Int32; SetObject::size()
++  WJH_MAPGET = 148,                  // scratch[0]=map, scratch[1]=key -> Value; js::jit::MapObjectGet
++  WJH_MAPHAS = 149,                  // scratch[0]=map, scratch[1]=key -> Boolean; js::jit::MapObjectHas
++  WJH_MAPSET = 150,                  // scratch[0]=map, scratch[1]=key, scratch[2]=value -> void; js::jit::MapObjectSet
++  WJH_MAPDELETE = 151,               // scratch[0]=map, scratch[1]=key -> Boolean; js::jit::MapObjectDelete
++  WJH_SETHAS = 152,                  // scratch[0]=set, scratch[1]=key -> Boolean; js::jit::SetObjectHas
++  WJH_SETADD = 153,                  // scratch[0]=set, scratch[1]=key -> void; js::jit::SetObjectAdd
++  WJH_SETDELETE = 154,               // scratch[0]=set, scratch[1]=key -> Boolean; js::jit::SetObjectDelete
  };
  // MNewLexicalEnvironmentObject: the LexicalScope* baked from the template object.
  extern uint32_t gWJLexScope;
-@@ -339,6 +369,10 @@ extern uint64_t gWJConstructNewTarget;
+@@ -339,6 +378,10 @@ extern uint64_t gWJConstructNewTarget;
  extern uint32_t gWJHelpObj;
  extern uint32_t gWJHelpSlot;
  extern uint64_t gWJHelpVal;
@@ -895,7 +1011,7 @@ index a55de9774e..0e7db1556a 100644
  extern uint64_t gWJElemHits;  // DEBUG: inline typed-array element-store IC hits
  
  // Monomorphic call-site IC for direct wasm->wasm calls. Per call site: the cached
-@@ -445,7 +479,7 @@ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit
+@@ -445,7 +488,7 @@ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit
  // module trampoline (f64 scratch-base)->f64 reads scratch and calls main, for
  // the host-entry path (the JS<->wasm boundary can't carry i64 safely). Functions
  // with more than kWJMaxArgs actual args fall back (stay PBL).
@@ -905,7 +1021,7 @@ index a55de9774e..0e7db1556a 100644
  // EHABI rewrite (EHABI_REWRITE_PLAN.md): when true, the main wasm function ABI is
  // `(f64 sb, i64 callee, i64 this, i64 args...) -> i64 result` with exceptions carried by
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 3d1c31dcfb..93210e011b 100644
+index 3d1c31dcfb..2c1884f609 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -30,7 +30,9 @@
@@ -936,7 +1052,7 @@ index 3d1c31dcfb..93210e011b 100644
  uint64_t gWJPreBarBadSkips = 0; // WJH_PREBARRIER: count of skipped invalid/garbage old-value cells (a store handed the barrier a bad ptr -- see discord.com pre-barrier crash)
  uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hits
  uint32_t gWJCallFn[kWJCallSites * kWJCallWays];     // polymorphic call IC: callee ptrs
-@@ -5122,6 +5128,296 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5122,6 +5128,352 @@ static double wjhelpImpl(double kindF, double siteF) {
      return 0.0;
    }
  
@@ -1227,6 +1343,62 @@ index 3d1c31dcfb..93210e011b 100644
 +                             js::FunctionPrefixKind(int(siteF)))) {
 +      return 1.0;
 +    }
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_MAPSIZE || kind == js::wasm::WJH_SETSIZE) {
++    // MMapObjectSize / MSetObjectSize: ordered-hash-table entry count. Pure.
++    JSObject* obj = &JS::Value::fromRawBits(gWJScratch[0]).toObject();
++    uint32_t n = kind == js::wasm::WJH_MAPSIZE
++                     ? obj->as<js::MapObject>().size()
++                     : obj->as<js::SetObject>().size();
++    gWJScratch[js::wasm::kWJResultSlot] = JS::Int32Value(int32_t(n)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_MAPGET || kind == js::wasm::WJH_MAPHAS ||
++      kind == js::wasm::WJH_MAPSET || kind == js::wasm::WJH_MAPDELETE) {
++    // Map.get/has/set/delete via the same VM helpers Ion's OOL path calls.
++    JS::Rooted<js::MapObject*> map(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<js::MapObject>());
++    JS::RootedValue key(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    if (kind == js::wasm::WJH_MAPGET) {
++      JS::RootedValue rval(cx);
++      if (!js::jit::MapObjectGet(cx, map, key, &rval)) return 1.0;
++      gWJScratch[js::wasm::kWJResultSlot] = rval.get().asRawBits();
++      return 0.0;
++    }
++    if (kind == js::wasm::WJH_MAPHAS) {
++      bool res;
++      if (!js::jit::MapObjectHas(cx, map, key, &res)) return 1.0;
++      gWJScratch[js::wasm::kWJResultSlot] = JS::BooleanValue(res).asRawBits();
++      return 0.0;
++    }
++    if (kind == js::wasm::WJH_MAPSET) {
++      JS::RootedValue val(cx, JS::Value::fromRawBits(gWJScratch[2]));
++      if (!js::jit::MapObjectSet(cx, map, key, val)) return 1.0;
++      return 0.0;
++    }
++    bool res;
++    if (!js::jit::MapObjectDelete(cx, map, key, &res)) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::BooleanValue(res).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_SETHAS || kind == js::wasm::WJH_SETADD ||
++      kind == js::wasm::WJH_SETDELETE) {
++    // Set.has/add/delete via the same VM helpers Ion's OOL path calls.
++    JS::Rooted<js::SetObject*> set(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<js::SetObject>());
++    JS::RootedValue key(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    if (kind == js::wasm::WJH_SETADD) {
++      if (!js::jit::SetObjectAdd(cx, set, key)) return 1.0;
++      return 0.0;
++    }
++    bool res;
++    if (kind == js::wasm::WJH_SETHAS) {
++      if (!js::jit::SetObjectHas(cx, set, key, &res)) return 1.0;
++    } else {
++      if (!js::jit::SetObjectDelete(cx, set, key, &res)) return 1.0;
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = JS::BooleanValue(res).asRawBits();
 +    return 0.0;
 +  }
 +
