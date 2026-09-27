@@ -11,6 +11,7 @@ Baseline (before this session) and the three engine patches in `patches/`:
 | 2e5da97 | Date op family lowering + `MConstant` Int64/magic + `Box(Float32)` | `micro date-ops` 24.6→18.0 ms (~1.37×), 4 bails → 0 |
 | d4727f8 | mixed Int32/Double arithmetic emitted **invalid wasm** (function silently in PBL) | `micro mixed-arith` 43.5→1.7 ms (~25×) |
 | 59b0638 | `GuardHasAttachedArrayBuffer`, `ToIntegerIndex`, `MMinMax` IntPtr/Float32, IntPtr `Add/Sub/Mul`; `MTypedArraySubarray` staged off | `micro minmax-idx`; pdfjs bail chain shortened |
+| (this session, 9th) | `kWJMaxArgs` 8 -> 16 (functions with >8 args no longer stay in PBL) | octane earley 6.7x -> 9.0x; deltablue ~2% slower |
 | (this session, 8th) | `SetFunName` (inferred function names) | `micro kitchen-sink4` (new) |
 | (this session, 7th) | `IsTypedArrayConstructor`, `GuardFuse` (fuse check by index) | `micro kitchen-sink3` (new) |
 | (this session, 6th) | class/object-definition + spread ops: `ObjectWithProto`, `NewClassBodyEnvironmentObject`, `MinMaxArray`, `NewPrivateName`, `FunctionWithProto`, `InitHomeObject`, `CheckClassHeritage` | `micro kitchen-sink2` (new) |

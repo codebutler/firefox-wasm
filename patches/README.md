@@ -129,3 +129,11 @@ custom iterators, Symbol.hasInstance/toStringTag, spread/apply/Reflect.apply,
 ES2023 array methods, named-group regexps, optional chaining/nullish): only
 `MSetFunName` bailed -> `js::SetFunctionName` helper (inferred `f.name` for
 arrow/method definitions).
+
+### 9. kWJMaxArgs 8 -> 16
+
+Functions with more than 8 actual args stayed in PBL (`too-many-args`), and an
+arg-count-related `Call` bail also disappeared. octane earley (9-arg
+`deriv_trees`): 6.7x -> 9.0x, no bails. The cost is 8 extra wasm params per JIT
+call: interleaved A/B shows octane deltablue ~2% slower (7.44 -> 7.15 ratio) and
+richards/splay neutral. Net clearly positive.
