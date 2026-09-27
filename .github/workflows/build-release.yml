@@ -26,20 +26,51 @@ name: build-and-release
 # This workflow is a STARTING POINT; the local upgrade to emscripten 6.0.1 was
 # verified with a DEBUG build. The RELEASE path here runs optimized + wasm-opt but
 # WITHOUT engine LTO (LTO doesn't fit this runner — see above).
+#
+# HOSTED (public repo) MODE: on a PUBLIC repo the standard GitHub-hosted runners are
+# free + unlimited and give 4 vCPU / 16 GB RAM (private repos only get 2 vCPU), so a
+# hosted attempt is worth it. Use the workflow_dispatch `runner` input
+# (default `ubuntu-24.04`) to run there; push events keep using the self-hosted
+# `firefox` label. Hosted runs additionally free ~31 GB of disk (free-disk-space),
+# prune the ~26 GB objdir after the link, and can skip the wasm-opt pass. The inputs
+# default to the low-risk first-run combination: runner=ubuntu-24.04, no_wasm_opt=1,
+# prune_objdir=1, swap_gb=16. Re-enable wasm-opt (no_wasm_opt=0) once the pipeline is
+# green.
 
 on:
   push:
     branches: ['master']
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'runs-on label (ubuntu-24.04 = free GitHub-hosted for public repos; firefox = self-hosted)'
+        type: string
+        default: 'ubuntu-24.04'
+      no_wasm_opt:
+        description: '1 = skip the wasm-opt -O3 pass (shortest/lowest-RAM first run), 0 = full release'
+        type: choice
+        options: ['1', '0']
+        default: '1'
+      prune_objdir:
+        description: '1 = delete objdir .o/.a after the link (hosted/ephemeral runners only)'
+        type: choice
+        options: ['1', '0']
+        default: '1'
+      swap_gb:
+        description: 'swap size in GB added for the link wasm-opt peak'
+        type: string
+        default: '16'
 
 permissions:
   contents: write   # create releases / upload assets / push tags
 
 # One build at a time per ref; a new master push supersedes the running one
 # (the build is hours long on this runner -- don't queue stale builds).
+# event_name is part of the key so a workflow_dispatch experiment is not cancelled
+# by an unrelated master push (they run on different runners anyway).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -48,14 +79,39 @@ env:
   PNPM_VERSION: '9.12.0'         # matches root package.json "packageManager"
   MOZBUILD_STATE_PATH: ${{ github.workspace }}/.mozbuild
   MACH_NO_TERMINAL_FOOTER: '1'
+  # Dispatch knobs; empty on push events -> the safe/legacy behavior below.
+  NO_WASM_OPT: ${{ inputs.no_wasm_opt || '0' }}   # '1' skips build-lib.sh's wasm-opt pass
+  PRUNE_OBJDIR: ${{ inputs.prune_objdir || '0' }}  # never prune the self-hosted incremental objdir
+  SWAP_GB: ${{ inputs.swap_gb || '24' }}
 
 jobs:
   build:
-    runs-on: firefox
+    # push -> self-hosted `firefox` (unchanged); workflow_dispatch -> inputs.runner
+    # (default ubuntu-24.04, the free GitHub-hosted runner for public repos).
+    runs-on: ${{ inputs.runner || 'firefox' }}
     timeout-minutes: 350
+    env:
+      # Hosted = ephemeral, small disk: free disk + prune. Self-hosted keeps its
+      # objdir as the incremental build cache, so neither must run there.
+      IS_HOSTED: ${{ startsWith(inputs.runner || 'firefox', 'ubuntu') }}
     steps:
       - name: Checkout the embedder + build harness (this repo)
         uses: actions/checkout@v4
+
+      # A hosted runner starts with only ~13-25 GB free, far short of the ~26 GB
+      # objdir + 5.5 GB firefox clone + emsdk/rust/cargo + the staged libxul copy.
+      # Reclaims ~31 GB in ~3 min. MUST run before the swap step (a 16 GB swapfile
+      # needs disk too). swap-storage stays false so the swap step below owns swap.
+      - name: Free up disk space (hosted runners only)
+        if: env.IS_HOSTED == 'true'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
 
       # Release naming + auto-tag decision. Artifacts are named after the pushed
       # tag, or after the gecko.js package version for branch pushes (which feed
@@ -80,16 +136,6 @@ jobs:
           echo "tag=${TAG}"                >> "$GITHUB_OUTPUT"
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo ">> version=${PKG_VERSION} tag=${TAG} new_version=${NEW_VERSION}"
-
-      # - name: Free up disk space (Gecko objdir is ~26 GB)
-      #   uses: jlumbroso/free-disk-space@main
-      #   with:
-      #     tool-cache: true
-      #     android: true
-      #     dotnet: true
-      #     haskell: true
-      #     large-packages: true
-      #     swap-storage: true
 
       - name: Install build prerequisites (clang/libclang for bindgen, etc.)
         run: |
@@ -167,27 +213,55 @@ jobs:
             echo ">> swap already present:"; swapon --show; free -h; exit 0
           fi
           SW=/swapfile
-          ( sudo fallocate -l 24G "$SW" || sudo dd if=/dev/zero of="$SW" bs=1M count=24576 ) 2>/dev/null \
+          SWAP_GB="${SWAP_GB:-24}"
+          ( sudo fallocate -l "${SWAP_GB}G" "$SW" || sudo dd if=/dev/zero of="$SW" bs=1M count=$((SWAP_GB * 1024)) ) 2>/dev/null \
             && sudo chmod 600 "$SW" && sudo mkswap "$SW" >/dev/null 2>&1 && sudo swapon "$SW" 2>/dev/null \
-            && echo ">> added 24G swap at $SW" || echo "!! could not add swap (continuing without it)"
+            && echo ">> added ${SWAP_GB}G swap at $SW" || echo "!! could not add swap (continuing without it)"
           free -h || true
+          df -h . | sed 's/^/>> disk: /' || true
 
       # No path rewriting needed: mozconfig.full.emscripten derives its objdir and
       # FreeType include from $topsrcdir, and libclang from $LIBCLANG_PATH (set above).
 
-      - name: "Build the engine + gecko.js (release: zstd + wasm-opt, no engine LTO) — long"
+      # Step 1/3: the engine. wasm-opt's recursive passes overflow the default 8 MB
+      # stack on the ~250 MB module and die with SIGSEGV, so raise the stack limit for
+      # the whole make -> mach -> em++ -> wasm-opt subprocess tree (ulimit is inherited).
+      # Also needed for the libxul.so relink: emscripten 6.0.1's wasm-ld SIGSEGVs on the
+      # `-shared` link, so `make build` relinks the engine libs as `-r` relocatable
+      # objects (gecko.js/relink-engine-r.sh, run between two `mach build` passes) --
+      # handled inside `make`, no extra step here. Engine LTO is intentionally OFF
+      # (LTO=1 would need a ~64 GiB+ runner; this one OOM-kills the LTO link).
+      - name: "Build the engine: mach build x2 + -r relink (release, no engine LTO) — long"
         run: |
-          # wasm-opt's recursive passes overflow the default 8MB stack on the
-          # ~250MB module and die with SIGSEGV. Raise the stack limit for the whole
-          # make -> mach -> em++ -> wasm-opt subprocess tree (ulimit is inherited).
-          # Also needed for the libxul.so relink: emscripten 6.0.1's wasm-ld SIGSEGVs
-          # on the `-shared` link, so `make build` relinks the engine libs as `-r`
-          # relocatable objects (gecko.js/relink-engine-r.sh, run between two
-          # `mach build` passes) -- handled inside `make`, no extra step here.
-          # Engine LTO is intentionally OFF (LTO=1 would need a ~64 GiB+ runner; this one
-          # OOM-kills the LTO link). RELEASE still gives -O3 + wasm-opt over the module.
           ulimit -s unlimited || ulimit -s 524288 || true
-          make libxul RELEASE=1   # firefox cloned; vendor -> mach build (+relink) -> build-lib.sh -> rspack
+          make build RELEASE=1
+
+      # Step 2/3: reclaim disk. Once libxul.so is relinked the ~26 GB of .o/.a files
+      # are dead for this run, and the gecko.js build only reads dist/include,
+      # dist/bin/*.so and the MOZ_GLUE_IN_PROGRAM loose objects it globs straight out
+      # of the objdir (build-lib.sh: mfbt, mozglue/*, memory/*, third_party/fmt) -- so
+      # those dirs are preserved. This is what makes the staged libxul.so copy
+      # (~3.4 GB) + 245 MB wasm fit on a hosted runner. Hosted/ephemeral only: on the
+      # self-hosted runner the objdir IS the incremental cache, so never prune it.
+      - name: Prune engine objdir intermediates (ephemeral runners only)
+        if: env.IS_HOSTED == 'true' && env.PRUNE_OBJDIR == '1'
+        run: |
+          OBJ=obj-full-emscripten-release
+          if [ ! -d "$OBJ" ]; then echo "!! $OBJ missing"; exit 1; fi
+          echo ">> before:"; df -h . | sed 's/^/   /'; du -sh "$OBJ" | sed 's/^/   /'
+          find "$OBJ" -type f \( -name '*.o' -o -name '*.a' \) \
+            -not -path "$OBJ/mfbt/*" \
+            -not -path "$OBJ/mozglue/*" \
+            -not -path "$OBJ/memory/*" \
+            -not -path "$OBJ/third_party/fmt/*" \
+            -delete
+          echo ">> after:"; df -h . | sed 's/^/   /'; du -sh "$OBJ" | sed 's/^/   /'
+
+      # Step 3/3: gecko.js. The engine is already built, so `libxul` skips `make build`
+      # (its `test -e $(LIBXUL)` guard) and only does pnpm + build-lib.sh (emcc link,
+      # optional wasm-opt) + rspack.
+      - name: "Build the gecko.js package (emcc link + wasm-opt + rspack)"
+        run: make libxul RELEASE=1
 
       - name: Show link errors on failure
         if: failure()
@@ -261,8 +335,12 @@ jobs:
       # `latest` prerelease (delete + recreate so the tag always points at this
       # commit), and bumping gecko.js/package.json "version" additionally cuts a
       # permanent v<version> tag + release from the same artifacts.
+      # PUSH ONLY (`github.event_name == 'push'`): a workflow_dispatch test run from
+      # master has the same github.ref, and its inputs can deliberately ship a
+      # degraded artifact (no_wasm_opt=1 / pruned objdir) that must NOT become
+      # `latest` or a versioned release.
       - name: Delete the previous rolling release + tag
-        if: github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: dev-drprasad/delete-tag-and-release@v1.0.1
         with:
           delete_release: true
@@ -270,7 +348,7 @@ jobs:
           github_token: ${{ github.token }}
 
       - name: Publish the rolling `latest` prerelease
-        if: github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: ncipollo/release-action@v1
         with:
           name: Continuous Build
@@ -281,7 +359,7 @@ jobs:
           prerelease: true
 
       - name: Tag + release ${{ steps.version.outputs.tag }} (version bumped)
-        if: github.ref == 'refs/heads/master' && steps.version.outputs.new_version == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.version.outputs.new_version == 'true'
         uses: ncipollo/release-action@v1
         with:
           name: ${{ steps.version.outputs.version }}
