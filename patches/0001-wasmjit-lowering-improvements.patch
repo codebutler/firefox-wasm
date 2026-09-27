@@ -1082,7 +1082,7 @@ index a55de9774e..b7dbbc5370 100644
  // EHABI rewrite (EHABI_REWRITE_PLAN.md): when true, the main wasm function ABI is
  // `(f64 sb, i64 callee, i64 this, i64 args...) -> i64 result` with exceptions carried by
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 3d1c31dcfb..9a424b5fc6 100644
+index 3d1c31dcfb..d9508212d5 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -30,7 +30,9 @@
@@ -1223,7 +1223,29 @@ index 3d1c31dcfb..9a424b5fc6 100644
      // gWJScratch[0..kWJThisSlot] is GC-traced by WJTraceRoots, so hand JS::Call
      // non-owning Handles straight into it -- no per-call RootedValueVector copy or
      // thisv rooting (the per-call Rooted overhead was ~1.3% across ~1M slow calls).
-@@ -2875,6 +2954,45 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2833,6 +2912,12 @@ static double wjhelpImpl(double kindF, double siteF) {
+     }
+     static int callHist = getenv("GECKO_WJ_CALLHIST") ? 1 : 0;
+     if (callHist) {
++      // GECKO_WJ_CALLHIST=N prints every N slow calls (default/1 = every 200000).
++      static uint64_t histEvery = [] {
++        const char* e = getenv("GECKO_WJ_CALLHIST");
++        uint64_t n = e ? strtoull(e, nullptr, 10) : 0;
++        return n > 1 ? n : 200000;
++      }();
+       static std::map<std::string, uint64_t> hist;
+       static uint64_t tot = 0;
+       char key[80];
+@@ -2858,7 +2943,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+         snprintf(key, sizeof key, "non-fn");
+       }
+       hist[key]++;
+-      if ((++tot % 200000) == 0) {
++      if ((++tot % histEvery) == 0) {
+         std::vector<std::pair<uint64_t, std::string>> v;
+         for (auto& kv : hist) v.push_back({kv.second, kv.first});
+         std::sort(v.rbegin(), v.rend());
+@@ -2875,6 +2960,45 @@ static double wjhelpImpl(double kindF, double siteF) {
      return 0.0;
    }
  
@@ -1269,7 +1291,7 @@ index 3d1c31dcfb..9a424b5fc6 100644
    if (kind == js::wasm::WJH_DBGPTR) {
      // DEBUG: log the value the valNursery post-barrier check is about to chunk-load.
      // gWJHelpObj = payload (low32), gWJHelpVal = full boxed bits. If the next line is
-@@ -5122,6 +5240,352 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5122,6 +5246,352 @@ static double wjhelpImpl(double kindF, double siteF) {
      return 0.0;
    }
  

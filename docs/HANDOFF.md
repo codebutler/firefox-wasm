@@ -130,7 +130,7 @@ bash bench/spa/run.sh                                                           
 | unsupported `Constant`/`Box`/return type | `GECKO_WJ_BAILDBG=1` |
 | per-MIR-op deopt histogram | `GECKO_WJ_DEOPTHIST=1` (also `SITEHIST`) |
 | compiled/failed/deopts/recompiles | `GECKO_WJ_STATSJSON=1` |
-| slow (boundary-crossing) call counts | `GECKO_WJ_CALLPROF=1`, `GECKO_WJ_CALLHIST=1` (top callees) |
+| slow (boundary-crossing) call counts | `GECKO_WJ_CALLPROF=1`, `GECKO_WJ_CALLHIST=N` (top callees, print every N; `=1`→200k) |
 | emitted wasm for a source line | `GECKO_WJ_WASMDUMP=<line>` → `/tmp/wbjit_<line>.wasm`, then `$EMSDK/upstream/bin/wasm-dis` |
 | force PBL for one function | `GECKO_WJ_NOCOMPILERANGE=lo,hi` |
 | deopt-resume failure detail | `GECKO_WJ_DEOPTRESUMEDBG=1` |
@@ -208,11 +208,14 @@ JIT-vs-PBL checksums), `realapp all --ab`, `jetstream --ab` (validate()),
 ## 7. Open issues / prioritized next steps
 
 1. ~~Native-call fast path~~ **DONE** (session 2). `WJH_CALL` runtime dispatch +
-   `WJH_CALLNATIVE` for constant natives. Next step on the same axis: the
-   remaining slow calls are non-native `JS::Call`s and builtins that still
-   take `WJH_CALL` because they aren't constant-folded — check
-   `GECKO_WJ_CALLHIST` again on the SPA for what is left, or inline more
-   builtins one at a time.
+   `WJH_CALLNATIVE` for constant natives. Post-change `CALLHIST`/`CTFDBG` sweep:
+   zero natives remain on the slow path; the top slow callees are valve-failed
+   PBL functions (`Signal.set` ~54k/run storming ~10 deopts/call on Unbox/
+   shape guards; forceMega recompile did not heal). Residual headroom is the
+   deopt storms (Unbox/Ursh type-speculation misses), not call plumbing —
+   next lever is smarter retype-on-recompile (e.g. speculating Value-of-double
+   reads as Double instead of Int32, or the `Ursh`-as-uint32 closure case at
+   spa.js:22).
 2. **pdf.js `FlateStream_readBlock` miscompile** (blocks `MTypedArraySubarray`).
    The lowering is correct (`typed-subarray` probe passes with `GECKO_WJ_TASUB=1`)
    but compiling that ~5.7 KB function produces wrong values / OOB. Bisect it

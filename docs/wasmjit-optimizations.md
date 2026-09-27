@@ -191,6 +191,22 @@ Interleaved A/B medians (`GECKO_WJ_NONATIVECALL` off/on, identical checksums):
 On the SPA the `GECKO_WJ_CALLHIST` slow-call histogram no longer prints with
 the fast path on — the ~1M+ slow `JS::Call` crossings per run (regexp helpers,
 sort, String, Map/Set, Math.round) now bypass the boundary entirely.
+`GECKO_WJ_CALLHIST` now takes a print modulus (`=10000` prints every 10k slow
+calls; `=1`/empty keeps the old 200k default).
+
+Post-change sweep (`CALLHIST=10000` + `CTFDBG` + `VALVEDBG` + `DEOPTHIST` on
+spa.js): **every remaining slow call is a `J:` interpreted callee; zero `N:`**
+natives remain. The top ones (`Signal.prototype.set` spa.js:122 ~54k/run,
+`Computed.recompute` :157) are **valve-failed to PBL** — they storm ~10
+deopts/call on `Unbox`/shape guards and even the forceMega recompile kept
+storming, so the deopt-storm valve parked them in PBL (correct per the
+deltablue-timeout history). The calls therefore must enter the interpreter
+regardless; the residual boundary cost is `JS::Call` setup, not fixable by
+another call-path specialization. The real remaining headroom is the storms
+themselves: `Unbox` ~6.3k + `Ursh` 3.1k (the `rng` closure `t >>> 15` at
+spa.js:22) dominate `DEOPTHIST` — i.e. type-speculation misses on
+Value-of-double/uint32 reads, next lever is smarter retyping on recompile,
+not more call plumbing.
 
 Known unrelated failure: `micro native-call` under `--gczeal 14` throws
 "calling a builtin typed array constructor without new" — identical with the
