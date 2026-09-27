@@ -20,3 +20,9 @@ make web
 
 # JIT
 This project contains an attempt at a JS->WASM JIT. It is currently not usable on many websites. It can be toggled with the environment variable `GECKO_NOWASMJIT=1`
+
+# JIT development
+See `docs/HANDOFF.md` for the current state and next steps, `docs/wasmjit-dev-loop.md`
+for the (macOS-capable) JS-only build + benchmark loop, and
+`docs/wasmjit-optimizations.md` + `patches/README.md` for what was changed and
+why. Quick loop: `bash bench/spidermonkey.js/fastjit.sh && node bench/main.ts micro --ab`.
