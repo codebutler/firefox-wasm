@@ -148,3 +148,50 @@ simulated interactions per iteration. Generated with `pi --provider opencode-go
 Next actionable step from this data: a fast **native-call** path for generic
 `MCall`s whose callee is a native with `JSJitInfo` (Ion's `callNative` ABI),
 instead of always routing through `JS::Call`; and/or more builtin inlining.
+
+## Native-call fast path (`WJH_CALLNATIVE` + `WJH_CALL` runtime dispatch)
+
+Implemented the step above. Two levels:
+
+* `WJH_CALL` probes the boxed callee: `JSFunction` + `isNativeFun` + argc <= 60
+  skips `JS::Call`/`InvokeArgs`/`FillArgumentsFromArraylike` entirely.
+* `MCall` on a constant native `JSFunction` emits `WJH_CALLNATIVE` with the
+  callee/`this`/args staged at scratch[0..argc+1] and `(argc<<32)|nativePtr`
+  packed in the site f64 — no callee box/IC overhead. `ignoresReturnValue()`
+  callees bake `ignoresReturnValueMethod`; a runtime identity/class check
+  degrades a stale bake back to generic `WJH_CALL`.
+
+Both funnel into `WJNativeCall`, which copies the staged values into a
+per-call `JS::RootedValueArray<62>` (`vp=[callee,this,args]`) and replicates
+`CallJSNative`: outerize global `this` when `needsOuterizedThisObject()`,
+`AutoCheckRecursionLimit` held across the call, `DebugAPI::onNativeCall`,
+`AutoRealm`, `NativeResumeMode::Override` handling. The rooted buffer is
+required: natives re-enter JS (`sort` comparators, `forEach` callbacks,
+getters) and a `vp` pointing into `gWJScratch` is clobbered by the nested
+call's own staging (this bug initially broke lodash). `onNativeCall` can run
+debugger JS -> GC, so `fun` is re-derived from the rooted `vp[0]` after it.
+
+Escape hatch: `GECKO_WJ_NONATIVECALL=1` (runtime) / `GECKO_WJ_NONATIVEBE=1`
+(backend emit). `[wb-calls]` stats line gains a `native=` counter.
+
+Interleaved A/B medians (`GECKO_WJ_NONATIVECALL` off/on, identical checksums):
+
+| bench | off | on | delta |
+|---|---|---|---|
+| micro native-call | 118.3 ms | 79.7 ms | **+33%** |
+| spa.js | 84.8 ms | 77.9 ms | **+8%** |
+| site search | 18.1 ms | 13.9 ms | **+23%** |
+| site lodash | 298.1 ms | 282.1 ms | +5% |
+| site dom | 150.9 ms | 141.0 ms | +7% |
+| site parse / ssr | 167.4 / 89.9 ms | 164.1 / 88.6 ms | ~+2% |
+| octane regexp | ~974 | ~1197 | **~+23%** |
+| octane deltablue | ~2900 | ~3048 | ~+5% |
+| octane splay | ~4684 | ~4710 | neutral |
+
+On the SPA the `GECKO_WJ_CALLHIST` slow-call histogram no longer prints with
+the fast path on — the ~1M+ slow `JS::Call` crossings per run (regexp helpers,
+sort, String, Map/Set, Math.round) now bypass the boundary entirely.
+
+Known unrelated failure: `micro native-call` under `--gczeal 14` throws
+"calling a builtin typed array constructor without new" — identical with the
+fast path disabled; a pre-existing GC/ctor staleness issue, not this change.

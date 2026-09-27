@@ -1,5 +1,5 @@
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index d903469112..644887feee 100644
+index d903469112..3c612d8006 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
 @@ -247,6 +247,9 @@ static bool WJTypeMaybeGC(jit::MIRType t) {
@@ -73,6 +73,15 @@ index d903469112..644887feee 100644
      be.inDispatchBody = saved;
      return ok;
    }
+@@ -2114,7 +2130,7 @@ static bool EmitExceptionExit(Encoder& e, WJBackend& be) {
+ }
+ 
+ static bool EmitHelperCallResult(Encoder& e, WJBackend& be, MInstruction* ins,
+-                                 int kind, uint32_t site) {
++                                 int kind, double site) {
+   // Remat cache: this helper call is a MOVING GC point (alloc/GC/user-code) -- any
+   // cached re-derived pointer is stale after it. Invalidate (args were staged by the
+   // caller before this). Barriers do NOT use this path (direct Op::Call), so the
 @@ -4127,6 +4143,21 @@ static bool EmitIterSlotStore(Encoder& e, WJBackend& be, MDefinition* object,
    return true;
  }
@@ -826,7 +835,56 @@ index d903469112..644887feee 100644
        }
        return false;
      }
-@@ -10779,6 +11447,70 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -9986,6 +10654,48 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return true;
+       }
+       uint32_t argc = call->numActualArgs();
++      // Direct native call (Ion's callNative ABI): when the callee is a
++      // compile-time constant JSFunction that isNativeFun (self-hosted
++      // intrinsics, CacheIR-constant method callees like Math.round/String),
++      // stage the CallArgs vp layout straight into the GC-traced scratch --
++      // [0]=callee/rval, [1]=this, [2..]=args -- and call wjhelp(WJH_CALLNATIVE),
++      // which invokes fun->native() directly with CallJSNative's checks. Skips
++      // the call-IC compares, the gWJCallCallee/Argc global staging and
++      // JS::Call's InvokeArgs+InternalCallOrConstruct. siteF packs
++      // argc<<32 | uint32(effective native fn ptr) (wasm32 fn ptrs are i32
++      // table indices -> low32 round-trips); ignoresReturnValue swaps in the
++      // jitInfo alternate entry like Ion's visitCallNative. argc<=60 keeps the
++      // staged vp below the callee(62)/newTarget(63) slots.
++      static int noNativeBE = WJGETENV("GECKO_WJ_NONATIVEBE") ? 1 : 0;
++      if (!noNativeBE && argc <= 60) {
++        JSFunction* nfn = nullptr;
++        MDefinition* ncD = call->getCallee();
++        if (ncD->isConstant() && ncD->toConstant()->type() == MIRType::Object) {
++          JSObject* nco = ncD->toConstant()->toObjectOrNull();
++          if (nco && nco->is<JSFunction>() &&
++              nco->as<JSFunction>().isNativeFun()) {
++            nfn = &nco->as<JSFunction>();
++          }
++        }
++        if (nfn) {
++          JSNative nat = nfn->native();
++          if (call->ignoresReturnValue() && nfn->hasJitInfo() &&
++              nfn->jitInfo()->type() == JSJitInfo::IgnoresReturnValueNative) {
++            nat = nfn->jitInfo()->ignoresReturnValueMethod;
++          }
++          if (!EmitStageScratch(e, be, call->getCallee(), 0)) return false;
++          if (!EmitStageScratch(e, be, call->getArg(0), 1)) return false;
++          for (uint32_t i = 0; i < argc; i++) {
++            if (!EmitStageScratch(e, be, call->getArg(1 + i), 2 + i)) {
++              return false;
++            }
++          }
++          double npk = double((uint64_t(argc) << 32) |
++                              uint64_t(uint32_t(
++                                  reinterpret_cast<uintptr_t>(nat))));
++          return EmitHelperCallResult(e, be, ins, WJH_CALLNATIVE, npk);
++        }
++      }
+       // WIDE calls (argc > kWJMaxArgs): the 8-reg fast ABI can't carry them, but
+       // the slow WJH_CALL path stages args in gWJScratch[0..argc-1] (traced slots
+       // 0..61 are free below callee@62) -- route them there instead of bailing
+@@ -10779,6 +11489,70 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
          return EffectKind::Fail;
        return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
      }
@@ -897,7 +955,7 @@ index d903469112..644887feee 100644
      case MDefinition::Opcode::Bail:
      case MDefinition::Opcode::Unreachable:
      case MDefinition::Opcode::ThrowWithStack:  // `throw` variant that attaches an
-@@ -10797,9 +11529,29 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10797,9 +11571,29 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
        be.inDispatchBody = savedDispatch;
        return ok ? EffectKind::Emitted : EffectKind::Fail;
      }
@@ -927,7 +985,7 @@ index d903469112..644887feee 100644
        return EffectKind::Skip;  // prologue / ignored (host stack guards depth)
      case MDefinition::Opcode::AddAndStoreSlot: {
        // Add an own property: transition obj->shape to the new shape (which has the
-@@ -11864,7 +12616,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
+@@ -11864,7 +12658,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
    }
    if (!GetOp(e, be, val)) return false;
    if (val->type() != MIRType::Value && val->type() != MIRType::Int64) {
@@ -941,7 +999,7 @@ index d903469112..644887feee 100644
    }
    if (!EmitEnvRootPop(e, be)) return false;
    if (!EmitDepthPop(e, be)) return false;
-@@ -13576,6 +14333,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -13576,6 +14375,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    be.iterIdx = uint32_t(be.reserve(uint8_t(TypeCode::I32)));    // Load/StoreSlotByIteratorIndex temps
    be.iterKind = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
    be.iterAddr = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
@@ -951,10 +1009,10 @@ index d903469112..644887feee 100644
    be.callArgBase = uint32_t(be.reserve(uint8_t(TypeCode::I64)));  // boxed this
    for (uint32_t i = 0; i < kWJMaxArgs; i++) {
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index a55de9774e..a96f576329 100644
+index a55de9774e..b7dbbc5370 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -179,6 +179,45 @@ enum WJHelpKind : int {
+@@ -179,6 +179,48 @@ enum WJHelpKind : int {
    WJH_ASYNCRESOLVE = 113,       // scratch[0]=generator(AsyncFunctionGeneratorObject, boxed Object), [1]=value(boxed) -> Object; MAsyncResolve via js::AsyncFunctionResolve (resolves an async fn's promise at its return/resolve point). May GC/OOM. Async fns bailed whole-fn to PBL here (reddit.com).
    WJH_CANSKIPAWAIT = 114,       // scratch[0]=value(boxed) -> Boolean; MCanSkipAwait via js::CanSkipAwait (await-skip optimization: true when the awaited value isn't a thenable). May GC (getter on .then/.constructor).
    WJH_EXTRACTAWAITVALUE = 115,  // scratch[0]=value(boxed) -> Value; MMaybeExtractAwaitValue's can-skip branch via js::ExtractAwaitValue (unwrap the already-resolved await value). May GC.
@@ -997,10 +1055,13 @@ index a55de9774e..a96f576329 100644
 +  WJH_SETHAS = 152,                  // scratch[0]=set, scratch[1]=key -> Boolean; js::jit::SetObjectHas
 +  WJH_SETADD = 153,                  // scratch[0]=set, scratch[1]=key -> void; js::jit::SetObjectAdd
 +  WJH_SETDELETE = 154,               // scratch[0]=set, scratch[1]=key -> Boolean; js::jit::SetObjectDelete
++  WJH_CALLNATIVE = 155,              // direct JSNative call (Ion callNative ABI): caller pre-stages the
++                                     // CallArgs vp at scratch[0..]: [0]=callee, [1]=this, [2..]=args.
++                                     // site arg = double(argc<<32 | nativeFnPtr); result -> kWJResultSlot.
  };
  // MNewLexicalEnvironmentObject: the LexicalScope* baked from the template object.
  extern uint32_t gWJLexScope;
-@@ -339,6 +378,10 @@ extern uint64_t gWJConstructNewTarget;
+@@ -339,6 +381,10 @@ extern uint64_t gWJConstructNewTarget;
  extern uint32_t gWJHelpObj;
  extern uint32_t gWJHelpSlot;
  extern uint64_t gWJHelpVal;
@@ -1011,7 +1072,7 @@ index a55de9774e..a96f576329 100644
  extern uint64_t gWJElemHits;  // DEBUG: inline typed-array element-store IC hits
  
  // Monomorphic call-site IC for direct wasm->wasm calls. Per call site: the cached
-@@ -445,7 +488,7 @@ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit
+@@ -445,7 +491,7 @@ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit
  // module trampoline (f64 scratch-base)->f64 reads scratch and calls main, for
  // the host-entry path (the JS<->wasm boundary can't carry i64 safely). Functions
  // with more than kWJMaxArgs actual args fall back (stay PBL).
@@ -1021,7 +1082,7 @@ index a55de9774e..a96f576329 100644
  // EHABI rewrite (EHABI_REWRITE_PLAN.md): when true, the main wasm function ABI is
  // `(f64 sb, i64 callee, i64 this, i64 args...) -> i64 result` with exceptions carried by
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 3d1c31dcfb..2c1884f609 100644
+index 3d1c31dcfb..9a424b5fc6 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -30,7 +30,9 @@
@@ -1044,7 +1105,19 @@ index 3d1c31dcfb..2c1884f609 100644
  #include "vm/RegExpObject.h"  // js::CloneRegExpObject (MRegExp)
  #include "builtin/String.h"   // js::StringFromCharCode
  #include "builtin/RegExp.h"   // js::RegExpHasCaptureGroups
-@@ -229,6 +234,7 @@ uintptr_t gWJStringHeaderWord = 0; // NurseryCellHeader value for String cells (
+@@ -77,6 +82,11 @@
+ #include "vm/PlainObject-inl.h"  // createWithShape
+ #include "vm/Interpreter-inl.h"  // GetElementOperation
+ #include "vm/JSObject-inl.h"     // GuessArrayGCKind
++#include "js/friend/StackLimits.h"  // js::AutoCheckRecursionLimit (native fast path)
++#include "debugger/DebugAPI-inl.h"  // js::DebugAPI::onNativeCall (native fast path)
++#include "js/CallArgs.h"            // JS::CallArgsFromVp (native fast path)
++#include "js/ValueArray.h"          // JS::RootedValueArray (native fast path vp)
++#include "vm/GlobalObject.h"        // js::GlobalObject (native-call this outerization)
+ 
+ #if defined(__EMSCRIPTEN__)
+ #  include <emscripten.h>
+@@ -229,6 +239,7 @@ uintptr_t gWJStringHeaderWord = 0; // NurseryCellHeader value for String cells (
  uint32_t gWJHelpObj = 0;        // object ptr for WJH_SETSLOT
  uint32_t gWJHelpSlot = 0;
  uint64_t gWJHelpVal = 0;        // boxed value for WJH_SETSLOT
@@ -1052,7 +1125,151 @@ index 3d1c31dcfb..2c1884f609 100644
  uint64_t gWJPreBarBadSkips = 0; // WJH_PREBARRIER: count of skipped invalid/garbage old-value cells (a store handed the barrier a bad ptr -- see discord.com pre-barrier crash)
  uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hits
  uint32_t gWJCallFn[kWJCallSites * kWJCallWays];     // polymorphic call IC: callee ptrs
-@@ -5122,6 +5128,352 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -325,6 +336,8 @@ alignas(8) uint64_t gWJScratch[js::wasm::kWJScratchSlots];
+ uint64_t gWJWasmRuns = 0;
+ uint64_t gWJFastCalls = 0;
+ uint64_t gWJSlowCalls = 0;
++uint64_t gWJNativeCalls = 0;  // calls to native JSFunctions via the direct
++                            // native() fast path (no JS::Call/InvokeArgs)
+ uint64_t gWJWasmDeopts = 0;
+ // Set by WJH_RESUME; checked by WasmJitRunCall to tell a deopted entry from one
+ // that ran fully in JIT (both return flag 0), driving the deopt-storm safety valve.
+@@ -1484,7 +1497,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+   }
+   gWJWasmRuns++;
+   WJStatsDumpTick();  // GECKO_WJ_STATSJSON: periodic stderr snapshot (browser-capturable)
+-  if (((gWJFastCalls+gWJSlowCalls) % 20000)==0 && (gWJFastCalls+gWJSlowCalls)>0 && (getenv("GECKO_WJWARP_DUMP")||getenv("GECKO_DEBUG_JIT"))) fprintf(stderr, "[wb-calls] fast=%llu slow=%llu\n", (unsigned long long)gWJFastCalls,(unsigned long long)gWJSlowCalls);
++  if (((gWJFastCalls+gWJSlowCalls+gWJNativeCalls) % 20000)==0 && (gWJFastCalls+gWJSlowCalls+gWJNativeCalls)>0 && (getenv("GECKO_WJWARP_DUMP")||getenv("GECKO_DEBUG_JIT"))) fprintf(stderr, "[wb-calls] fast=%llu slow=%llu native=%llu\n", (unsigned long long)gWJFastCalls,(unsigned long long)gWJSlowCalls,(unsigned long long)gWJNativeCalls);
+   if (((gWJWasmRuns + gWJWasmDeopts) % 5000) == 0 &&
+       (getenv("GECKO_WJWARP_DUMP") || getenv("GECKO_DEBUG_JIT"))) {
+     fprintf(stderr, "[wb-stats] wasm runs=%llu deopts=%llu\n",
+@@ -1925,6 +1938,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJDumpCrashState() {
+     }
+   }
+ }
++// Direct JSNative call (Ion's callNative ABI), shared by the WJH_CALL native
++// fast path and WJH_CALLNATIVE. Mirrors CallJSNative: recursion check +
++// DebugAPI::onNativeCall + AutoRealm, then native(cx, argc, vp) with the
++// CallArgs vp layout [0]=callee/rval, [1]=this, [2..]=args.
++//
++// vp MUST be a per-call GC-rooted stack buffer (RootedValueArray, same as
++// FixedInvokeArgs uses), NOT the shared gWJScratch: a native may re-enter wasm
++// code (sort's comparator, forEach/map callbacks, getters...) whose own wjhelp
++// arg staging would clobber the scratch mid-call -> corrupted args/rval.
++static double WJNativeCall(JSContext* cx, JSFunction* fun, JSNative native,
++                           uint32_t argc, const JS::Value* args,
++                           JS::HandleValue thisv) {
++  JS::RootedValueArray<62> vbuf(cx);
++  JS::Value* vp = vbuf.begin();
++  vp[0].setObject(*fun);
++  vp[1] = thisv;
++  for (uint32_t i = 0; i < argc; i++) vp[2 + i] = args[i];
++  // js::Call parity (CalleeNeedsOuterizedThisObject): outerize a global-object
++  // `this` for everything except DOM Getter/Setter jitInfo natives.
++  if (vp[1].isObject() && vp[1].toObject().is<GlobalObject>() &&
++      (!fun->hasJitInfo() || fun->jitInfo()->needsOuterizedThisObject())) {
++    vp[1].setObject(*js::GetThisObject(&vp[1].toObject()));
++  }
++  js::AutoCheckRecursionLimit recursion(cx);
++  if (!recursion.check(cx)) {
++    return 1.0;
++  }
++  JS::CallArgs nargs = JS::CallArgsFromVp(argc, vp);
++  js::NativeResumeMode rm =
++      js::DebugAPI::onNativeCall(cx, nargs, js::CallReason::Call);
++  if (rm != js::NativeResumeMode::Continue) {
++    if (rm == js::NativeResumeMode::Override) {
++      gWJScratch[js::wasm::kWJResultSlot] = nargs.rval().get().asRawBits();
++      return 0.0;
++    }
++    return 1.0;
++  }
++  fun = &vp[0].toObject().as<JSFunction>();  // re-derive: the hook may GC->move
++  js::AutoRealm ar(cx, fun);
++  gWJNativeCalls++;
++  if (!native(cx, argc, vp)) {
++    return 1.0;
++  }
++  gWJScratch[js::wasm::kWJResultSlot] = vp[0].asRawBits();
++  return 0.0;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE double wjhelp(double kindF, double siteF) {
+   gWJLastHelpKind = uint32_t(kindF);
+   gWJLastHelpSite = uint32_t(siteF);
+@@ -2781,6 +2841,25 @@ static double wjhelpImpl(double kindF, double siteF) {
+       }
+     }
+ 
++    // Native-callee fast path (Ion's callNative ABI): for a JSFunction that
++    // isNativeFun, call fun->native() directly -- skipping JS::Call's InvokeArgs
++    // plumbing and InternalCallOrConstruct dispatch. WJNativeCall copies the
++    // staged args into a per-call GC-rooted vp buffer (reentrancy-safe: natives
++    // can call back into wasm code that re-stages the shared scratch).
++    static int noNativeCall = getenv("GECKO_WJ_NONATIVECALL") ? 1 : 0;
++    if (!noNativeCall && argc <= 60 && callee.isObject() &&
++        callee.toObject().is<JSFunction>()) {
++      JSFunction* nfun = &callee.toObject().as<JSFunction>();
++      if (nfun->isNativeFun()) {
++        JS::HandleValue thisv = JS::HandleValue::fromMarkedLocation(
++            reinterpret_cast<const JS::Value*>(
++                &gWJScratch[js::wasm::kWJThisSlot]));
++        return WJNativeCall(
++            cx, nfun, nfun->native(), argc,
++            reinterpret_cast<const JS::Value*>(&gWJScratch[0]), thisv);
++      }
++    }
++
+     // gWJScratch[0..kWJThisSlot] is GC-traced by WJTraceRoots, so hand JS::Call
+     // non-owning Handles straight into it -- no per-call RootedValueVector copy or
+     // thisv rooting (the per-call Rooted overhead was ~1.3% across ~1M slow calls).
+@@ -2875,6 +2954,45 @@ static double wjhelpImpl(double kindF, double siteF) {
+     return 0.0;
+   }
+ 
++  // WJH_CALLNATIVE: backend-staged direct native call. siteF packs
++  // (argc << 32) | uint32(nativeFnPtr). The caller already wrote the CallArgs
++  // vp layout: scratch[0]=callee, [1]=this, [2..argc+1]=args. Same checks as
++  // the WJH_CALL native fast path (CallJSNative parity).
++  if (kind == js::wasm::WJH_CALLNATIVE) {
++    static int noNativeCall = getenv("GECKO_WJ_NONATIVECALL") ? 1 : 0;
++    uint64_t su = uint64_t(siteF);
++    uint32_t argc = uint32_t(su >> 32);
++    JSNative native = JSNative(uintptr_t(uint32_t(su)));
++    JS::Value* svp = reinterpret_cast<JS::Value*>(&gWJScratch[0]);
++    bool bad = noNativeCall || !native || argc > 60 || !svp[0].isObject() ||
++               !svp[0].toObject().is<JSFunction>() ||
++               !svp[0].toObject().as<JSFunction>().isNativeFun();
++    if (!bad) {
++      // The baked ptr is fun->native(), or its IgnoresReturnValue jitInfo
++      // alternate when the call site drops the result (Ion's visitCallNative).
++      JSFunction* vf = &svp[0].toObject().as<JSFunction>();
++      bad = vf->native() != native &&
++            !(vf->hasJitInfo() &&
++              vf->jitInfo()->type() == JSJitInfo::IgnoresReturnValueNative &&
++              vf->jitInfo()->ignoresReturnValueMethod == native);
++    }
++    if (bad) {
++      // Baked identity doesn't match the staged callee (a debug-disable env or
++      // stale embed): re-stage into the WJH_CALL layout and take the generic
++      // path -- which re-detects natives itself.
++      uint64_t thisBits = svp[1].asRawBits();
++      uint64_t calleeBits = svp[0].asRawBits();
++      memmove(svp, svp + 2, argc * sizeof(JS::Value));
++      gWJScratch[js::wasm::kWJThisSlot] = thisBits;
++      gWJCallCallee = calleeBits;
++      gWJCallArgc = argc;
++      return wjhelpImpl(js::wasm::WJH_CALL, siteF);
++    }
++    JSFunction* nfun = &svp[0].toObject().as<JSFunction>();
++    JS::HandleValue thisv = JS::HandleValue::fromMarkedLocation(&svp[1]);
++    return WJNativeCall(cx, nfun, native, argc, &svp[2], thisv);
++  }
++
+   if (kind == js::wasm::WJH_DBGPTR) {
+     // DEBUG: log the value the valNursery post-barrier check is about to chunk-load.
+     // gWJHelpObj = payload (low32), gWJHelpVal = full boxed bits. If the next line is
+@@ -5122,6 +5240,352 @@ static double wjhelpImpl(double kindF, double siteF) {
      return 0.0;
    }
  

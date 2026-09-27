@@ -19,9 +19,11 @@ and `patches/README.md` (every engine change, op by op).
   **invalid-wasm** bugs that silently dropped whole functions to the interpreter.
 * Heavy/realistic workloads now exist: `bench/site/` (real libraries over real
   page content) and `bench/spa/` (a ~2.2 k-line SPA).
-* **The top open bottleneck is calls to non-inlined builtins** (2.6 M slow
-  `wjhelp(WJH_CALL)` crossings on the SPA). The fix is a **native-call fast
-  path** (Ion's `callNative` ABI). This is the highest-value next project.
+* The top bottleneck (2.6 M slow `wjhelp(WJH_CALL)` crossings on the SPA for
+  non-inlined builtins) is now addressed by a **native-call fast path**
+  (`WJH_CALLNATIVE` + runtime dispatch in `WJH_CALL`, replicating Ion's
+  `callNative` semantics): micro native-call +33 %, spa.js +8 %, octane
+  regexp +23 %, identical checksums. See `docs/wasmjit-optimizations.md`.
 
 ---
 
@@ -168,6 +170,12 @@ bash bench/spa/run.sh                                                           
 7. Workloads: `bench/site/` (parse5 / htmlparser2+css-select / search index /
    preact SSR / lodash over real page content) and `bench/spa/` (heavy SPA);
    plus 8 new self-checking microbenches.
+8. **Native-call fast path** (session 2): `WJH_CALL` native dispatch +
+   `WJH_CALLNATIVE` for constant native callees, sharing `WJNativeCall` (per-call
+   `JS::RootedValueArray<62>` vp — required for re-entrant natives like `sort`
+   comparators; `gWJScratch` vp is clobbered by nested calls). Escape hatches
+   `GECKO_WJ_NONATIVECALL` / `GECKO_WJ_NONATIVEBE`. New probe
+   `bench/microbenches/native-call.js`.
 
 `patches/README.md` documents every op and the measured effect.
 
@@ -187,6 +195,9 @@ bash bench/spa/run.sh                                                           
 | `bench/site` dom | — | ~12× |
 | `bench/site` ssr (preact) | 1.4× | **1.8× with `GECKO_WJ_MAXLEN=8192`** |
 | `bench/spa` | — | **4.1×** (82.8 ms vs 339 ms/iter) |
+| `micro native-call` (session 2) | 118.3 ms | 79.7 ms (**+33 %** vs `GECKO_WJ_NONATIVECALL`) |
+| `bench/spa` (session 2) | 84.8 ms | 77.9 ms/iter |
+| octane regexp (session 2) | ~974 | ~1197 |
 
 Correctness gates run after every change (all green): `micro --ab` (19 benches,
 JIT-vs-PBL checksums), `realapp all --ab`, `jetstream --ab` (validate()),
@@ -196,14 +207,12 @@ JIT-vs-PBL checksums), `realapp all --ab`, `jetstream --ab` (validate()),
 
 ## 7. Open issues / prioritized next steps
 
-1. **Native-call fast path (highest value).** On the SPA, `GECKO_WJ_CALLHIST=1`
-   shows 2.6 M slow calls dominated by non-inlined builtins:
-   `IsOptimizableRegExpObject` 910 k, `RegExpSearcher` 455 k,
-   `Array.prototype.sort` 432 k, `String()` 340 k, `Set.add` 101 k,
-   `Math.round` 53 k, `Map.get` 46 k, `toFixed` 21 k. They take the generic
-   `wjhelp(WJH_CALL)` → `JS::Call` path. Implement Ion's `callNative` ABI
-   (`JSJitInfo` argType conversion + direct call + result boxing) for generic
-   `MCall`s whose callee is a native, or inline more builtins (one at a time).
+1. ~~Native-call fast path~~ **DONE** (session 2). `WJH_CALL` runtime dispatch +
+   `WJH_CALLNATIVE` for constant natives. Next step on the same axis: the
+   remaining slow calls are non-native `JS::Call`s and builtins that still
+   take `WJH_CALL` because they aren't constant-folded — check
+   `GECKO_WJ_CALLHIST` again on the SPA for what is left, or inline more
+   builtins one at a time.
 2. **pdf.js `FlateStream_readBlock` miscompile** (blocks `MTypedArraySubarray`).
    The lowering is correct (`typed-subarray` probe passes with `GECKO_WJ_TASUB=1`)
    but compiling that ~5.7 KB function produces wrong values / OOB. Bisect it
@@ -263,7 +272,7 @@ patches/0001-*.patch            all WasmJit* lowering/codegen changes
 bench/README.md                 bench harness docs (suites, flags, disas, jittest)
 bench/main.ts                   the unified runner
 bench/spidermonkey.js/          embed sources (embed.cpp, wasm-host-bridge.js, build.sh, fastjit.sh)
-bench/microbenches/             focused, self-checking probes (19)
+bench/microbenches/             focused, self-checking probes (20)
 bench/site/                     real libs over thirdlf03.com content (+ README)
 bench/spa/                      heavy SPA workload (+ README)
 firefox/js/src/wasm/WasmJit*.{h,cpp}   THE code you edit (git-ignored checkout)

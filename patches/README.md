@@ -160,3 +160,29 @@ With `GECKO_WJ_MAXLEN=8192` the preact SSR bench goes 90 ms -> 50 ms (1.80x,
 identical checksum). The 4096 default is kept: raising it regresses octane
 (richards 7975 -> 6358) and ubo (999 -> 1132 ms) because their large functions
 are net-negative to compile.
+
+### 11. Native-call fast path (`WJH_CALLNATIVE`)
+
+The SPA spends ~2.6M calls/run in `wjhelp(WJH_CALL)` -> `JS::Call` for
+non-inlined natives (regexp helpers, `Array.prototype.sort`, `String`,
+Map/Set ops, `Math.round`, `toFixed`). Two-level fix, both funneling into a
+shared `WJNativeCall` that replicates `CallJSNative` semantics
+(recursion-limit RAII, `DebugAPI::onNativeCall`, `AutoRealm`, global-`this`
+outerization, `NativeResumeMode::Override`):
+
+* `WJH_CALL` probes the boxed callee for `JSFunction` + `isNativeFun` and
+  calls `fun->native()` directly, skipping `InvokeArgs`/`JS::Call`.
+* `MCall` on a constant native callee emits `WJH_CALLNATIVE` with
+  `vp=[callee,this,args]` staged at scratch[0..argc+1] and
+  `(argc<<32)|nativeFnPtr` packed into the site f64. A stale baked identity
+  degrades back to generic `WJH_CALL`.
+
+Reentrancy safety: the `vp` lives in a per-call `JS::RootedValueArray<62>`
+on the C++ stack, NOT `gWJScratch` — natives re-enter JS (sort comparators,
+getters) whose own helper staging would otherwise clobber the outer call's
+args. `fun` is re-derived from rooted `vp[0]` after `onNativeCall` (debug JS
+can GC/move the callee).
+
+Interleaved A/B medians: `micro native-call` 118 -> 80 ms (+33%), spa.js
+85 -> 78 ms (+8%), site search +23%, octane regexp +23%. `GECKO_WJ_NONATIVECALL`
+/ `GECKO_WJ_NONATIVEBE` disable each level. `[wb-calls]` gains `native=`.
