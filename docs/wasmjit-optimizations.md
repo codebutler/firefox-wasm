@@ -120,3 +120,31 @@ So 8192 is a real win for workloads whose hot function is a large literal-builde
 kept; the `GECKO_WJ_MAXLEN` knob is the per-deployment choice. `GECKO_WJ_SIZEWARMUP`
 (scale the warmup threshold by bytecode length) can delay large-function compiles
 but regresses medium-hot throughput.
+
+## Heavy SPA workload (`bench/spa/spa.js`)
+
+A ~2,200-line pure-ES2020 "SPA" (signals/computed/effects, keyed vdom diff +
+serializer, router, redux-like store, memoized selectors, plugin host, JSON
+persistence with migrations, i18n, todos/kanban/table/analytics/settings/
+notifications/command-palette/undo-redo feature modules) driven by ~400
+simulated interactions per iteration. Generated with `pi --provider opencode-go
+--model deepseek-v4-flash`.
+
+* **JIT 82.6 ms/iter vs PBL 342 ms/iter = 4.14x**, checksums identical, **no
+  bails**, 85 functions compiled.
+* Deopt rate ~10% (`GECKO_WJ_STATSJSON`); the hot functions deopt 84% of the
+  time on `Unbox` (6.1k) and `Ursh` (3.1k). Putting those functions in PBL
+  (`GECKO_WJ_NOCOMPILERANGE`) is *slower*, so the deopts are not worth chasing.
+* **The cost is calls to builtins that aren't inlined.** `GECKO_WJ_CALLHIST=1`
+  on 2.6M slow (wjhelp boundary) calls: `IsOptimizableRegExpObject` 910k,
+  `RegExpSearcher` 455k, `Array.prototype.sort` 432k, `String()` 340k,
+  `Set.prototype.add` 101k, `Math.round` 53k, `RegExpExecForTest` 50k,
+  `Map.prototype.get` 46k, `toFixed` 21k. Those sites don't get a CacheIR
+  specialization, so they take the generic `wjhelp(WJH_CALL)` -> `JS::Call` path.
+* Knobs tried, none help: `GECKO_WJ_NUMARITH=1` (82.6 -> 222 ms, much worse),
+  `GECKO_WJWARP_DELAY` 800 is best (50 -> 133 ms), `GECKO_WJ_MAXLEN` no change,
+  `GECKO_WJ_OOBLOAD=1` neutral, `GECKO_WJ_NOFLAGCHECK=1` only +2.5% ceiling.
+
+Next actionable step from this data: a fast **native-call** path for generic
+`MCall`s whose callee is a native with `JSJitInfo` (Ion's `callNative` ABI),
+instead of always routing through `JS::Call`; and/or more builtin inlining.
