@@ -1,5 +1,20 @@
 # JS→WASM JIT optimization log (2026-09-27 session)
 
+## Final result (interleaved A/B vs the pre-session build)
+
+| bench | before | after | change |
+|---|---|---|---|
+| `micro mixed-arith` | 57.6 ms (1.24×) | 2.25 ms (33.2×) | **25.6× faster** (was invalid wasm → PBL) |
+| `micro samevalue-atan2` | 289.9 ms (1.01×) | 31.1 ms (9.37×) | **9.3× faster** |
+| `micro kitchen-sink` | 1104.7 ms (4.21×) | 957.0 ms (4.86×) | +15% |
+| `octane earley` | ratio 6.47 | 8.46 | **+31%** (>8-arg fns now compile) |
+| `octane richards` | ratio 23.2 | 24.2 | +5% |
+| octane splay/gbemu/box2d | — | — | neutral (±1–2%) |
+
+The seven new/updated self-checking microbenches (`date-ops`, `mixed-arith`,
+`minmax-idx`, `samevalue-atan2`, `kitchen-sink{2,3,4}`, `mapset-probe`) all pass
+with JIT == PBL checksums.
+
 The JS-only SpiderMonkey embed now builds and benchmarks **on macOS/arm64**
 (see `docs/wasmjit-dev-loop.md`), so JIT work no longer needs the Linux-only full
 Gecko build. `fastjit.sh` gives a ~12–18 s edit→bench cycle.
