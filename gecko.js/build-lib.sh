@@ -160,7 +160,7 @@ if [ "${GECKO_RELEASE:-}" = "1" ] && [ "${NO_WASM_OPT:-}" != "1" ]; then
   # unbounded on a module this large. Override with $GECKO_WASMOPT_FLAGS.
   WASMOPT_FLAGS="${GECKO_WASMOPT_FLAGS:--all -O4 -O3}"
   echo ">> wasm-opt $WASMOPT_FLAGS  (release, on gecko.wasm)"
-  # shellcheck disable=SC2086 -- intentional word-splitting of the flag string
+  # shellcheck disable=SC2086  # intentional word-splitting of the flag string
   "$WASMOPT" $WASMOPT_FLAGS "$PKG/wasm/gecko.wasm" -o "$PKG/wasm/gecko.wasm.opt" \
     && mv -f "$PKG/wasm/gecko.wasm.opt" "$PKG/wasm/gecko.wasm" \
     || { echo "!! wasm-opt failed"; rm -f "$PKG/wasm/gecko.wasm.opt"; exit 1; }

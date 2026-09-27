@@ -154,18 +154,24 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
     s_scrollDiag++;
     // Diagnose why the fallback does or doesn't fire for a given document type:
     // sf missing -> wrong presShell; prevented -> content handled it;
-    // scrollable<=port -> the doc has no vertical overflow (print-like view).
-    printf("do_wheel: sf=%p prevented=%d rootMoved=%d scrollableH=%d portH=%d\n",
+    // scrolled<=port -> the doc has no vertical overflow (print-like view).
+    // GetScrolledRect() is the scrolled CONTENT rect (what "scrollable rect" means
+    // here); ScrollContainerFrame has no GetScrollableRect -- that name only exists
+    // on APZ's FrameMetrics, which is not what this main-thread path has.
+    printf("do_wheel: sf=%p prevented=%d rootMoved=%d scrolledH=%d portH=%d\n",
            (void*)sf, ev.DefaultPrevented() ? 1 : 0,
            !sf || sf->GetScrollPosition() == before
                ? 0
                : 1,
-           sf ? sf->GetScrollableRect().Height() : -1,
+           sf ? sf->GetScrolledRect().Height() : -1,
            sf ? sf->GetScrollPortRect().Height() : -1);
     fflush(stdout);
   }
+  // GetScrollRange().height is the documented "can this be scrolled vertically"
+  // test (nonzero iff scrolled content exceeds the scroll port; it is exactly
+  // max(GetScrolledRect().height - scrollPort.height, 0) in the engine).
   if (sf && sf->GetScrollPosition() == before && !ev.DefaultPrevented() &&
-      sf->GetScrollableRect().Height() > sf->GetScrollPortRect().Height()) {
+      sf->GetScrollRange().height > 0) {
     sf->ScrollToCSSPixels(
         CSSPoint::FromAppUnits(before) + CSSPoint((float)dx, (float)dy),
         ScrollMode::Instant);

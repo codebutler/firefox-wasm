@@ -26,3 +26,13 @@ See `docs/HANDOFF.md` for the current state and next steps, `docs/wasmjit-dev-lo
 for the (macOS-capable) JS-only build + benchmark loop, and
 `docs/wasmjit-optimizations.md` + `patches/README.md` for what was changed and
 why. Quick loop: `bash bench/spidermonkey.js/fastjit.sh && node bench/main.ts micro --ab`.
+
+# Embedder compile check
+`gecko.js/src/embed-*.cpp` is only compiled by `gecko.js/build-lib.sh`, which needs a
+built engine objdir, so a Gecko API that does not exist at the pinned revision is
+otherwise only found at the very end of a full engine build. Once an objdir exists,
+check the embedder without linking in seconds:
+
+```bash
+RELEASE=1 bash gecko.js/check-embedder.sh   # needs obj-full-emscripten-release/dist/include
+```
