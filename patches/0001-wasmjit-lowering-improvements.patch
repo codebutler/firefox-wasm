@@ -1,5 +1,5 @@
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index d903469112..0f73b35858 100644
+index d903469112..e2e5157e64 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
 @@ -258,6 +258,8 @@ struct WJBackend {
@@ -716,7 +716,7 @@ index d903469112..0f73b35858 100644
        }
        return false;
      }
-@@ -10779,6 +11376,47 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10779,6 +11376,57 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
          return EffectKind::Fail;
        return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
      }
@@ -727,6 +727,16 @@ index d903469112..0f73b35858 100644
 +      if (!EmitStageScratch(e, be, ins->toDateFillLocalTimeSlots()->date(), 0))
 +        return EffectKind::Fail;
 +      if (!EmitHelperCallResult(e, be, ins, WJH_DATEFILLLOCALTIMESLOTS, 0))
++        return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::SetFunName: {
++      // Inferred function `.name` (const f = () => {}, { m() {} }). Cold.
++      MSetFunName* m = ins->toSetFunName();
++      if (!EmitStageScratch(e, be, m->fun(), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->name(), 1)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETFUNNAME,
++                                uint32_t(m->prefixKind())))
 +        return EffectKind::Fail;
 +      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
 +    }
@@ -764,7 +774,7 @@ index d903469112..0f73b35858 100644
      case MDefinition::Opcode::Bail:
      case MDefinition::Opcode::Unreachable:
      case MDefinition::Opcode::ThrowWithStack:  // `throw` variant that attaches an
-@@ -10797,9 +11435,29 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10797,9 +11445,29 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
        be.inDispatchBody = savedDispatch;
        return ok ? EffectKind::Emitted : EffectKind::Fail;
      }
@@ -794,7 +804,7 @@ index d903469112..0f73b35858 100644
        return EffectKind::Skip;  // prologue / ignored (host stack guards depth)
      case MDefinition::Opcode::AddAndStoreSlot: {
        // Add an own property: transition obj->shape to the new shape (which has the
-@@ -11864,7 +12522,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
+@@ -11864,7 +12532,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
    }
    if (!GetOp(e, be, val)) return false;
    if (val->type() != MIRType::Value && val->type() != MIRType::Int64) {
@@ -808,7 +818,7 @@ index d903469112..0f73b35858 100644
    }
    if (!EmitEnvRootPop(e, be)) return false;
    if (!EmitDepthPop(e, be)) return false;
-@@ -13576,6 +14239,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -13576,6 +14249,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    be.iterIdx = uint32_t(be.reserve(uint8_t(TypeCode::I32)));    // Load/StoreSlotByIteratorIndex temps
    be.iterKind = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
    be.iterAddr = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
@@ -818,10 +828,10 @@ index d903469112..0f73b35858 100644
    be.callArgBase = uint32_t(be.reserve(uint8_t(TypeCode::I64)));  // boxed this
    for (uint32_t i = 0; i < kWJMaxArgs; i++) {
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index a55de9774e..785c9657e6 100644
+index a55de9774e..95a987d7dd 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -179,6 +179,35 @@ enum WJHelpKind : int {
+@@ -179,6 +179,36 @@ enum WJHelpKind : int {
    WJH_ASYNCRESOLVE = 113,       // scratch[0]=generator(AsyncFunctionGeneratorObject, boxed Object), [1]=value(boxed) -> Object; MAsyncResolve via js::AsyncFunctionResolve (resolves an async fn's promise at its return/resolve point). May GC/OOM. Async fns bailed whole-fn to PBL here (reddit.com).
    WJH_CANSKIPAWAIT = 114,       // scratch[0]=value(boxed) -> Boolean; MCanSkipAwait via js::CanSkipAwait (await-skip optimization: true when the awaited value isn't a thenable). May GC (getter on .then/.constructor).
    WJH_EXTRACTAWAITVALUE = 115,  // scratch[0]=value(boxed) -> Value; MMaybeExtractAwaitValue's can-skip branch via js::ExtractAwaitValue (unwrap the already-resolved await value). May GC.
@@ -854,10 +864,11 @@ index a55de9774e..785c9657e6 100644
 +  WJH_CHECKCLASSHERITAGE = 142,      // scratch[0]=heritage(Value) -> f64 call flag (0 = null/constructor, 1 = deopt)
 +  WJH_ISTYPEDARRAYCTOR = 143,        // scratch[0]=object -> Boolean; js::IsTypedArrayConstructor
 +  WJH_CHECKFUSE = 144,               // site=fuse index -> f64 call flag (0 = intact, 1 = popped -> deopt); MGuardFuse
++  WJH_SETFUNNAME = 145,              // scratch[0]=function(Object), scratch[1]=name(Value), site=prefixKind -> void; js::SetFunctionName
  };
  // MNewLexicalEnvironmentObject: the LexicalScope* baked from the template object.
  extern uint32_t gWJLexScope;
-@@ -339,6 +368,10 @@ extern uint64_t gWJConstructNewTarget;
+@@ -339,6 +369,10 @@ extern uint64_t gWJConstructNewTarget;
  extern uint32_t gWJHelpObj;
  extern uint32_t gWJHelpSlot;
  extern uint64_t gWJHelpVal;
@@ -869,18 +880,20 @@ index a55de9774e..785c9657e6 100644
  
  // Monomorphic call-site IC for direct wasm->wasm calls. Per call site: the cached
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 3d1c31dcfb..3463a08059 100644
+index 3d1c31dcfb..93210e011b 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
-@@ -30,6 +30,7 @@
+@@ -30,7 +30,9 @@
  #include "js/RootingAPI.h"
  #include "js/Value.h"
  #include "vm/JSContext.h"
 +#include "vm/Realm.h"  // Realm::realmFuses (WJH_CHECKFUSE / MGuardFuse)
  #include "vm/JSFunction.h"
++#include "vm/FunctionPrefixKind.h"  // js::FunctionPrefixKind (WJH_SETFUNNAME)
  #include "vm/ArgumentsObject.h"  // ArgumentsObject::createForWasmJit (WJH_NEWARGUMENTS)
  #include "builtin/Object.h"      // js::ObjectClassToString (WJH_OBJCLASSTOSTRING)
-@@ -55,6 +56,9 @@
+ #include "builtin/MapObject.h"   // js::MapObject::create / js::SetObject::create (WJH_NEWMAP/NEWSET)
+@@ -55,6 +57,9 @@
  #include "vm/Shape.h"    // js::Shape
  #include "vm/ArrayObject.h"   // js::ArrayObject
  #include "builtin/Array.h"    // js::SetLengthProperty, IsArrayFromJit
@@ -890,7 +903,7 @@ index 3d1c31dcfb..3463a08059 100644
  #include "vm/RegExpObject.h"  // js::CloneRegExpObject (MRegExp)
  #include "builtin/String.h"   // js::StringFromCharCode
  #include "builtin/RegExp.h"   // js::RegExpHasCaptureGroups
-@@ -229,6 +233,7 @@ uintptr_t gWJStringHeaderWord = 0; // NurseryCellHeader value for String cells (
+@@ -229,6 +234,7 @@ uintptr_t gWJStringHeaderWord = 0; // NurseryCellHeader value for String cells (
  uint32_t gWJHelpObj = 0;        // object ptr for WJH_SETSLOT
  uint32_t gWJHelpSlot = 0;
  uint64_t gWJHelpVal = 0;        // boxed value for WJH_SETSLOT
@@ -898,7 +911,7 @@ index 3d1c31dcfb..3463a08059 100644
  uint64_t gWJPreBarBadSkips = 0; // WJH_PREBARRIER: count of skipped invalid/garbage old-value cells (a store handed the barrier a bad ptr -- see discord.com pre-barrier crash)
  uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hits
  uint32_t gWJCallFn[kWJCallSites * kWJCallWays];     // polymorphic call IC: callee ptrs
-@@ -5122,6 +5127,285 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5122,6 +5128,296 @@ static double wjhelpImpl(double kindF, double siteF) {
      return 0.0;
    }
  
@@ -1179,6 +1192,17 @@ index 3d1c31dcfb..3463a08059 100644
 +    auto idx = js::RealmFuses::FuseIndex(int(siteF));
 +    js::GuardFuse* fuse = cx->realm()->realmFuses.getFuseByIndex(idx);
 +    return (fuse && fuse->intact()) ? 0.0 : 1.0;
++  }
++  if (kind == js::wasm::WJH_SETFUNNAME) {
++    // MSetFunName: inferred function `.name` (const f = () => {}, { m() {} }).
++    JS::RootedFunction fun(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<JSFunction>());
++    JS::RootedValue name(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    if (!js::SetFunctionName(cx, fun, name,
++                             js::FunctionPrefixKind(int(siteF)))) {
++      return 1.0;
++    }
++    return 0.0;
 +  }
 +
    return 1.0;

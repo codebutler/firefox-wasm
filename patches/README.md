@@ -121,3 +121,11 @@ probe (Array/String/Math/Date/TypedArray/DataView/Reflect/Object methods, tagged
 templates) already compiled. `new.target` (`MNewTarget`) still bails: the JIT
 entry does not plumb new.target, so it is left to PBL. `localeCompare` traps in
 the minimal embed itself (intl disabled).
+
+### 8. Inferred function names
+
+Fourth probe (`micro kitchen-sink4`: Symbol.toPrimitive, prototype accessors,
+custom iterators, Symbol.hasInstance/toStringTag, spread/apply/Reflect.apply,
+ES2023 array methods, named-group regexps, optional chaining/nullish): only
+`MSetFunName` bailed -> `js::SetFunctionName` helper (inferred `f.name` for
+arrow/method definitions).
