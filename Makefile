@@ -35,6 +35,17 @@ EMSDK_VERSION  ?= 6.0.1
 EMSDK_STAMP    := $(EMSDK)/.wisp-patched
 WISP_PATCH_SRC := gecko.js/patch-emsdk-wasmfs.mjs gecko.js/emsdk-patches/wisp_socket.h
 
+# Engine patches: the JS->WASM JIT work lives in the pinned fork's
+# js/src/wasm/WasmJit*.{h,cpp} + config/run_spidermonkey_checks.py and is versioned HERE
+# (patches/*.patch) -- NOT in the fork. `pristine pin + patches/*.patch` is byte-identical
+# to the dev tree (verified by diff hash), so the build MUST include them: without them the
+# release artifact ships the fork's baseline JIT, which measured IDENTICAL to the pre-JIT
+# upstream release (v0.0.1) and bails on every op patch 0001 lowers (measured: 6 bail sites
+# -> 0, and 1.59x on the object/class/accessor family). Applied in file-name order.
+PATCH_SRC   := $(abspath $(sort $(wildcard patches/*.patch)))
+PATCH_SRC_R := $(shell printf '%s\n' $(PATCH_SRC) | sort -r | tr '\n' ' ')
+PATCH_STAMP := firefox/.wj-patched
+
 EM_CONFIG           ?= $(ROOT)/em_config
 MOZCONFIG           ?= $(ROOT)/mozconfig.full.emscripten
 MOZBUILD_STATE_PATH ?= $(HOME)/.mozbuild
@@ -104,6 +115,45 @@ release:
 # exact commit at depth 1 (no submodule, no full history). The firefox/.git guard
 # makes this a no-op once the checkout exists; to move the pin, bump FIREFOX_REF
 # and `rm -rf firefox` (or `make distclean`).
+# Apply the engine patches (idempotent) and VERIFY the result.
+#
+# `git apply --check` succeeding means "not applied yet, and applies cleanly"; failing means
+# "already applied, or the tree diverged" -- in that case the patch is skipped rather than
+# failing, so a dev tree with WIP edits is never clobbered. That skip is exactly why the
+# result is then verified: the tree must equal `pin + patches` (each patch reverse-applies),
+# otherwise make FAILS instead of silently shipping the baseline JIT. Escape hatches:
+#   FORCE_PATCH=1  reset firefox/ to the pin and re-apply all patches cleanly
+#   PATCH_STRICT=0 accept a verified-clean failure (dev tree with WIP edits)
+$(PATCH_STAMP): $(PATCH_SRC) firefox/.git
+	@if [ "$(FORCE_PATCH)" = "1" ]; then \
+	  echo ">> FORCE_PATCH=1: resetting firefox/ to the pinned revision"; \
+	  git -C firefox checkout -q -- . ; \
+	fi
+	@if [ -z "$(PATCH_SRC)" ]; then echo ">> no patches/*.patch to apply"; else \
+	  for p in $(PATCH_SRC); do \
+	    if git -C firefox apply --check "$$p" >/dev/null 2>&1; then \
+	      git -C firefox apply "$$p" && echo ">> applied patches/$${p##*/}" || exit 1; \
+	    else \
+	      echo ">> patches/$${p##*/}: does not apply forward (already applied?)"; \
+	    fi; \
+	  done; \
+	fi
+	@ok=1; for p in $(PATCH_SRC_R); do \
+	  git -C firefox apply --reverse --check "$$p" >/dev/null 2>&1 || ok=0; \
+	done; \
+	if [ "$$ok" = "1" ]; then \
+	  echo ">> engine patches verified: firefox/ == pinned revision + patches/*.patch"; \
+	  git -C firefox diff --stat | tail -1; \
+	elif [ "$(PATCH_STRICT)" = "0" ]; then \
+	  echo "!! PATCH_STRICT=0: skipping verification (firefox/ has extra WIP edits)"; \
+	else \
+	  echo "!! engine patches do NOT match the pinned revision -- refusing to build a"; \
+	  echo "!! baseline-JIT artifact. Fix patches/*.patch, or FORCE_PATCH=1 (reset"; \
+	  echo "!! firefox/ + re-apply), or PATCH_STRICT=0 to override."; \
+	  exit 1; \
+	fi
+	@touch "$@"
+
 firefox: firefox/.git
 firefox/.git:
 	git init -q firefox
@@ -115,7 +165,7 @@ firefox/.git:
 vendor: firefox
 	python3 vendor-std-deps.py
 
-build: firefox vendor $(EMSDK_STAMP)
+build: firefox vendor $(EMSDK_STAMP) $(PATCH_STAMP)
 	@# Keep mach from reconfiguring on unrelated mtime changes: if none of our
 	@# CONFIGURE_INPUTS are newer than config.status, touch it so it stays newer
 	@# than everything in config_status_deps.in (mach then skips configure). If a
@@ -142,7 +192,7 @@ build: firefox vendor $(EMSDK_STAMP)
 # Force a reconfigure. Needed when you change something configure inspects that
 # isn't in CONFIGURE_INPUTS (e.g. after re-checking out firefox/): `build` above
 # only reconfigures when $(CONFIGURE_INPUTS) change, so use this otherwise.
-configure: firefox vendor $(EMSDK_STAMP)
+configure: firefox vendor $(EMSDK_STAMP) $(PATCH_STAMP)
 	cd firefox && ./mach configure
 
 # Back-compat alias: the old embed-xul web build was removed; the web build IS the

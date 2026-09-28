@@ -61,6 +61,8 @@ git clone --depth 1 https://github.com/emscripten-core/emsdk.git emsdk
 cd emsdk && ./emsdk install 6.0.1 && ./emsdk activate 6.0.1 && cd ..
 rustup target add wasm32-unknown-emscripten
 make firefox                                   # pinned Gecko fork, depth 1 (~5.5 GB)
+# NOTE: `make build` (the full engine) applies patches/*.patch itself and FAILS if the
+# result is not `pin + patches`. This JS-only loop runs `mach` directly, so apply by hand:
 git -C firefox apply ../patches/0000-build-skip-spidermonkey-style-checks.patch
 git -C firefox apply ../patches/0001-wasmjit-lowering-improvements.patch
 
@@ -253,8 +255,10 @@ JIT-vs-PBL checksums), `realapp all --ab`, `jetstream --ab` (validate()),
 * Benchmarks run node with `--no-liftoff` (TurboFan-only) to avoid tiering noise.
 * `--bails` does **not** report invalid-wasm (`host-compile-reject`); sweep with
   `__exec` + grep for `compile failed` when auditing coverage.
-* The engine checkout is git-ignored → **always keep `patches/` in sync** and
-  verify `0000` + `0001` apply to a pristine checkout before handing off.
+* The engine checkout is git-ignored → **always keep `patches/` in sync**. `make build`
+  now applies them itself and **fails** if the result does not match `pin + patches`
+  (`$(PATCH_STAMP)` in the Makefile), so a stale patch can no longer silently ship a
+  baseline-JIT artifact; `FORCE_PATCH=1` resets `firefox/` and re-applies cleanly.
 * `git -C firefox stash pop` can conflict on `config/run_spidermonkey_checks.py`;
   if it does, `git -C firefox checkout -- config/run_spidermonkey_checks.py`
   then `git -C firefox stash pop`.

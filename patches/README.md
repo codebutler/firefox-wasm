@@ -12,6 +12,25 @@ git -C firefox apply ../patches/0000-build-skip-spidermonkey-style-checks.patch
 git -C firefox apply ../patches/0001-wasmjit-lowering-improvements.patch
 ```
 
+**The full engine build applies (and verifies) these automatically** — apply them by hand
+only for the JS-only dev loop, which uses `make firefox` + `mach` directly and never runs
+`make build`. `make build` / `make configure` depend on `firefox/.wj-patched`
+(the `$(PATCH_STAMP)` target in the Makefile), which:
+
+1. applies each `patches/*.patch` in file-name order, skipping any that is already
+   applied (so a dev tree with WIP edits is never clobbered);
+2. then **verifies** the tree is exactly `pinned revision + patches` (every patch
+   reverse-applies). If it is not, make **fails** instead of building — because a release
+   built without these patches ships the fork's baseline JIT, which measured *identical*
+   to the pre-JIT upstream release (`v0.0.1`) and bails on every op that `0001` lowers
+   (6 bail sites -> 0, 1.59x on the object/class/accessor family).
+
+Escape hatches: `FORCE_PATCH=1` resets `firefox/` to the pin and re-applies cleanly;
+`PATCH_STRICT=0` downgrades the verification failure to a warning (dev tree with WIP
+edits). When the patch list or the application logic changes, bump the `patches1` salt in
+the CI engine-cache key — hashing `patches/**` cannot distinguish an objdir built with the
+patches from one built without.
+
 ## 0000-build-skip-spidermonkey-style-checks.patch
 
 Makes `config/run_spidermonkey_checks.py` a no-op when `WJ_SKIP_STYLE_CHECKS=1`.
