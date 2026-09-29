@@ -28,14 +28,19 @@ name: build-and-release
 # WITHOUT engine LTO (LTO doesn't fit this runner — see above).
 #
 # HOSTED (public repo) MODE: on a PUBLIC repo the standard GitHub-hosted runners are
-# free + unlimited and give 4 vCPU / 16 GB RAM (private repos only get 2 vCPU), so a
-# hosted attempt is worth it. Use the workflow_dispatch `runner` input
-# (default `ubuntu-24.04`) to run there; push events keep using the self-hosted
-# `firefox` label. Hosted runs additionally free ~31 GB of disk (free-disk-space),
-# prune the ~26 GB objdir after the link, and can skip the wasm-opt pass. The inputs
-# default to the low-risk first-run combination: runner=ubuntu-24.04, no_wasm_opt=1,
-# prune_objdir=1, swap_gb=16. Re-enable wasm-opt (no_wasm_opt=0) once the pipeline is
-# green.
+# free + unlimited and give 4 vCPU / 16 GB RAM (private repos only get 2 vCPU), so builds
+# run there by DEFAULT now -- push included (that is what publishes releases). To use a
+# machine of your own instead, dispatch with `runner=firefox` (any label a self-hosted
+# runner is registered under); the IS_HOSTED gate then turns off free-disk-space and the
+# objdir prune so the self-hosted objdir stays a usable incremental cache.
+# Hosted runs additionally free ~31 GB of disk (free-disk-space), prune the ~14 GB objdir
+# after the link, and can skip the wasm-opt pass. The dispatch defaults are the low-risk
+# first-run combination: runner=ubuntu-24.04, no_wasm_opt=1, prune_objdir=1, swap_gb=16.
+# Re-enable wasm-opt (no_wasm_opt=0) once the pipeline is green.
+#
+# NOTE: the engine build applies patches/*.patch itself and FAILS if the result is not
+# `pin + patches` (the Makefile's $(PATCH_STAMP) target) -- without them the artifact
+# ships the fork's baseline JIT, which measured identical to the pre-JIT upstream release.
 #
 # Measured on ubuntu-24.04 (first hosted run): 145 GB disk with ~92 GB free (the
 # documented 14 GB is stale -- disk was never the constraint), a release objdir of
@@ -88,21 +93,23 @@ env:
   PNPM_VERSION: '9.12.0'         # matches root package.json "packageManager"
   MOZBUILD_STATE_PATH: ${{ github.workspace }}/.mozbuild
   MACH_NO_TERMINAL_FOOTER: '1'
-  # Dispatch knobs; empty on push events -> the safe/legacy behavior below.
+  # Defaults apply to BOTH push and dispatch now: push must build on a hosted runner
+  # (that is the only path that publishes), and the IS_HOSTED gate below keeps the
+  # self-hosted behaviour intact for `runner=firefox`.
   NO_WASM_OPT: ${{ inputs.no_wasm_opt || '0' }}   # '1' skips build-lib.sh's wasm-opt pass
-  PRUNE_OBJDIR: ${{ inputs.prune_objdir || '0' }}  # never prune the self-hosted incremental objdir
-  SWAP_GB: ${{ inputs.swap_gb || '24' }}
+  PRUNE_OBJDIR: ${{ inputs.prune_objdir || '1' }}  # only acted on when IS_HOSTED anyway
+  SWAP_GB: ${{ inputs.swap_gb || '16' }}
 
 jobs:
   build:
-    # push -> self-hosted `firefox` (unchanged); workflow_dispatch -> inputs.runner
-    # (default ubuntu-24.04, the free GitHub-hosted runner for public repos).
-    runs-on: ${{ inputs.runner || 'firefox' }}
+    # Default runner is the free GitHub-hosted one (public repo) so a plain master push
+    # builds and publishes; dispatch `runner=firefox` for a self-hosted runner.
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 350
     env:
       # Hosted = ephemeral, small disk: free disk + prune. Self-hosted keeps its
       # objdir as the incremental build cache, so neither must run there.
-      IS_HOSTED: ${{ startsWith(inputs.runner || 'firefox', 'ubuntu') }}
+      IS_HOSTED: ${{ startsWith(inputs.runner || 'ubuntu-24.04', 'ubuntu') }}
     steps:
       - name: Checkout the embedder + build harness (this repo)
         uses: actions/checkout@v4
