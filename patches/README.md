@@ -260,3 +260,28 @@ solo (all pre-existing minimal-embed shell gaps, zero cohort regressions).
   `JSScript.{h,cpp}` + `CacheIRCompiler.*` + `BaselineCacheIRCompiler.cpp`
   supporting changes.
 - `mozglue` small fixes (xxhash/SSE/PerfStats build fixes for the wasm target).
+
+### C. Type-storm generic-compare recompile (deopt storm fix)
+
+Lodash `compareAscending` (sort comparator, mixed number/string args)
+specialized `value > other` to `Compare_String`; its operand Unbox
+tag-guards deopted on ~46% of calls (~1.1M deopts measured).
+
+- `shapeDeoptDom` is now a true majority (shape-family sites > 50% of the
+  fn's deopt sites) -- an incidental `GuardSpecificFunction` (lodash's
+  `isSymbol`) no longer blocks the count-gate recompile of an
+  Unbox-dominated fn. `GuardGlobalGeneration` sites moved to their own
+  counter (`hasGggDeopts`) and remain an ABSOLUTE count-gate block
+  (respec re-bakes stale globals: the acorn misparse hazard).
+- A count-gate storm that survives its fresh recompile gets one extra
+  attempt with `e.forceGenericCmp`: fallible MUnboxes consumed only by
+  genericable compares drop their tag guards (their typed locals are dead);
+  numeric compares emit "both-number -> inline f64 cmp, else WJH_COMPARE";
+  String/Symbol/BigInt compares stage the unbox INPUTS into WJH_COMPARE
+  with no refinement guards. Cannot deopt; correct for all type pairs.
+- `GECKO_WJ_GENERICCMP=1` forces the mode for testing.
+
+Measured (embed, wiki:lodash A/B, NORECOMPILEN=1 as pre-fix): perIter
+319.2 -> 303.5ms, deopts @2056 unbounded -> 3000 total then 0.
+A storm-threshold PBL fallback alternative was measured ~10% SLOWER and
+rejected.
