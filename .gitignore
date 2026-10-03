@@ -6,6 +6,13 @@
 # --- mach/emscripten build trees (huge, fully regenerable) ---
 /obj-full-emscripten*/
 /obj-js-emscripten/
+/obj-js-wasi/
+
+# --- experiment logs/results scratch dir ---
+/artifacts/
+
+# bench/alt build output
+/bench/alt/out/
 
 # --- native / emscripten build artifacts ---
 # (.gitignore has no inline comments; keep patterns on their own lines)

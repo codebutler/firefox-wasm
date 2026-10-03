@@ -205,3 +205,55 @@ can GC/move the callee).
 Interleaved A/B medians: `micro native-call` 118 -> 80 ms (+33%), spa.js
 85 -> 78 ms (+8%), site search +23%, octane regexp +23%. `GECKO_WJ_NONATIVECALL`
 / `GECKO_WJ_NONATIVEBE` disable each level. `[wb-calls]` gains `native=`.
+
+## 0002-wasmjit-cohort-and-pbl-work.patch
+
+Delta between `pin + 0000 + 0001` and the current engine work tree. Two bodies of
+work, plus supporting files that were previously uncommitted.
+
+### A. WasmJit "cohort" module fusion (Hotpack)
+
+Baseline WJ topology is 1 JIT function = 1 wasm module = 1 instance, so every
+JIT->JIT call goes through a `call_indirect` on the shared table into a *foreign*
+instance, which V8 cannot speculatively inline. A standalone probe
+(`browser-in-browser/verify/cohort-probe.mjs`) measured same-instance
+`call_indirect` at 2.4-2.7x faster than cross-instance in Chrome for small
+callees.
+
+`GECKO_WJ_COHORT=N` (off by default) batches up to N compiled functions into one
+module/instance:
+
+- Solo compile caches the emitted body bytes in `WJEntry::jitBody`; cohort
+  assembly (`WJWarpCompileCohort` -> `AssembleBodiesAndInstall`) is a pure byte
+  copy into a shared module - no second Warp/MIR run.
+- Call-IC fill records observed caller->callee edges (`gWJCallEdges`); drain
+  packs edge endpoints first, expands transitively, pads with pending seeds.
+- Members keep their existing shared-table slots (caller IC caches stay valid);
+  trampolines are exported as `f`/`f1..`, register-ABI bodies as `m`/`m1..`;
+  host dispatch selects the member via `wasmhost_call(handle, memberIdx)`.
+- Constructor cache entries are repointed handle+member on cohort install;
+  invalidate-all clears jitBody/pending/edges; all script pointers are
+  GC-traced in `WJTraceRoots`.
+- `wasmhost_jit_table_set(handle, slot, member)` gains a member arg (both
+  `gecko.js/lib/` and `bench/spidermonkey.js/` bridges updated).
+- Drain fires on pending>=cap, on the `WasmJitDrainDeferred` idle boundary, and
+  on IC-fill edge recording when pending>=min(8,cap).
+- stats: `cohorts` / `cohortMembers` / `cohortEdgePulls`; `GECKO_WJ_COHORTDBG=1`
+  traces installs.
+
+Measured (embed shell, interleaved runs, noisy machine): `micro call-chain`
+(16-callee chain) ~15-30% faster at cap>=17; octane/micro results identical
+(all sums match); jit-test basic+osr ~1500 tests: failure set identical to
+solo (all pre-existing minimal-embed shell gaps, zero cohort regressions).
+
+### B. PBL weval/wizer plumbing (previous session work, unpatch till now)
+
+- `--enable-pbl-weval` configure option + `ENABLE_JS_PBL_WEVAL` (default off);
+  `js/src/vm/Weval.h`, `PortableBaselineInterpret-{defs,weval-defs}.h`,
+  `third_party/weval`, `third_party/wizer` vendored headers.
+- `js/src/shell/wizer.cpp` (Wizer preinit entry for the js shell) - compiled
+  unconditionally, the weval bits are config-gated.
+- `PortableBaselineInterpret.cpp` interpreter work the above builds on;
+  `JSScript.{h,cpp}` + `CacheIRCompiler.*` + `BaselineCacheIRCompiler.cpp`
+  supporting changes.
+- `mozglue` small fixes (xxhash/SSE/PerfStats build fixes for the wasm target).

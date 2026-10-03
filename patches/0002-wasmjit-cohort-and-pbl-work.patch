@@ -1,0 +1,4449 @@
+diff --git a/js/moz.configure b/js/moz.configure
+index 2e86be3977..01df37e853 100644
+--- a/js/moz.configure
++++ b/js/moz.configure
+@@ -181,6 +181,23 @@ set_config(
+     depends_if("--enable-portable-baseline-interp-force")(lambda _: True),
+ )
+ 
++# weval support (ahead-of-time interpreter compilation in Wasm) for PBL.
++option(
++    "--enable-pbl-weval",
++    default=False,
++    help="{Support|Do not support} wevaling the PBL interpreter",
++)
++
++
++@depends("--enable-portable-baseline-interp", "--enable-pbl-weval")
++def js_pbl_weval(pbl, weval):
++    if pbl and weval:
++        return True
++
++
++set_define("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
++set_config("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
++
+ # Enable ahead-of-time-known preloaded IC bodies.
+ option(
+     "--enable-aot-ics",
+diff --git a/js/src/jit/BaselineCacheIRCompiler.cpp b/js/src/jit/BaselineCacheIRCompiler.cpp
+index e240a1e195..af81fbb1a9 100644
+--- a/js/src/jit/BaselineCacheIRCompiler.cpp
++++ b/js/src/jit/BaselineCacheIRCompiler.cpp
+@@ -27,6 +27,7 @@
+ #include "util/Unicode.h"
+ #include "vm/PortableBaselineInterpret.h"
+ #include "vm/StaticStrings.h"
++#include "vm/Weval.h"
+ 
+ #include "jit/JitScript-inl.h"
+ #include "jit/MacroAssembler-inl.h"
+@@ -2132,6 +2133,13 @@ static bool LookupOrCompileStub(JSContext* cx, CacheKind kind,
+                                              /* stubCode = */ nullptr)) {
+       return false;
+     }
++
++#ifdef ENABLE_JS_PBL_WEVAL
++    // Register for weval specialization, if enabled.
++    js::pbl::EnqueueICStubSpecialization(stubInfo);
++    fprintf(stderr, "pbl-weval: enqueued IC stub %p kind=%d\n", stubInfo,
++            int(kind));
++#endif
+   }
+   MOZ_ASSERT_IF(IsBaselineInterpreterEnabled(), code);
+   MOZ_ASSERT(stubInfo);
+@@ -2315,7 +2323,14 @@ ICAttachResult js::jit::AttachBaselineCacheIRStubLocked(
+   newStub->setTypeData(writer.typeData());
+ 
+ #ifdef ENABLE_PORTABLE_BASELINE_INTERP
++#  ifdef ENABLE_JS_PBL_WEVAL
++  newStub->updateRawJitCode(
++      (stubInfo->hasWeval() && stubInfo->weval().func)
++          ? reinterpret_cast<uint8_t*>(stubInfo->weval().func)
++          : pbl::GetICInterpreter());
++#  else
+   newStub->updateRawJitCode(pbl::GetICInterpreter());
++#  endif
+ #endif
+ 
+   stub->addNewStub(icEntry, newStub);
+diff --git a/js/src/jit/CacheIRCompiler.cpp b/js/src/jit/CacheIRCompiler.cpp
+index 3e38c47435..71c3b532f6 100644
+--- a/js/src/jit/CacheIRCompiler.cpp
++++ b/js/src/jit/CacheIRCompiler.cpp
+@@ -47,6 +47,7 @@
+ #include "vm/TypedArrayObject.h"
+ #include "vm/TypeofEqOperand.h"  // TypeofEqOperand
+ #include "vm/Uint8Clamped.h"
++#include "vm/Weval.h"
+ 
+ #include "builtin/Boolean-inl.h"
+ #include "jit/MacroAssembler-inl.h"
+@@ -1561,6 +1562,29 @@ CacheIRReader::CacheIRReader(const CacheIRStubInfo* stubInfo)
+     : CacheIRReader(stubInfo->code(),
+                     stubInfo->code() + stubInfo->codeLength()) {}
+ 
++CacheIRStubInfo::CacheIRStubInfo(CacheKind kind, ICStubEngine engine,
++                                 bool makesGCCalls, uint32_t stubDataOffset,
++                                 uint32_t codeLength)
++    : codeLength_(codeLength),
++      kind_(kind),
++      engine_(engine),
++      stubDataOffset_(stubDataOffset),
++      makesGCCalls_(makesGCCalls) {
++  MOZ_ASSERT(kind_ == kind, "Kind must fit in bitfield");
++  MOZ_ASSERT(engine_ == engine, "Engine must fit in bitfield");
++  MOZ_ASSERT(stubDataOffset_ == stubDataOffset,
++             "stubDataOffset must fit in uint8_t");
++}
++
++#ifdef ENABLE_JS_PBL_WEVAL
++Weval& CacheIRStubInfo::weval() {
++  if (!weval_) {
++    weval_ = MakeUnique<Weval>();
++  }
++  return *weval_;
++}
++#endif
++
+ CacheIRStubInfo* CacheIRStubInfo::New(CacheKind kind, ICStubEngine engine,
+                                       bool makesGCCalls,
+                                       uint32_t stubDataOffset,
+diff --git a/js/src/jit/CacheIRCompiler.h b/js/src/jit/CacheIRCompiler.h
+index ed4431f6d8..feedb20d31 100644
+--- a/js/src/jit/CacheIRCompiler.h
++++ b/js/src/jit/CacheIRCompiler.h
+@@ -26,6 +26,10 @@ namespace js {
+ class TypedArrayObject;
+ enum class UnaryMathFunction : uint8_t;
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++struct Weval;
++#endif
++
+ namespace jit {
+ 
+ class BaselineCacheIRCompiler;
+@@ -1334,18 +1338,12 @@ class CacheIRStubInfo {
+   uint8_t stubDataOffset_;
+   bool makesGCCalls_;
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++  UniquePtr<Weval> weval_ = {};
++#endif
++
+   CacheIRStubInfo(CacheKind kind, ICStubEngine engine, bool makesGCCalls,
+-                  uint32_t stubDataOffset, uint32_t codeLength)
+-      : codeLength_(codeLength),
+-        kind_(kind),
+-        engine_(engine),
+-        stubDataOffset_(stubDataOffset),
+-        makesGCCalls_(makesGCCalls) {
+-    MOZ_ASSERT(kind_ == kind, "Kind must fit in bitfield");
+-    MOZ_ASSERT(engine_ == engine, "Engine must fit in bitfield");
+-    MOZ_ASSERT(stubDataOffset_ == stubDataOffset,
+-               "stubDataOffset must fit in uint8_t");
+-  }
++                  uint32_t stubDataOffset, uint32_t codeLength);
+ 
+  public:
+   CacheKind kind() const { return kind_; }
+@@ -1421,6 +1419,11 @@ class CacheIRStubInfo {
+ 
+   void replaceStubRawValueBits(uint8_t* stubData, uint32_t offset,
+                                uint64_t oldBits, uint64_t newBits) const;
++
++#ifdef ENABLE_JS_PBL_WEVAL
++  bool hasWeval() const { return weval_.get() != nullptr; }
++  Weval& weval();
++#endif
+ };
+ 
+ template <typename T>
+diff --git a/js/src/jit/moz.build b/js/src/jit/moz.build
+index 6e7710e6fb..b3ee8e7942 100644
+--- a/js/src/jit/moz.build
++++ b/js/src/jit/moz.build
+@@ -314,3 +314,6 @@ if CONFIG["ENABLE_JS_AOT_ICS"]:
+ 
+ if CONFIG["FUZZING_INTERFACES"] or CONFIG["FUZZING_JS_FUZZILLI"]:
+     include("/tools/fuzzing/libfuzzer-config.mozbuild")
++
++if CONFIG["ENABLE_JS_PBL_WEVAL"]:
++    LOCAL_INCLUDES += ["../../../third_party/weval"]
+diff --git a/js/src/moz.build b/js/src/moz.build
+index 3d7702fdad..f9510a29b1 100644
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -373,3 +373,6 @@ if CONFIG["JS_HAS_INTL_API"]:
+         ]
+ 
+     USE_LIBS += ["intlcomponents"]
++
++if CONFIG["ENABLE_JS_PBL_WEVAL"]:
++    LOCAL_INCLUDES += ["../../third_party/weval"]
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+index 25949663d5..15db8f0dc1 100644
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -12318,7 +12318,8 @@ ShellContext::~ShellContext() {
+   MOZ_ASSERT(offThreadJobs.empty());
+ }
+ 
+-static int Shell(JSContext* cx, OptionParser* op) {
++static int Shell(JSContext* cx, OptionParser* op,
++                 MutableHandleObject lastGlobal) {
+ #ifdef JS_STRUCTURED_SPEW
+   cx->spewer().enableSpewing();
+ #endif
+@@ -12372,6 +12373,7 @@ static int Shell(JSContext* cx, OptionParser* op) {
+     }
+ 
+     JSAutoRealm ar(cx, glob);
++    lastGlobal.set(glob.get());
+ 
+     ShellContext* sc = GetShellContext(cx);
+     if (!sc->moduleLoader && !InitModuleLoader(cx, *op)) {
+@@ -12617,7 +12619,8 @@ static bool SetGCParameterFromArg(JSContext* cx, char* arg) {
+   return true;
+ }
+ 
+-int main(int argc, char** argv) {
++Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
++                                                    bool retainContext) {
+   PreInit();
+ 
+   sArgc = argc;
+@@ -12645,31 +12648,31 @@ int main(int argc, char** argv) {
+ 
+   OptionParser op("Usage: {progname} [options] [[script] scriptArgs*]");
+   if (!InitOptionParser(op)) {
+-    return EXIT_FAILURE;
++    return AsVariant(EXIT_FAILURE);
+   }
+ 
+   switch (op.parseArgs(argc, argv)) {
+     case OptionParser::EarlyExit:
+-      return EXIT_SUCCESS;
++      return AsVariant(EXIT_SUCCESS);
+     case OptionParser::ParseError:
+       op.printHelp(argv[0]);
+-      return EXIT_FAILURE;
++      return AsVariant(EXIT_FAILURE);
+     case OptionParser::Fail:
+-      return EXIT_FAILURE;
++      return AsVariant(EXIT_FAILURE);
+     case OptionParser::Okay:
+       break;
+   }
+ 
+   if (op.getHelpOption()) {
+-    return EXIT_SUCCESS;
++    return AsVariant(EXIT_SUCCESS);
+   }
+ 
+   if (!SetGlobalOptionsPreJSInit(op)) {
+-    return EXIT_FAILURE;
++    return AsVariant(EXIT_FAILURE);
+   }
+ 
+   if (!JS::SetLoggingInterface(shellLoggingInterface)) {
+-    return 1;
++    return AsVariant(1);
+   }
+   char* logopts = getenv("MOZ_LOG");
+   if (logopts) {
+@@ -12679,7 +12682,7 @@ int main(int argc, char** argv) {
+   // Start the engine.
+   if (const char* message = JS_InitWithFailureDiagnostic()) {
+     fprintf(gErrFile->fp, "JS_Init failed: %s\n", message);
+-    return 1;
++    return AsVariant(1);
+   }
+ 
+   // `selfHostedXDRBuffer` contains XDR buffer of the self-hosted JS.
+@@ -12691,11 +12694,11 @@ int main(int argc, char** argv) {
+   auto shutdownEngine = MakeScopeExit([] { JS_ShutDown(); });
+ 
+   if (!SetGlobalOptionsPostJSInit(op)) {
+-    return EXIT_FAILURE;
++    return AsVariant(EXIT_FAILURE);
+   }
+ 
+   if (!InitSharedObjectMailbox()) {
+-    return EXIT_FAILURE;
++    return AsVariant(EXIT_FAILURE);
+   }
+ 
+   JS::SetProcessBuildIdOp(ShellBuildId);
+@@ -12703,7 +12706,7 @@ int main(int argc, char** argv) {
+   /* Use the same parameters as the browser in xpcjsruntime.cpp. */
+   JSContext* const cx = JS_NewContext(JS::DefaultHeapMaxBytes);
+   if (!cx) {
+-    return 1;
++    return AsVariant(1);
+   }
+ 
+   // Register telemetry callbacks.
+@@ -12715,15 +12718,15 @@ int main(int argc, char** argv) {
+   UniquePtr<ShellContext> sc =
+       MakeUnique<ShellContext>(cx, ShellContext::MainThread);
+   if (!sc || !sc->registerWithCx(cx)) {
+-    return 1;
++    return AsVariant(1);
+   }
+ 
+   if (!SetContextOptions(cx, op)) {
+-    return 1;
++    return AsVariant(1);
+   }
+ 
+   if (!ApplyBenchmarkMode(cx, op)) {
+-    return 1;
++    return AsVariant(1);
+   }
+ 
+   JS_SetTrustedPrincipals(cx, &ShellPrincipals::fullyTrusted);
+@@ -12736,7 +12739,7 @@ int main(int argc, char** argv) {
+   bufferStreamState = js_new<ExclusiveWaitableData<BufferStreamState>>(
+       mutexid::BufferStreamState);
+   if (!bufferStreamState) {
+-    return 1;
++    return AsVariant(1);
+   }
+   auto shutdownBufferStreams = MakeScopeExit([] {
+     ShutdownBufferStreams();
+@@ -12778,7 +12781,7 @@ int main(int argc, char** argv) {
+   }
+ 
+   if (!JS::InitSelfHostedCode(cx, xdrSpan, xdrWriter)) {
+-    return 1;
++    return AsVariant(1);
+   }
+ 
+   EnvironmentPreparer environmentPreparer(cx);
+@@ -12792,13 +12795,14 @@ int main(int argc, char** argv) {
+     if (!WasmCompileAndSerialize(cx)) {
+       // Errors have been printed directly to stderr.
+       MOZ_ASSERT(!cx->isExceptionPending());
+-      return EXIT_FAILURE;
++      return AsVariant(EXIT_FAILURE);
+     }
+ #endif
+-    return EXIT_SUCCESS;
++    return AsVariant(EXIT_SUCCESS);
+   }
+ 
+-  result = Shell(cx, &op);
++  RootedObject lastGlobal(cx);
++  result = Shell(cx, &op, &lastGlobal);
+ 
+ #ifdef DEBUG
+   if (OOM_printAllocationCount) {
+@@ -12806,9 +12810,29 @@ int main(int argc, char** argv) {
+   }
+ #endif
+ 
+-  return result;
++  if (retainContext) {
++    shutdownEngine.release();
++    destroyCx.release();
++    shutdownBufferStreams.release();
++    shutdownShellThreads.release();
++
++    JSAndShellContext ret{cx, lastGlobal.get(), std::move(sc),
++                          std::move(selfHostedXDRBuffer)};
++    return AsVariant(std::move(ret));
++  }
++
++  return AsVariant(result);
++}
++
++// N.B.: When Wizer support is enabled, a separate main() is used.
++#ifndef JS_SHELL_WIZER
++
++int main(int argc, char** argv) {
++  return ShellMain(argc, argv, /* retainContext = */ false).as<int>();
+ }
+ 
++#endif  // !JS_SHELL_WIZER
++
+ bool InitOptionParser(OptionParser& op) {
+   op.setDescription(
+       "The SpiderMonkey shell provides a command line interface to the "
+diff --git a/js/src/shell/jsshell.h b/js/src/shell/jsshell.h
+index c664a3f944..1cd185e585 100644
+--- a/js/src/shell/jsshell.h
++++ b/js/src/shell/jsshell.h
+@@ -8,6 +8,7 @@
+ #include "mozilla/Atomics.h"
+ #include "mozilla/Maybe.h"
+ #include "mozilla/TimeStamp.h"
++#include "mozilla/Variant.h"
+ 
+ #include "builtin/MapObject.h"
+ #include "js/CompileOptions.h"
+@@ -17,6 +18,7 @@
+ #include "threading/LockGuard.h"
+ #include "threading/Mutex.h"
+ #include "threading/Thread.h"
++#include "util/CompleteFile.h"  // js::FileContents
+ #include "vm/GeckoProfiler.h"
+ #include "vm/Monitor.h"
+ 
+@@ -253,11 +255,25 @@ struct ShellContext {
+   JS::PersistentRooted<ObjectVector> taskCallbacks;
+ };
+ 
++// A JSContext, the associated global object, the ShellContext, and
++// other miscellaneous bits that need to live as long as the
++// shell. This is used to wrap up the shell state when it needs to be
++// persisted (e.g., in a Wizer snapshot).
++struct JSAndShellContext {
++  JSContext* cx;
++  JSObject* glob;
++  UniquePtr<ShellContext> shellCx;
++  mozilla::Maybe<js::FileContents> selfHostedXDRBuffer;
++};
++
+ extern ShellContext* GetShellContext(JSContext* cx);
+ 
+ [[nodiscard]] extern bool PrintStackTrace(JSContext* cx,
+                                           JS::Handle<JSObject*> stackObj);
+ 
++mozilla::Variant<JSAndShellContext, int> ShellMain(int argc, char** argv,
++                                                   bool retainContext);
++
+ } /* namespace shell */
+ } /* namespace js */
+ 
+diff --git a/js/src/shell/moz.build b/js/src/shell/moz.build
+index 93f6373a48..86dc5e7db0 100644
+--- a/js/src/shell/moz.build
++++ b/js/src/shell/moz.build
+@@ -21,6 +21,7 @@ UNIFIED_SOURCES += [
+     "OSObject.cpp",
+     "ShellModuleObjectWrapper.cpp",
+     "WasmTesting.cpp",
++    "wizer.cpp",
+ ]
+ 
+ if CONFIG["FUZZING_INTERFACES"]:
+@@ -38,8 +39,12 @@ DEFINES["EXPORT_JS_API"] = True
+ LOCAL_INCLUDES += [
+     "!..",
+     "..",
++    "/third_party/wizer",
+ ]
+ 
++if CONFIG["ENABLE_JS_PBL_WEVAL"]:
++    DEFINES["JS_SHELL_WIZER"] = True
++
+ OS_LIBS += CONFIG["EDITLINE_LIBS"]
+ 
+ # Place a GDB Python auto-load file next to the shell executable, both in
+diff --git a/js/src/shell/wizer.cpp b/js/src/shell/wizer.cpp
+new file mode 100644
+index 0000000000..e13e1a1e20
+--- /dev/null
++++ b/js/src/shell/wizer.cpp
+@@ -0,0 +1,143 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* Support for Wizer-based snapshotting of the JS shell, when built
++ * for a Wasm target (i.e., running inside a Wasm module). */
++
++#include <wizer.h>
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <optional>
++
++#include "js/CallAndConstruct.h"
++#include "js/CompilationAndEvaluation.h"
++#include "js/CompileOptions.h"
++#include "js/Initialization.h"
++#include "js/SourceText.h"
++#include "jsapi.h"
++#include "shell/jsshell.h"
++#include "vm/BytecodeUtil.h"
++#include "vm/JSFunction.h"
++
++using namespace js;
++using namespace js::shell;
++
++#ifdef JS_SHELL_WIZER
++
++static std::optional<JSAndShellContext> wizenedContext;
++
++// During Wizer initialization we compile and run a workload script so
++// that its JSScripts and attached CacheIR stubs have pending weval
++// specialization requests when the module is snapshotted.
++static const char kWorkload[] = R"(
++function iter(x) { return x + 1.5; }
++function m2(x) { return iter(x) + iter(x); }
++function icLoop(o, n) { var acc = 0; for (var i = 0; i < n; i++) { acc += o.a + i; acc += o.b; } return acc; }
++function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
++var gO = {a: 1.5, b: 2.5};
++function warmup() { m2(1); icLoop(gO, 1000); fib(10); }
++function main() {
++  var acc = 0;
++  for (var i = 0; i < 2000000; i++) { acc += m2(i); }
++  return acc + icLoop(gO, 1000);
++}
++)";
++
++static void WizerInit() {
++  const int argc = 3;
++  char* argv[4] = {strdup("js"), strdup("-e"), strdup(""), nullptr};
++
++  auto ret = ShellMain(argc, argv, /* retainContext = */ true);
++  if (!ret.is<JSAndShellContext>()) {
++    fprintf(stderr, "Could not execute shell main during Wizening!\n");
++    abort();
++  }
++
++  wizenedContext = std::move(ret.as<JSAndShellContext>());
++
++  JSContext* cx = wizenedContext->cx;
++  RootedObject glob(cx, wizenedContext->glob);
++  if (!glob) {
++    fprintf(stderr, "No global object after Wizening!\n");
++    abort();
++  }
++  JSAutoRealm ar(cx, glob);
++
++  JS::CompileOptions opts(cx);
++  opts.setFileAndLine("<wizer-workload>", 1);
++  JS::SourceText<mozilla::Utf8Unit> src;
++  if (!src.init(cx, kWorkload, strlen(kWorkload),
++                JS::SourceOwnership::Borrowed)) {
++    abort();
++  }
++  JS::RootedValue rval(cx);
++  if (!JS::Evaluate(cx, opts, src, &rval)) {
++    fprintf(stderr, "Failed to evaluate Wizer workload!\n");
++    abort();
++  }
++
++  {
++    JS::RootedValue mainFn(cx);
++    if (JS_GetProperty(cx, glob, "main", &mainFn) && mainFn.isObject()) {
++      JS::RootedFunction fun(cx, &mainFn.toObject().as<JSFunction>());
++      JSScript* script = JSFunction::getOrCreateScript(cx, fun);
++      if (script) {
++        jsbytecode* pc = script->code();
++        jsbytecode* end = script->codeEnd();
++        while (pc < end) {
++          fprintf(stderr, "  %4u: %s\n", unsigned(pc - script->code()),
++                  js::CodeName(JSOp(*pc)));
++          pc += js::GetBytecodeLength(pc);
++        }
++      }
++    }
++  }
++
++  // Run the workload a few times so IC stubs attach and their weval
++  // specialization requests are enqueued.
++  for (int i = 0; i < 5; i++) {
++    if (!JS_CallFunctionName(cx, glob, "warmup",
++                             JS::HandleValueArray::empty(), &rval)) {
++      fprintf(stderr, "Wizer workload warmup call failed!\n");
++      abort();
++    }
++  }
++  if (!JS_CallFunctionName(cx, glob, "main", JS::HandleValueArray::empty(),
++                           &rval)) {
++    fprintf(stderr, "Wizer workload main call failed!\n");
++    abort();
++  }
++}
++
++WIZER_INIT(WizerInit);
++
++int main(int argc, char** argv) {
++  if (wizenedContext) {
++    JSContext* cx = wizenedContext->cx;
++    RootedObject glob(cx, wizenedContext->glob);
++
++    JSAutoRealm ar(cx, glob);
++
++    // Look up a function called "main" in the global.
++    JS::Rooted<JS::Value> ret(cx);
++    if (!JS_CallFunctionName(cx, glob, "main",
++                             JS::HandleValueArray::empty(), &ret)) {
++      fprintf(stderr, "Failed to call main() in Wizened JS source!\n");
++      abort();
++    }
++    if (!ret.isNumber() || ret.toNumber() != 4000004503500.0) {
++      fprintf(stderr, "main() returned unexpected value!\n");
++      abort();
++    }
++    fprintf(stderr, "main() = %.0f (specialization ok)\n", ret.toNumber());
++    return 0;
++  }
++  return ShellMain(argc, argv, /* retainContext = */ false).as<int>();
++}
++
++#endif  // JS_SHELL_WIZER
+diff --git a/js/src/vm/JSScript.cpp b/js/src/vm/JSScript.cpp
+index 615306104e..19b5a10e85 100644
+--- a/js/src/vm/JSScript.cpp
++++ b/js/src/vm/JSScript.cpp
+@@ -74,6 +74,7 @@
+ #include "vm/StringType.h"    // JSString, JSAtom
+ #include "vm/Time.h"          // AutoIncrementalTimer
+ #include "vm/ToSource.h"      // JS::ValueToSource
++#include "vm/Weval.h"
+ #ifdef MOZ_VTUNE
+ #  include "vtune/VTuneWrapper.h"
+ #endif
+@@ -2678,6 +2679,10 @@ bool JSScript::fullyInitFromStencil(
+     }
+   }
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++  pbl::EnqueueScriptSpecialization(script);
++#endif
++
+   return true;
+ }
+ 
+@@ -3960,3 +3965,7 @@ JS::ubi::Base::Size JS::ubi::Concrete<BaseScript>::size(
+ const char* JS::ubi::Concrete<BaseScript>::scriptFilename() const {
+   return get().filename();
+ }
++
++#ifdef ENABLE_JS_PBL_WEVAL
++void BaseScript::allocWeval() { weval_ = MakeUnique<Weval>(); }
++#endif
+diff --git a/js/src/vm/JSScript.h b/js/src/vm/JSScript.h
+index f0e53f4465..173cc99c76 100644
+--- a/js/src/vm/JSScript.h
++++ b/js/src/vm/JSScript.h
+@@ -91,6 +91,8 @@ struct CompilationStencilMerger;
+ class StencilXDR;
+ }  // namespace frontend
+ 
++struct Weval;
++
+ class ScriptCounts {
+  public:
+   using PCCountsVector = mozilla::Vector<PCCounts, 0, SystemAllocPolicy>;
+@@ -1605,6 +1607,13 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+   // will be nullptr.
+   RefPtr<js::SharedImmutableScriptData> sharedData_ = {};
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++  // Specialized function generated by partial-evaluation tool
++  // `weval`, if any. Indirected via a `UniquePtr` to keep a stable
++  // address across GCs.
++  UniquePtr<Weval> weval_ = {};
++#endif
++
+   // End of fields.
+ 
+   BaseScript(uint8_t* stubEntry, JSFunction* function,
+@@ -1784,6 +1793,17 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+ #if defined(DEBUG) || defined(JS_JITSPEW)
+   void dumpStringContent(js::GenericPrinter& out) const;
+ #endif
++
++#ifdef ENABLE_JS_PBL_WEVAL
++  bool hasWeval() const { return weval_.get() != nullptr; }
++  Weval& weval() {
++    if (!weval_) {
++      allocWeval();
++    }
++    return *weval_;
++  }
++  void allocWeval();
++#endif
+ };
+ 
+ extern void SweepScriptData(JSRuntime* rt);
+diff --git a/js/src/vm/PortableBaselineInterpret-defs.h b/js/src/vm/PortableBaselineInterpret-defs.h
+new file mode 100644
+index 0000000000..69f296b006
+--- /dev/null
++++ b/js/src/vm/PortableBaselineInterpret-defs.h
+@@ -0,0 +1,74 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef PortableBaselineInerpret_defs_h
++#define PortableBaselineInerpret_defs_h
++
++/* Basic definitions for PBL's internals that can be swapped out as
++ * needed to handle interpreter details differently.
++ *
++ * Meant to be included only from PortableBaselineInterpret.cpp. */
++
++#define PBL_HYBRID_ICS_DEFAULT true
++
++#define PBL_CALL_IC(jitcode, ctx, stubvalue, result, arg0, arg1, arg2value, \
++                    hasarg2)                                                \
++  do {                                                                      \
++    if (hasarg2) {                                                          \
++      ctx.arg2 = arg2value;                                                 \
++    }                                                                       \
++    if (stubvalue->isFallback()) {                                          \
++      ICStubFunc func = reinterpret_cast<ICStubFunc>(jitcode);              \
++      result = func(arg0, arg1, stubvalue, ctx);                            \
++    } else {                                                                \
++      result = ICInterpretOps<false>(arg0, arg1, stubvalue, ctx);           \
++    }                                                                       \
++  } while (0)
++
++#define PBL_CALL_INTERP(result, script, interp, ...) \
++  result = interp(__VA_ARGS__);
++
++#define PBL_ESTABLISH_STUBINFO_CODE(Specialized, stubInfo, code) \
++  stubInfo = cstub->stubInfo();                                  \
++  code = stubInfo->code();
++
++#define READ_REG(index) ctx.icregs.icVals[(index)]
++#define READ_VALUE_REG(index) \
++  Value::fromRawBits(ctx.icregs.icVals[(index)] | ctx.icregs.icTags[(index)])
++#define WRITE_REG(index, value, tag)                                           \
++  do {                                                                         \
++    ctx.icregs.icVals[(index)] = (value);                                      \
++    ctx.icregs.icTags[(index)] = uint64_t(JSVAL_TAG_##tag) << JSVAL_TAG_SHIFT; \
++  } while (0)
++#define WRITE_VALUE_REG(index, value)                 \
++  do {                                                \
++    ctx.icregs.icVals[(index)] = (value).asRawBits(); \
++    ctx.icregs.icTags[(index)] = 0;                   \
++  } while (0)
++
++#define PBL_PUSH_CTX(ctx) ;
++#define PBL_UPDATE_CTX(ctx) ;
++#define PBL_POP_CTX() ;
++#define PBL_EXIT_PATH() ;
++#define PBL_STOP_EXIT_PATH() ;
++
++#define VIRTPUSH(value) PUSH(value)
++#define VIRTPOP() POP()
++#define VIRTSP(index) sp[(index)]
++#define VIRTSPWRITE(index, value) sp[(index)] = (value)
++#define SYNCSP()
++#define SETLOCAL(i, value) frame->unaliasedLocal(i) = value
++#define GETLOCAL(i) frame->unaliasedLocal(i)
++
++#define PBL_SETUP_INTERP_INPUTS(argsObjAliasesFormals, nfixed)      \
++  argsObjAliasesFormals = frame->script()->argsObjAliasesFormals(); \
++  nfixed = frame->script()->nfixed();
++
++#define PBL_SPECIALIZE_VALUE(i, low, high) i
++
++#define PBL_SCRIPT_HAS_SPECIALIZATION(script) false
++
++#endif  /* PortableBaselineInerpret_defs_h */
+diff --git a/js/src/vm/PortableBaselineInterpret-weval-defs.h b/js/src/vm/PortableBaselineInterpret-weval-defs.h
+new file mode 100644
+index 0000000000..38bfbd066f
+--- /dev/null
++++ b/js/src/vm/PortableBaselineInterpret-weval-defs.h
+@@ -0,0 +1,180 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef PortableBaselineInerpret_weval_defs_h
++#define PortableBaselineInerpret_weval_defs_h
++
++#ifdef DEBUG
++// weval has to constant-propagate interpreter state well enough to unroll the
++// interpreter loops, and this is not possible in a debug build because the
++// interpreter state is spilled and reloaded to memory (which cannot be tracked
++// in a fine-grained way by cprop). We need C++ locals to live in Wasm locals
++// for weval to work.
++#  error PBL weval support only works in optimized (non-debug) builds.
++#endif
++
++/* Basic definitions for PBL's internals that can be swapped out as
++ * needed to handle interpreter details differently.
++ *
++ * Meant to be included only from PortableBaselineInterpret.cpp. */
++
++#ifdef DEBUG
++// weval has to constant-propagate interpreter state well enough to unroll the
++// interpreter loops, and this is not possible in a debug build because the
++// interpreter state is spilled and reloaded to memory (which cannot be tracked
++// in a fine-grained way by cprop). We need C++ locals to live in Wasm locals
++// for weval to work.
++#  error PBL weval support only works in optimized (non-debug) builds.
++#endif
++
++#define PBL_HYBRID_ICS_DEFAULT false
++
++#define PBL_CALL_IC(jitcode, ctx, stubvalue, result, arg0, arg1, arg2value, \
++                    hasarg2)                                                \
++  do {                                                                      \
++    if (hasarg2) {                                                          \
++      ctx.arg2 = arg2value;                                                 \
++    }                                                                       \
++    ICStubFunc func = reinterpret_cast<ICStubFunc>(jitcode);                \
++    result = func(arg0, arg1, stubvalue, ctx);                              \
++  } while (0)
++
++#define PBL_CALL_INTERP(result, script, interp, ...)                         \
++  if (script->hasWeval() && script->weval().func) {                          \
++    result = (reinterpret_cast<PBIFunc>(script->weval().func))(__VA_ARGS__); \
++  } else {                                                                   \
++    result = interp(__VA_ARGS__);                                            \
++  }
++
++#define PBL_ESTABLISH_STUBINFO_CODE(Specialized, stubInfo, code)            \
++  if (!Specialized) {                                                       \
++    stubInfo = cstub->stubInfo();                                           \
++    code = stubInfo->code();                                                \
++  } else {                                                                  \
++    stubInfo = reinterpret_cast<const CacheIRStubInfo*>(                    \
++        weval_read_specialization_global(0));                               \
++    code = reinterpret_cast<uint8_t*>(weval_read_specialization_global(1)); \
++  }
++
++#define READ_REG(reg) \
++  (Specialized ? weval_read_reg((reg)) : ctx.icregs.icVals[(reg)])
++#define WRITE_REG(reg, value, tagtype)                                        \
++  if (Specialized) {                                                          \
++    weval_write_reg((reg), (value));                                          \
++    weval_write_reg((reg) + ICRegs::kMaxICVals, uint64_t(JSVAL_TAG_##tagtype) \
++                                                    << JSVAL_TAG_SHIFT);      \
++  } else {                                                                    \
++    ctx.icregs.icVals[(reg)] = (value);                                       \
++    ctx.icregs.icTags[(reg)] = uint64_t(JSVAL_TAG_##tagtype)                  \
++                               << JSVAL_TAG_SHIFT;                            \
++  }
++
++#define READ_VALUE_REG(reg)                                       \
++  Value::fromRawBits(                                             \
++      Specialized ? (weval_read_reg((reg) + ICRegs::kMaxICVals) | \
++                     weval_read_reg((reg)))                       \
++                  : (ctx.icregs.icTags[(reg)] | ctx.icregs.icVals[(reg)]))
++#define WRITE_VALUE_REG(reg, value)                 \
++  if (Specialized) {                                \
++    weval_write_reg((reg), (value).asRawBits());    \
++    weval_write_reg((reg) + ICRegs::kMaxICVals, 0); \
++  } else {                                          \
++    ctx.icregs.icVals[(reg)] = (value).asRawBits(); \
++    ctx.icregs.icTags[(reg)] = 0;                   \
++  }
++
++#define PBL_PUSH_CTX(ctx)                                          \
++  do {                                                             \
++    if (Specialized) {                                             \
++      weval::push_context(reinterpret_cast<uint32_t>(ctx));        \
++    }                                                              \
++  } while (0);
++
++#define PBL_UPDATE_CTX(ctx)                                        \
++  do {                                                             \
++    if (Specialized) {                                             \
++      weval::update_context(reinterpret_cast<uint32_t>(ctx));      \
++    }                                                              \
++  } while (0);
++
++#define PBL_POP_CTX()                                              \
++  do {                                                             \
++    if (Specialized) {                                             \
++      weval::pop_context();                                        \
++    }                                                              \
++  } while (0);
++
++#define PBL_EXIT_PATH()       \
++  do {                        \
++    if (Specialized) {        \
++      weval_exit_path();      \
++    }                         \
++  } while (0);
++#define PBL_STOP_EXIT_PATH()  \
++  do {                        \
++    if (Specialized) {        \
++      weval_stop_exit_path(); \
++    }                         \
++  } while (0);
++
++#define VIRTPUSH(value)                                                    \
++  if (Specialized) {                                                       \
++    --sp;                                                                  \
++    weval_push_stack(reinterpret_cast<uint64_t*>(sp), (value).asUInt64()); \
++  } else {                                                                 \
++    *--sp = (value);                                                       \
++  }
++#define VIRTPOP()                                      \
++  (Specialized ? ({                                    \
++    uint64_t* ptr = reinterpret_cast<uint64_t*>(sp++); \
++    StackVal(weval_pop_stack(ptr));                    \
++  })                                                   \
++               : *sp++)
++#define VIRTSP(index)                                                     \
++  (Specialized ? StackVal(weval_read_stack(                               \
++                     reinterpret_cast<uint64_t*>(&sp[(index)]), (index))) \
++               : sp[(index)])
++#define VIRTSPWRITE(index, value)                                         \
++  if (Specialized) {                                                      \
++    weval_write_stack(reinterpret_cast<uint64_t*>(&sp[(index)]), (index), \
++                      (value).asUInt64());                                \
++  } else {                                                                \
++    sp[(index)] = (value);                                                \
++  }
++#define SYNCSP()        \
++  if (Specialized) {    \
++    weval_sync_stack(); \
++  }
++#define SETLOCAL(i, value)                                                    \
++  if (Specialized) {                                                          \
++    weval_write_local(reinterpret_cast<uint64_t*>(&frame->unaliasedLocal(i)), \
++                      i, (value).asRawBits());                                \
++  } else {                                                                    \
++    frame->unaliasedLocal(i) = value;                                         \
++  }
++#define GETLOCAL(i)                                                      \
++  (Specialized                                                           \
++       ? Value::fromRawBits(weval_read_local(                            \
++             reinterpret_cast<uint64_t*>(&frame->unaliasedLocal(i)), i)) \
++       : frame->unaliasedLocal(i))
++
++#define PBL_SETUP_INTERP_INPUTS(argsObjAliasesFormals, nfixed)             \
++  argsObjAliasesFormals = Specialized                                      \
++                              ? (weval_read_specialization_global(0) != 0) \
++                              : frame->script()->argsObjAliasesFormals();  \
++  nfixed = Specialized ? weval_read_specialization_global(1)               \
++                       : frame->script()->nfixed();
++
++#define PBL_SPECIALIZE_VALUE(i, low, high)                 \
++  (Specialized                                             \
++       ? int32_t(weval_specialize_value(uint32_t(i), 0,    \
++                                       uint32_t(high - low + 1))) \
++       : int32_t(i))
++
++#define PBL_SCRIPT_HAS_SPECIALIZATION(script) \
++  (script->hasWeval() && script->weval().func)
++
++#endif /* PortableBaselineInerpret_defs_h */
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index e33137a4ba..03175ae376 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -69,6 +69,11 @@
+ #include "vm/PlainObject-inl.h"
+ #include "vm/Realm-inl.h"  // js::AutoRealm (JS->wasm JIT Phase F resume realm entry)
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++#  include "vm/Weval.h"
++WEVAL_DEFINE_GLOBALS()
++#endif
++
+ #if defined(__EMSCRIPTEN__)
+ namespace js {
+ namespace wasm {
+@@ -113,7 +118,11 @@ using namespace js::jit;
+     } while (0)
+ #endif
+ 
+-#define PBL_HYBRID_ICS_DEFAULT true
++#ifdef ENABLE_JS_PBL_WEVAL
++#  include "vm/PortableBaselineInterpret-weval-defs.h"
++#else
++#  include "vm/PortableBaselineInterpret-defs.h"
++#endif
+ 
+ // Whether we are using the "hybrid" strategy for ICs (see the [SMDOC]
+ // in PortableBaselineInterpret.h for more). This is currently a
+@@ -129,12 +138,17 @@ static JSObject* gPBLResumeEnclosingEnv = nullptr;
+ // GECKO_WJ_EXITFPDBG=<decimal addr>: print every setter that installs the target
+ // exitFP value (task #60: the zeal crash's stale exitFP is address-deterministic).
+ static inline void WJExitFPDbg(int siteId, void* v) {
++#if defined(__EMSCRIPTEN__)
+   static const char* e = getenv("GECKO_WJ_EXITFPDBG");
+   static uintptr_t target = e ? strtoul(e, nullptr, 0) : 0;
+   if (MOZ_UNLIKELY(target != 0) && uintptr_t(v) == target) {
+     js::wasm::gWJExitFPLastSite = uint32_t(siteId);
+     js::wasm::gWJExitFPSetCount++;
+   }
++#else
++  (void)siteId;
++  (void)v;
++#endif
+ }
+ // GECKO_WJ_RESUMETRACE=<n>: trace the first n ops of the FIRST JIT-deopt-resumed
+ // frame (op name + pc offset + stack top) -- diagnosing resume misexecution.
+@@ -519,24 +533,24 @@ class VMFrame {
+   bool success() const { return exitFP != nullptr; }
+ };
+ 
+-#define PUSH_EXIT_FRAME_OR_RET(value, init_sp)                  \
++#define PUSH_EXIT_FRAME_OR_RET(ret_stmt, init_sp)               \
+   VMFrame cx(ctx.frameMgr, ctx.stack, init_sp);                 \
+   if (!cx.success()) {                                          \
+-    return value;                                               \
++    ret_stmt;                                                   \
+   }                                                             \
+   StackVal* sp = cx.spBelowFrame(); /* shadow the definition */ \
+   (void)sp;                         /* avoid unused-variable warnings */
+ 
+ #define PUSH_IC_FRAME()         \
+   ctx.error = PBIResult::Error; \
+-  PUSH_EXIT_FRAME_OR_RET(IC_ERROR_SENTINEL(), ctx.sp())
++  PUSH_EXIT_FRAME_OR_RET(RETURN_IC(IC_ERROR_SENTINEL()), ctx.sp())
+ #define PUSH_FALLBACK_IC_FRAME() \
+   ctx.error = PBIResult::Error;  \
+-  PUSH_EXIT_FRAME_OR_RET(IC_ERROR_SENTINEL(), sp)
++  PUSH_EXIT_FRAME_OR_RET(return IC_ERROR_SENTINEL(), sp)
+ #define PUSH_EXIT_FRAME()      \
+   frame->interpreterPC() = pc; \
+   SYNCSP();                    \
+-  PUSH_EXIT_FRAME_OR_RET(PBIResult::Error, sp)
++  PUSH_EXIT_FRAME_OR_RET(return PBIResult::Error, sp)
+ 
+ /*
+  * -----------------------------------------------
+@@ -577,21 +591,14 @@ struct ICCtx {
+ typedef uint64_t (*ICStubFunc)(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                                ICCtx& ctx);
+ 
+-#define PBL_CALL_IC(jitcode, ctx, stubvalue, result, arg0, arg1, arg2value, \
+-                    hasarg2)                                                \
+-  do {                                                                      \
+-    ctx.arg2 = arg2value;                                                   \
+-    ICStubFunc func = reinterpret_cast<ICStubFunc>(jitcode);                \
+-    result = func(arg0, arg1, stubvalue, ctx);                              \
+-  } while (0)
+-
+ typedef PBIResult (*PBIFunc)(JSContext* cx_, State& state, Stack& stack,
+                              StackVal* sp, JSObject* envChain, Value* ret,
+                              jsbytecode* pc, ImmutableScriptData* isd,
+                              jsbytecode* restartEntryPC,
+                              BaselineFrame* restartFrame,
+-                             StackVal* restartEntryFrame,
+-                             PBIResult restartCode);
++                             StackVal* restartEntryFrame, PBIResult restartCode,
++                             const uint64_t* osrLocals, uint32_t osrNLocals,
++                             const uint64_t* osrStack, uint32_t osrStackDepth);
+ 
+ static uint64_t CallNextIC(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                            ICCtx& ctx);
+@@ -613,6 +620,7 @@ static double DoubleMinMax(bool isMax, double first, double second) {
+ }
+ 
+ // Interpreter for CacheIR.
++template <bool Specialized>
+ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                         ICCtx& ctx) {
+   {
+@@ -630,34 +638,19 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ 
+ #else  // ENABLE_COMPUTED_GOTO_DISPATCH
+ 
+-#  define CACHEOP_CASE(name) \
+-    case CacheOp::name:      \
++#  define CACHEOP_CASE(name)                           \
++    case CacheOp::name:                                \
++      PBL_UPDATE_CTX(cacheIRReader.currentPosition()); \
+       cacheop_##name : CACHEOP_TRACE(name)
+ #  define CACHEOP_CASE_FALLTHROUGH(name) \
+     [[fallthrough]];                     \
+     CACHEOP_CASE(name)
+ 
+-#  define DISPATCH_CACHEOP()                                                \
+-    cacheop =                                                               \
+-        cacheIRReader.more() ? cacheIRReader.readOp() : CacheOp::PblReturn; \
++#  define DISPATCH_CACHEOP() \
+     goto dispatch;
+ 
+ #endif  // !ENABLE_COMPUTED_GOTO_DISPATCH
+ 
+-#define READ_REG(index) ctx.icregs.icVals[(index)]
+-#define READ_VALUE_REG(index) \
+-  Value::fromRawBits(ctx.icregs.icVals[(index)] | ctx.icregs.icTags[(index)])
+-#define WRITE_REG(index, value, tag)                                           \
+-  do {                                                                         \
+-    ctx.icregs.icVals[(index)] = (value);                                      \
+-    ctx.icregs.icTags[(index)] = uint64_t(JSVAL_TAG_##tag) << JSVAL_TAG_SHIFT; \
+-  } while (0)
+-#define WRITE_VALUE_REG(index, value)                 \
+-  do {                                                \
+-    ctx.icregs.icVals[(index)] = (value).asRawBits(); \
+-    ctx.icregs.icTags[(index)] = 0;                   \
+-  } while (0)
+-
+     DECLARE_CACHEOP_CASE(PblReturn);
+     DECLARE_CACHEOP_CASE(GuardToObject);
+     DECLARE_CACHEOP_CASE(GuardIsNullOrUndefined);
+@@ -938,7 +931,19 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ #define CACHEOP_TRACE(name) \
+   TRACE_PRINTF("cacheop (frame %p stub %p): " #name "\n", ctx.frame, cstub);
+ 
+-#define FAIL_IC() goto next_ic;
++#define FAIL_IC()              \
++  do {                         \
++    PBL_PUSH_CTX(uint32_t(1)); \
++    PBL_EXIT_PATH();           \
++    goto next_ic;              \
++  } while (0)
++
++#define RETURN_IC(value)       \
++  do {                         \
++    PBL_PUSH_CTX(uint32_t(2)); \
++    PBL_EXIT_PATH();           \
++    return (value);            \
++  } while (0)
+ 
+ // We set a fixed bound on the number of icVals which is smaller than what IC
+ // generators may use. As a result we can't evaluate an IC if it defines too
+@@ -949,18 +954,18 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ #define BOUNDSCHECK(resultId) \
+   if (resultId.id() >= ICRegs::kMaxICVals) FAIL_IC();
+ 
+-#define PREDICT_NEXT(name)                            \
+-  static_assert(CacheOp::name != CacheOp::PblReturn); \
+-  if (cacheIRReader.peekOp() == CacheOp::name) {      \
+-    cacheIRReader.readOp();                           \
+-    cacheop = CacheOp::name;                          \
+-    goto cacheop_##name;                              \
++#define PREDICT_NEXT(name)                                       \
++  static_assert(CacheOp::name != CacheOp::PblReturn);            \
++  if (!Specialized && cacheIRReader.peekOp() == CacheOp::name) { \
++    cacheIRReader.readOp();                                      \
++    cacheop = CacheOp::name;                                     \
++    goto cacheop_##name;                                         \
+   }
+ 
+ #define PREDICT_RETURN()                                 \
+-  if (!cacheIRReader.more()) {                           \
++  if (!Specialized && !cacheIRReader.more()) {           \
+     TRACE_PRINTF("stub successful, predicted return\n"); \
+-    return retValue;                                     \
++    RETURN_IC(retValue);                                 \
+   }
+ 
+     ICCacheIRStub* cstub = stub->toCacheIRStub();
+@@ -968,8 +973,10 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+     // code; PBL otherwise leaves it 0). Trial inlining gates on this count, so
+     // without it inlining either never fires or must use an unsound 0 threshold.
+     cstub->incrementEnteredCount();
+-    const CacheIRStubInfo* stubInfo = cstub->stubInfo();
+-    CacheIRReader cacheIRReader(stubInfo);
++    const CacheIRStubInfo* stubInfo;
++    const uint8_t* code;
++    PBL_ESTABLISH_STUBINFO_CODE(Specialized, stubInfo, code);
++    CacheIRReader cacheIRReader(code, code + stubInfo->codeLength());
+     uint64_t retValue = 0;
+     CacheOp cacheop;
+ 
+@@ -977,17 +984,22 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+     WRITE_VALUE_REG(1, Value::fromRawBits(arg1));
+     WRITE_VALUE_REG(2, Value::fromRawBits(ctx.arg2));
+ 
++    PBL_PUSH_CTX(cacheIRReader.currentPosition());
++
+     DISPATCH_CACHEOP();
+ 
+ #ifndef ENABLE_COMPUTED_GOTO_DISPATCH
+   dispatch:
++    PBL_STOP_EXIT_PATH();
++    cacheop =
++        cacheIRReader.more() ? cacheIRReader.readOp() : CacheOp::PblReturn;
+     switch (cacheop)
+ #endif
+     {
+ 
+       CACHEOP_CASE(PblReturn) {
+         TRACE_PRINTF("stub successful!\n");
+-        return retValue;
++        RETURN_IC(retValue);
+       }
+ 
+       CACHEOP_CASE(GuardToObject) {
+@@ -1978,7 +1990,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!SetElementMegamorphic<false>(cx, obj0, value0, value1,
+                                             args.strict)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         DISPATCH_CACHEOP();
+@@ -2383,7 +2395,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!ctx.stack.check(sp, sizeof(StackVal) * (totalArgs + 6))) {
+             ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           // Create `this` if we are constructing and this is a
+@@ -2409,7 +2421,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               if (!js::CreateThis(cx, fun, newTargetRooted, GenericObject,
+                                   &result)) {
+                 ctx.error = PBIResult::Error;
+-                return IC_ERROR_SENTINEL();
++                RETURN_IC(IC_ERROR_SENTINEL());
+               }
+               thisVal = result;
+               // `callee` may have moved.
+@@ -2488,7 +2500,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ 
+             if (!success) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             retValue = args[0].asRawBits();
+           } else {
+@@ -2555,10 +2567,10 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                 ctx.stack.unwindingFP = reinterpret_cast<StackVal*>(gPBLUnwindFP);
+                 ctx.stack.unwindingSP = reinterpret_cast<StackVal*>(gPBLUnwindSP);
+                 ctx.error = PBIResult::UnwindError;
+-                return IC_ERROR_SENTINEL();
++                RETURN_IC(IC_ERROR_SENTINEL());
+               }
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             if (wjr == 1) {
+               retValue = wbits;
+@@ -2576,13 +2588,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               ImmutableScriptData* isd = script->immutableScriptData();
+               PBIResult result;
+               Value ret;
+-              result = PortableBaselineInterpret<false, kHybridICsInterp>(
++              PBL_CALL_INTERP(
++                  result, script,
++                  (PortableBaselineInterpret<false, false, kHybridICsInterp>),
+                   cx, ctx.state, ctx.stack, sp,
+                   /* envChain = */ nullptr, &ret, pc, isd, nullptr, nullptr,
+-                  nullptr, PBIResult::Ok);
++                  nullptr, PBIResult::Ok, nullptr, 0, nullptr, 0);
+               if (result != PBIResult::Ok) {
+                 ctx.error = result;
+-                return IC_ERROR_SENTINEL();
++                RETURN_IC(IC_ERROR_SENTINEL());
+               }
+               if (flags.isConstructing() && !ret.isObject()) {
+                 ret = args[0];
+@@ -2638,7 +2652,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!ctx.stack.check(sp, sizeof(StackVal) * 8)) {
+             ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           // This will not be an Exit frame but a BaselineStub frame, so
+@@ -2666,12 +2680,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ImmutableScriptData* isd = script->immutableScriptData();
+           PBIResult result;
+           Value ret;
+-          result = PortableBaselineInterpret<false, kHybridICsInterp>(
+-              cx, ctx.state, ctx.stack, sp, /* envChain = */ nullptr, &ret, pc,
+-              isd, nullptr, nullptr, nullptr, PBIResult::Ok);
++          PBL_CALL_INTERP(
++              result, script,
++              (PortableBaselineInterpret<false, false, kHybridICsInterp>), cx,
++              ctx.state, ctx.stack, sp, /* envChain = */ nullptr, &ret, pc, isd,
++              nullptr, nullptr, nullptr, PBIResult::Ok, nullptr, 0, nullptr,
++              0);
+           if (result != PBIResult::Ok) {
+             ctx.error = result;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ret.asRawBits();
+         }
+@@ -2729,7 +2746,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!ctx.stack.check(sp, sizeof(StackVal) * (totalArgs + 6))) {
+             ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           // This will not be an Exit frame but a BaselineStub frame, so
+@@ -2760,12 +2777,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ImmutableScriptData* isd = script->immutableScriptData();
+           PBIResult result;
+           Value ret;
+-          result = PortableBaselineInterpret<false, kHybridICsInterp>(
+-              cx, ctx.state, ctx.stack, sp, /* envChain = */ nullptr, &ret, pc,
+-              isd, nullptr, nullptr, nullptr, PBIResult::Ok);
++          PBL_CALL_INTERP(
++              result, script,
++              (PortableBaselineInterpret<false, false, kHybridICsInterp>), cx,
++              ctx.state, ctx.stack, sp, /* envChain = */ nullptr, &ret, pc, isd,
++              nullptr, nullptr, nullptr, PBIResult::Ok, nullptr, 0, nullptr,
++              0);
+           if (result != PBIResult::Ok) {
+             ctx.error = result;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ret.asRawBits();
+         }
+@@ -3023,7 +3043,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           JSLinearString* result = LinearizeForCharAccess(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           WRITE_REG(resultId.id(), reinterpret_cast<uintptr_t>(result), STRING);
+         }
+@@ -3045,7 +3065,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           JSLinearString* result = LinearizeForCharAccess(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           WRITE_REG(resultId.id(), reinterpret_cast<uintptr_t>(result), STRING);
+         }
+@@ -3090,7 +3110,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             result = StringFromCharCode(cx, c);
+             if (!result) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+           }
+           retValue = StringValue(result).asRawBits();
+@@ -3519,7 +3539,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             retValue = StringValue(result).asRawBits();
+           } else {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         PREDICT_RETURN();
+@@ -3558,7 +3578,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                 }
+                 if (!StringsEqual<EqualityKind::Equal>(cx, lhs, rhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Ne:
+@@ -3574,35 +3594,35 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                 if (!StringsEqual<EqualityKind::NotEqual>(cx, lhs, rhs,
+                                                           &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Lt:
+                 if (!StringsCompare<ComparisonKind::LessThan>(cx, lhs, rhs,
+                                                               &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Ge:
+                 if (!StringsCompare<ComparisonKind::GreaterThanOrEqual>(
+                         cx, lhs, rhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Le:
+                 if (!StringsCompare<ComparisonKind::GreaterThanOrEqual>(
+                         cx, /* N.B. swapped order */ rhs, lhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Gt:
+                 if (!StringsCompare<ComparisonKind::LessThan>(
+                         cx, /* N.B. swapped order */ rhs, lhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               default:
+@@ -4125,7 +4145,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> result(&ctx.state.value0);
+           if (!NumberParseInt(cx, str0, radix, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = result.asRawBits();
+         }
+@@ -4338,7 +4358,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* iter = GetIterator(cx, rootedObj);
+           if (!iter) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*iter).asRawBits();
+         }
+@@ -4400,7 +4420,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                                                         args.allocKind, site);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4425,7 +4445,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               NewArrayObjectBaselineFallback(cx, arrayLength, allocKind, site);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4449,7 +4469,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               ArrayConstructorOneArg(cx, templateObjectRooted, length, site);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4471,7 +4491,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               cx, templateObjectRooted, length);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4501,7 +4521,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               lengthRooted);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4524,7 +4544,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               cx, templateObjectRooted, arrayRooted);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4565,7 +4585,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!CallNativeGetter(cx, getterRooted, receiverRooted,
+                                 &resultRooted)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = resultRooted.asRawBits();
+         }
+@@ -4593,7 +4613,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> rhsRooted(&ctx.state.value1, rhs);
+           if (!CallNativeSetter(cx, setterRooted, receiverRooted, rhsRooted)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         PREDICT_RETURN();
+@@ -4687,7 +4707,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!StringIncludes(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -4708,7 +4728,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           int32_t result = 0;
+           if (!StringIndexOf(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = Int32Value(result).asRawBits();
+         }
+@@ -4729,7 +4749,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           int32_t result = 0;
+           if (!StringLastIndexOf(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = Int32Value(result).asRawBits();
+         }
+@@ -4750,7 +4770,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!StringStartsWith(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -4771,7 +4791,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!StringEndsWith(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -4787,7 +4807,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringToLowerCase(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4803,7 +4823,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringToUpperCase(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4820,7 +4840,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringTrim(cx, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4837,7 +4857,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringTrimStart(cx, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4854,7 +4874,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringTrimEnd(cx, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4875,7 +4895,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = SubstringKernel(cx, str0, begin, length);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4900,7 +4920,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringReplace(cx, str0, str1, str2);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4921,7 +4941,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringSplitString(cx, str0, str1, INT32_MAX);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4959,7 +4979,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             auto* result = Int32ToStringPure(cx, idInt);
+             if (!result) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             WRITE_VALUE_REG(resultId.id(), StringValue(result));
+           }
+@@ -4977,7 +4997,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = NewStringIterator(cx);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -5052,7 +5072,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result;
+           if (!IsPossiblyWrappedTypedArray(cx, obj, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         } else {
+@@ -5145,7 +5165,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!SetPropertyMegamorphic<false>(cx, objRooted, idRooted, valRooted,
+                                              strict)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+ 
+@@ -5189,7 +5209,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = ArrayJoin(cx, obj0, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -5209,7 +5229,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> value0(&ctx.state.value0, rhs);
+           if (!SetArrayLength(cx, obj0, value0, strict)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         PREDICT_RETURN();
+@@ -5226,7 +5246,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = ObjectKeys(cx, obj0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -5244,7 +5264,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = ObjectCreateWithTemplate(cx, templateRooted);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -5282,7 +5302,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = Int32ToStringWithBase<CanGC>(cx, input, base, true);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -5317,7 +5337,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           PUSH_IC_FRAME();
+           if (!GetFirstDollarIndexRaw(cx, str, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = Int32Value(result).asRawBits();
+         }
+@@ -5381,7 +5401,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           }
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           retValue = ObjectValue(*result).asRawBits();
+@@ -5412,7 +5432,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             if (!RegExpMatcherRaw(cx, regexpRooted, inputRooted, lastIndex,
+                                   nullptr, &result)) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             retValue = result.asRawBits();
+           } else {
+@@ -5420,7 +5440,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             if (!RegExpSearcherRaw(cx, regexpRooted, inputRooted, lastIndex,
+                                    nullptr, &result)) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             retValue = Int32Value(result).asRawBits();
+           }
+@@ -5450,7 +5470,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!RegExpHasCaptureGroups(cx, regexpRooted, inputRooted, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -5476,7 +5496,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!RegExpBuiltinExecMatchFromJit(cx, regexpRooted, inputRooted,
+                                              nullptr, &output)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = output.asRawBits();
+         }
+@@ -5502,7 +5522,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!RegExpBuiltinExecTestFromJit(cx, regexpRooted, inputRooted,
+                                             &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -5530,7 +5550,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = NewRegExpStringIterator(cx);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -5550,7 +5570,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> result(&ctx.state.value0, UndefinedValue());
+           if (!GetSparseElementHelper(cx, nobjRooted, index, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = result.asRawBits();
+         }
+@@ -5930,7 +5950,7 @@ uint8_t* GetPortableFallbackStub(BaselineICFallbackKind kind) {
+ }
+ 
+ uint8_t* GetICInterpreter() {
+-  return reinterpret_cast<uint8_t*>(&ICInterpretOps);
++  return reinterpret_cast<uint8_t*>(&ICInterpretOps<false>);
+ }
+ 
+ /*
+@@ -5939,25 +5959,29 @@ uint8_t* GetICInterpreter() {
+  * -----------------------------------------------
+  */
+ 
+-static EnvironmentObject& getEnvironmentFromCoordinate(
++template <bool Specialized>
++static MOZ_ALWAYS_INLINE EnvironmentObject& getEnvironmentFromCoordinate(
+     BaselineFrame* frame, EnvironmentCoordinate ec) {
+   JSObject* env = frame->environmentChain();
++  PBL_PUSH_CTX(0U);
+   for (unsigned i = ec.hops(); i; i--) {
+-    if (env->is<EnvironmentObject>()) {
++    if (Specialized || env->is<EnvironmentObject>()) {
+       env = &env->as<EnvironmentObject>().enclosingEnvironment();
+     } else {
+       MOZ_ASSERT(env->is<DebugEnvironmentProxy>());
+       env = &env->as<DebugEnvironmentProxy>().enclosingEnvironment();
+     }
++    PBL_UPDATE_CTX(i);
+   }
+-  return env->is<EnvironmentObject>()
++  PBL_POP_CTX();
++  return (Specialized || env->is<EnvironmentObject>())
+              ? env->as<EnvironmentObject>()
+              : env->as<DebugEnvironmentProxy>().environment();
+ }
+ 
+ #ifndef __wasi__
+ #  define DEBUG_CHECK()                                                   \
+-    if (frame->isDebuggee()) {                                            \
++    if (!Specialized && frame->isDebuggee()) {                            \
+       TRACE_PRINTF(                                                       \
+           "Debug check: frame is debuggee, checking for debug script\n"); \
+       if (frame->script()->hasDebugScript()) {                            \
+@@ -5993,30 +6017,25 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+     goto* addresses[*pc]
+ #else
+ #  define CASE(op) label_##op : case JSOp::op:
+-#  define DISPATCH()  \
+-    DEBUG_CHECK();    \
+-    WJ_RESUME_TRACE() \
++#  define DISPATCH()       \
++    DEBUG_CHECK();         \
++    WJ_RESUME_TRACE()      \
++    PBL_UPDATE_CTX(pc);    \
+     goto dispatch
+ #endif
+ 
+-#define ADVANCE(delta) pc += (delta);
++#define ADVANCE(delta) \
++  pc += (delta);       \
++  PBL_UPDATE_CTX(pc);
+ #define ADVANCE_AND_DISPATCH(delta) \
+   ADVANCE(delta);                   \
+   DISPATCH();
+ 
+ #define END_OP(op) ADVANCE_AND_DISPATCH(JSOpLength_##op);
+ 
+-#define VIRTPUSH(value) PUSH(value)
+-#define VIRTPOP() POP()
+-#define VIRTSP(index) sp[(index)]
+-#define VIRTSPWRITE(index, value) sp[(index)] = (value)
+-#define SYNCSP()
+-#define SETLOCAL(i, value) frame->unaliasedLocal(i) = value
+-#define GETLOCAL(i) frame->unaliasedLocal(i)
+-
+ #define IC_SET_ARG_FROM_STACK(index, stack_index) \
+-  ic_arg##index = sp[(stack_index)].asUInt64();
+-#define IC_POP_ARG(index) ic_arg##index = (*sp++).asUInt64();
++  ic_arg##index = VIRTSP(stack_index).asUInt64();
++#define IC_POP_ARG(index) ic_arg##index = VIRTPOP().asUInt64();
+ #define IC_SET_VAL_ARG(index, expr) ic_arg##index = (expr).asRawBits();
+ #define IC_SET_OBJ_ARG(index, expr) \
+   ic_arg##index = reinterpret_cast<uint64_t>(expr);
+@@ -6094,6 +6113,8 @@ static MOZ_ALWAYS_INLINE bool WJArithEnrich() {
+   PBL_CALL_IC(icEntry->firstStub()->rawJitCode(), ctx, icEntry->firstStub(), \
+               ic_ret, ic_arg0, ic_arg1, ic_arg2, hasarg2);                   \
+   if (ic_ret == IC_ERROR_SENTINEL()) {                                       \
++    PBL_PUSH_CTX(uint32_t(1));                                               \
++    PBL_EXIT_PATH();                                                         \
+     ic_result = ctx.error;                                                   \
+     goto ic_fail;                                                            \
+   }                                                                          \
+@@ -6118,7 +6139,7 @@ static MOZ_ALWAYS_INLINE bool WJArithEnrich() {
+     Stack::handleMut(&sp[(index)]); \
+   })
+ 
+-template <bool IsRestart, bool HybridICs>
++template <bool Specialized, bool IsRestart, bool HybridICs>
+ PBIResult PortableBaselineInterpret(
+     JSContext* cx_, State& state, Stack& stack, StackVal* sp,
+     JSObject* envChain, Value* ret, jsbytecode* pc, ImmutableScriptData* isd,
+@@ -6132,6 +6153,7 @@ PBIResult PortableBaselineInterpret(
+                  ctx.stack.fp);                                       \
+     SYNCSP();                                                         \
+     restartCode = code;                                               \
++    PBL_POP_CTX();                                                    \
+     goto restart;                                                     \
+   }
+ 
+@@ -6179,12 +6201,12 @@ PBIResult PortableBaselineInterpret(
+     // JS->wasm JIT deopt-resume path enters at a non-zero pc, and entryPC = pc
+     // made every TableSwitch in the resumed frame jump pcOff bytes past its
+     // real target (the reloop-switch corruption family).
+-    entryPC = frame->script()->code();
++    // Specialized entry is always at pc == code() (no OSR resume), so `pc`
++    // itself preserves the symbolic specialization image of the bytecode.
++    entryPC = Specialized ? pc : frame->script()->code();
+   }
+ 
+   bool from_unwind = false;
+-  uint32_t nfixed = frame->script()->nfixed();
+-  bool argsObjAliasesFormals = frame->script()->argsObjAliasesFormals();
+ 
+   PBIResult ic_result = PBIResult::Ok;
+   uint64_t ic_arg0 = 0, ic_arg1 = 0, ic_arg2 = 0, ic_ret = 0;
+@@ -6197,6 +6219,10 @@ PBIResult PortableBaselineInterpret(
+   auto* icEntry = icEntries;
+   const uint32_t* resumeOffsets = isd->resumeOffsets().data();
+ 
++  bool argsObjAliasesFormals;
++  uint32_t nfixed;
++  PBL_SETUP_INTERP_INPUTS(argsObjAliasesFormals, nfixed);
++
+   if (IsRestart) {
+     ic_result = restartCode;
+     TRACE_PRINTF(
+@@ -6269,11 +6295,13 @@ PBIResult PortableBaselineInterpret(
+   wjResumeInError = (osrLocals || osrStack) && gPBLResumeInError;
+   gPBLResumeInError = false;
+ 
+-  // Check if we are being debugged, and set a flag in the frame if so. This
+-  // flag must be set before calling InitFunctionEnvironmentObjects.
+-  if (frame->script()->isDebuggee()) {
+-    TRACE_PRINTF("Script is debuggee\n");
+-    frame->setIsDebuggee();
++  if (!Specialized) {
++    // Check if we are being debugged, and set a flag in the frame if so. This
++    // flag must be set before calling InitFunctionEnvironmentObjects.
++    if (frame->script()->isDebuggee()) {
++      TRACE_PRINTF("Script is debuggee\n");
++      frame->setIsDebuggee();
++    }
+   }
+ 
+   if (CalleeTokenIsFunction(frame->calleeToken())) {
+@@ -6308,32 +6336,36 @@ PBIResult PortableBaselineInterpret(
+     }
+   }
+ 
+-  // The debug prologue can't run until the function environment is set up.
+-  if (frame->script()->isDebuggee()) {
+-    PUSH_EXIT_FRAME();
+-    if (!DebugPrologue(cx, frame)) {
+-      GOTO_ERROR();
+-    }
+-  }
+-
+-  if (!frame->script()->hasScriptCounts()) {
+-    if (ctx.frameMgr.cxForLocalUseOnly()->realm()->collectCoverageForDebug()) {
++  if (!Specialized) {
++    // The debug prologue can't run until the function environment is set up.
++    if (frame->script()->isDebuggee()) {
+       PUSH_EXIT_FRAME();
+-      if (!frame->script()->initScriptCounts(cx)) {
++      if (!DebugPrologue(cx, frame)) {
+         GOTO_ERROR();
+       }
+     }
+-  }
+-  COUNT_COVERAGE_MAIN();
++
++    if (!frame->script()->hasScriptCounts()) {
++      if (ctx.frameMgr.cxForLocalUseOnly()
++              ->realm()
++              ->collectCoverageForDebug()) {
++        PUSH_EXIT_FRAME();
++        if (!frame->script()->initScriptCounts(cx)) {
++          GOTO_ERROR();
++        }
++      }
++    }
++    COUNT_COVERAGE_MAIN();
+ 
+ #ifdef ENABLE_INTERRUPT_CHECKS
+-  if (ctx.frameMgr.cxForLocalUseOnly()->hasAnyPendingInterrupt()) {
+-    PUSH_EXIT_FRAME();
+-    if (!InterruptCheck(cx)) {
+-      GOTO_ERROR();
++    if (ctx.frameMgr.cxForLocalUseOnly()->hasAnyPendingInterrupt()) {
++      PUSH_EXIT_FRAME();
++      if (!InterruptCheck(cx)) {
++        GOTO_ERROR();
++      }
+     }
+-  }
+ #endif
++  }
+ 
+   TRACE_PRINTF("Entering: sp = %p fp = %p frame = %p, script = %p, pc = %p\n",
+                sp, ctx.stack.fp, frame, frame->script(), pc);
+@@ -6350,11 +6382,14 @@ PBIResult PortableBaselineInterpret(
+     goto error;
+   }
+ 
++  PBL_PUSH_CTX(pc);
++
+   while (true) {
+     DEBUG_CHECK();
+ 
+ #if !defined(ENABLE_COMPUTED_GOTO_DISPATCH) || !defined(__wasi__)
+   dispatch:
++    PBL_STOP_EXIT_PATH();
+ #endif
+ 
+ #ifdef TRACE_INTERP
+@@ -6626,7 +6661,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (!result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (!choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -6652,7 +6688,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -6680,7 +6717,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -6708,7 +6746,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (!result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (!choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -7994,6 +8033,10 @@ PBIResult PortableBaselineInterpret(
+         uint32_t argc = GET_ARGC(pc);
+         do {
+           {
++            if (Specialized) {
++              break;
++            }
++
+             // CallArgsFromSp would be called with
+             // - numValues = argc + 2 + constructing
+             // - stackSlots = argc + constructing
+@@ -8053,6 +8096,10 @@ PBIResult PortableBaselineInterpret(
+               TRACE_PRINTF("missed fastpath: not enough arguments\n");
+               break;
+             }
++            if (PBL_SCRIPT_HAS_SPECIALIZATION(calleeScript)) {
++              TRACE_PRINTF("missed fastpath: specialized function exists\n");
++              break;
++            }
+ 
+ #if defined(__EMSCRIPTEN__)
+             // JS->wasm JIT: count this call; once the callee is hot and has been
+@@ -8583,7 +8630,9 @@ PBIResult PortableBaselineInterpret(
+       }
+ 
+       CASE(Coalesce) {
+-        if (!VIRTSP(0).asValue().isNullOrUndefined()) {
++        bool cond = !VIRTSP(0).asValue().isNullOrUndefined();
++        int choice = PBL_SPECIALIZE_VALUE(int(cond), 0, 1);
++        if (choice) {
+           ADVANCE(GET_JUMP_OFFSET(pc));
+           DISPATCH();
+         } else {
+@@ -8593,7 +8642,8 @@ PBIResult PortableBaselineInterpret(
+ 
+       CASE(Case) {
+         bool cond = VIRTPOP().asValue().toBoolean();
+-        if (cond) {
++        int choice = PBL_SPECIALIZE_VALUE(int(cond), 0, 1);
++        if (choice) {
+           VIRTPOP();
+           ADVANCE(GET_JUMP_OFFSET(pc));
+           DISPATCH();
+@@ -8622,10 +8672,11 @@ PBIResult PortableBaselineInterpret(
+           DISPATCH();
+         }
+ 
+-        if (i >= low && i <= high) {
+-          uint32_t idx = uint32_t(i) - uint32_t(low);
++        i = PBL_SPECIALIZE_VALUE(i - low, low, high);
++
++        if (uint32_t(i) < uint32_t(high - low + 1)) {
+           uint32_t firstResumeIndex = GET_RESUMEINDEX(pc + 3 * JUMP_OFFSET_LEN);
+-          pc = entryPC + resumeOffsets[firstResumeIndex + idx];
++          pc = entryPC + resumeOffsets[firstResumeIndex + uint32_t(i)];
+           DISPATCH();
+         }
+         ADVANCE(len);
+@@ -8663,7 +8714,7 @@ PBIResult PortableBaselineInterpret(
+ 
+         // If FP is higher than the entry frame now, return; otherwise,
+         // do an inline state update.
+-        if (stack.fp > entryFrame) {
++        if (Specialized || stack.fp > entryFrame) {
+           *ret = frame->returnValue();
+           TRACE_PRINTF("ret = %" PRIx64 "\n", ret->asRawBits());
+           return ok ? PBIResult::Ok : PBIResult::Error;
+@@ -8834,13 +8885,14 @@ PBIResult PortableBaselineInterpret(
+       }
+       CASE(InitLexical) {
+         uint32_t i = GET_LOCALNO(pc);
+-        frame->unaliasedLocal(i) = VIRTSP(0).asValue();
++        SETLOCAL(i, VIRTSP(0).asValue());
+         END_OP(InitLexical);
+       }
+ 
+       CASE(InitAliasedLexical) {
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+-        EnvironmentObject& obj = getEnvironmentFromCoordinate(frame, ec);
++        EnvironmentObject& obj =
++            getEnvironmentFromCoordinate<Specialized>(frame, ec);
+         obj.setAliasedBinding(ec, VIRTSP(0).asValue());
+         END_OP(InitAliasedLexical);
+       }
+@@ -8945,7 +8997,8 @@ PBIResult PortableBaselineInterpret(
+         static_assert(JSOpLength_GetAliasedVar ==
+                       JSOpLength_GetAliasedDebugVar);
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+-        EnvironmentObject& obj = getEnvironmentFromCoordinate(frame, ec);
++        EnvironmentObject& obj =
++            getEnvironmentFromCoordinate<Specialized>(frame, ec);
+         VIRTPUSH(StackVal(obj.aliasedBinding(ec)));
+         END_OP(GetAliasedVar);
+       }
+@@ -9040,7 +9093,8 @@ PBIResult PortableBaselineInterpret(
+ 
+       CASE(SetAliasedVar) {
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+-        EnvironmentObject& obj = getEnvironmentFromCoordinate(frame, ec);
++        EnvironmentObject& obj =
++            getEnvironmentFromCoordinate<Specialized>(frame, ec);
+         MOZ_ASSERT(!IsUninitializedLexical(obj.aliasedBinding(ec)));
+         obj.setAliasedBinding(ec, VIRTSP(0).asValue());
+         END_OP(SetAliasedVar);
+@@ -9381,7 +9435,7 @@ PBIResult PortableBaselineInterpret(
+ restart:
+   // This is a `goto` target so that we exit any on-stack exit frames
+   // before restarting, to match previous behavior.
+-  return PortableBaselineInterpret<true, HybridICs>(
++  return PortableBaselineInterpret<false, true, HybridICs>(
+       ctx.frameMgr.cxForLocalUseOnly(), ctx.state, ctx.stack, sp, envChain, ret,
+       pc, isd, entryPC, frame, entryFrame, restartCode);
+ 
+@@ -9460,6 +9514,8 @@ error:
+   DISPATCH();
+ 
+ ic_fail:
++  PBL_POP_CTX();  // inner "slow path" context
++  PBL_POP_CTX();  // PC context
+   RESTART(ic_result);
+   switch (ic_result) {
+     case PBIResult::Ok:
+@@ -9627,9 +9683,10 @@ bool PortableBaselineTrampoline(JSContext* cx, size_t argc, Value* argv,
+   jsbytecode* pc = script->code();
+   ImmutableScriptData* isd = script->immutableScriptData();
+   PBIResult ret;
+-  ret = PortableBaselineInterpret<false, kHybridICsInterp>(
+-      cx, state, stack, sp, envChain, result, pc, isd, nullptr, nullptr,
+-      nullptr, PBIResult::Ok);
++  PBL_CALL_INTERP(ret, script,
++                  (PortableBaselineInterpret<false, false, kHybridICsInterp>),
++                  cx, state, stack, sp, envChain, result, pc, isd, nullptr,
++                  nullptr, nullptr, PBIResult::Ok, nullptr, 0, nullptr, 0);
+   switch (ret) {
+     case PBIResult::Ok:
+     case PBIResult::UnwindRet:
+@@ -9785,7 +9842,7 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
+   gPBLResumeEnclosingEnv = enclosingEnv;
+   gPBLResumeKeepEnv = keepFrameEnv;
+   gPBLResumeInError = resumeInError;
+-  PBIResult ret = PortableBaselineInterpret<false, kHybridICsInterp>(
++  PBIResult ret = PortableBaselineInterpret<false, false, kHybridICsInterp>(
+       cx, state, stack, sp, envChain, &result, pc, isd, nullptr, nullptr,
+       nullptr, PBIResult::Ok, osrLocals, nLocals, osrStack, osrStackDepth);
+   // Cross-boundary unwind: the resumed code threw and HandleException resolved
+@@ -9903,5 +9960,76 @@ bool PortablebaselineInterpreterStackCheck(JSContext* cx, RunState& state,
+   return (top - base) >= needed;
+ }
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++
++// IDs for interpreter bodies that we weval, so that we can stably
++// associate collected request bodies with interpreters even when
++// SpiderMonkey is relinked and actual function pointer values may
++// change.
++static const uint32_t WEVAL_JSOP_ID = 1;
++static const uint32_t WEVAL_IC_ID = 2;
++
++WEVAL_DEFINE_TARGET(1, (PortableBaselineInterpret<true, false, false>));
++WEVAL_DEFINE_TARGET(2, (ICInterpretOps<true>));
++
++void EnqueueScriptSpecialization(JSScript* script) {
++  Weval& weval = script->weval();
++  if (!weval.req) {
++    using weval::Runtime;
++    using weval::Specialize;
++    using weval::SpecializeMemory;
++
++    jsbytecode* pc = script->code();
++    uint32_t pc_len = script->length();
++    ImmutableScriptData* isd = script->immutableScriptData();
++    uint32_t isd_len = isd->immutableData().Length();
++
++    JSFunction* fun = script->function();
++    fprintf(stderr, "pbl-weval: enqueued script '");
++    if (fun && fun->fullExplicitOrInferredName()) {
++      JSAtom* atom = fun->fullExplicitOrInferredName();
++      for (size_t i = 0; i < atom->length(); i++) {
++        fputc(atom->latin1OrTwoByteChar(i), stderr);
++      }
++    }
++    fprintf(stderr, "' len=%u\n", pc_len);
++
++    weval.req = weval::weval(
++        reinterpret_cast<PBIFunc*>(&weval.func),
++        &PortableBaselineInterpret<true, false, false>, WEVAL_JSOP_ID,
++        /* num_globals = */ 2,
++        Specialize<uint64_t>(script->argsObjAliasesFormals() ? 1 : 0),
++        Specialize<uint64_t>(script->nfixed()), Runtime<JSContext*>(),
++        Runtime<State&>(), Runtime<Stack&>(), Runtime<StackVal*>(),
++        Runtime<JSObject*>(), Runtime<Value*>(),
++        SpecializeMemory<jsbytecode*>(pc, pc_len),
++        SpecializeMemory<ImmutableScriptData*>(isd, isd_len),
++        Runtime<jsbytecode*>(), Runtime<BaselineFrame*>(), Runtime<StackVal*>(),
++        Runtime<PBIResult>(), Runtime<const uint64_t*>(), Runtime<uint32_t>(),
++        Runtime<const uint64_t*>(), Runtime<uint32_t>());
++  }
++}
++
++void EnqueueICStubSpecialization(CacheIRStubInfo* stubInfo) {
++  Weval& weval = stubInfo->weval();
++  if (!weval.req) {
++    using weval::Runtime;
++    using weval::SpecializeMemory;
++
++    // StubInfo length: do not include the `Weval` object pointer, as
++    // it is nondeterministic.
++    uint32_t len = sizeof(CacheIRStubInfo) - sizeof(void*);
++
++    weval.req =
++        weval::weval(reinterpret_cast<ICStubFunc*>(&weval.func),
++                     &ICInterpretOps<true>, WEVAL_IC_ID, /* num_globals = */ 2,
++                     SpecializeMemory<CacheIRStubInfo*>(stubInfo, len),
++                     SpecializeMemory<const uint8_t*>(stubInfo->code(),
++                                                      stubInfo->codeLength()));
++  }
++}
++
++#endif  // ENABLE_JS_PBL_WEVAL
++
+ }  // namespace pbl
+ }  // namespace js
+diff --git a/js/src/vm/PortableBaselineInterpret.h b/js/src/vm/PortableBaselineInterpret.h
+index 47d1b49b92..3d6d405b0b 100644
+--- a/js/src/vm/PortableBaselineInterpret.h
++++ b/js/src/vm/PortableBaselineInterpret.h
+@@ -327,7 +327,7 @@ enum class PBIResult {
+   UnwindRet,
+ };
+ 
+-template <bool IsRestart, bool HybridICs>
++template <bool Specialized, bool IsRestart, bool HybridICs>
+ PBIResult PortableBaselineInterpret(
+     JSContext* cx_, State& state, Stack& stack, StackVal* sp,
+     JSObject* envChain, Value* ret, jsbytecode* pc, ImmutableScriptData* isd,
+@@ -339,6 +339,15 @@ PBIResult PortableBaselineInterpret(
+ uint8_t* GetPortableFallbackStub(jit::BaselineICFallbackKind kind);
+ uint8_t* GetICInterpreter();
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++// Register the existence of a JSScript, in case PBL may have a way to
++// accelerate it (e.g., register a weval specialization request).
++void EnqueueScriptSpecialization(JSScript* script);
++// Register the existence of a CacheIR stub, in case PBL may have a way
++// to accelerate it (e.g., register a weval specialization request).
++void EnqueueICStubSpecialization(jit::CacheIRStubInfo* stub);
++#endif
++
+ } /* namespace pbl */
+ } /* namespace js */
+ 
+diff --git a/js/src/vm/Weval.h b/js/src/vm/Weval.h
+new file mode 100644
+index 0000000000..fd805e3f94
+--- /dev/null
++++ b/js/src/vm/Weval.h
+@@ -0,0 +1,35 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef vm_Weval_h
++#define vm_Weval_h
++
++#ifdef ENABLE_JS_PBL_WEVAL
++#  include <weval.h>
++#endif
++
++namespace js {
++
++#ifdef ENABLE_JS_PBL_WEVAL
++
++struct Weval {
++  weval_func_t func;
++  weval_req_t* req;
++
++ public:
++  Weval() : func(nullptr), req(nullptr) {}
++  ~Weval() {
++    if (req) {
++      weval_free(req);
++      req = nullptr;
++    }
++  }
++};
++
++#endif
++}  // namespace js
++
++#endif /* vm_Weval_h */
+diff --git a/js/src/vm/moz.build b/js/src/vm/moz.build
+index 0fd3b857c6..606f9fa3af 100644
+--- a/js/src/vm/moz.build
++++ b/js/src/vm/moz.build
+@@ -159,3 +159,6 @@ if CONFIG["USE_LIBZ_RS"]:
+ 
+ if CONFIG["FUZZING_JS_FUZZILLI"]:
+     include("/tools/fuzzing/libfuzzer-config.mozbuild")
++
++if CONFIG["ENABLE_JS_PBL_WEVAL"]:
++    LOCAL_INCLUDES += ["../../../third_party/weval"]
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index 3c612d8006..2067f6547b 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -126,6 +126,9 @@ uint32_t gWJUnboxExpectTag = 0;
+ // Current function's script start-line, set per-instruction; used by GECKO_WJ_HYBSTORELINE
+ // to scope the WIP store-hybrid to ONE function while bisecting the correctness bug.
+ uint32_t gWJCurScriptLine = 0;
++// The OUTERMOST script being emitted (module owner), set once per WJEmitBody;
++// call sites attribute their caller edge to this script for the cohort tier.
++static JSScript* gWJCurScript = nullptr;
+ void WJDumpSiteHist() {
+   // Top sites by runtime hit count.
+   uint32_t n = gWJSiteCounter < kWJMaxDSites ? gWJSiteCounter : kWJMaxDSites;
+@@ -10772,7 +10775,10 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       if (nRoots && !emitSPAdjust(int32_t(nRoots))) return false;
+ 
+       uint32_t site = WJAllocCallSite();
+-      if (site) gWJCallSiteLine[site] = gWJCurScriptLine;  // DEBUG: caller line
++      if (site) {
++        gWJCallSiteLine[site] = gWJCurScriptLine;  // DEBUG: caller line
++        gWJCallSiteScript[site] = gWJCurScript;    // cohort edge attribution
++      }
+       // DEBUG (GECKO_WJ_CALLARGDBG=<line>): map call-site serials to their MIR
+       // arg sources for one fn -- pairs with the VALIDATEHELPER stale-arg site
+       // number to name the exact def feeding a corrupt argument.
+@@ -10871,6 +10877,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+             !e.writeOp(Op::I32LtU) || !e.writeOp(Op::I32And))
+           return false;
+         if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
++        // GECKO_WJ_CALLHIST: count this PIC-way hit (edge heat for the cohort
++        // tier). Compile-time gated -> zero cost when off.
++        static int callHist = WJGETENV("GECKO_WJ_CALLHIST") ? 1 : 0;
++        if (callHist) {
++          uintptr_t hitW =
++              uintptr_t(static_cast<void*>(&gWJCallHits[site * kWJCallWays + w]));
++          if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(hitW)) ||
++              !e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(hitW)) ||
++              !e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++              !e.writeVarU32(0) || !e.writeOp(Op::I32Const) ||
++              !e.writeVarS32(1) || !e.writeOp(Op::I32Add) ||
++              !e.writeOp(Op::I32Store) || !e.writeVarU32(2) ||
++              !e.writeVarU32(0))
++            return false;
++        }
+         // gWJCurrentEnv = callee->environment(): the callee's prologue saves this
+         // into its envLocal so its MFunctionEnvironment is correct (closures).
+         {
+@@ -13973,7 +13994,7 @@ const char* js::wasm::WJMirOpName(uint32_t op) {
+ 
+ void js::wasm::WJDumpDeoptSiteHist() { WJDumpSiteHist(); }
+ 
+-bool js::wasm::WJEmitTrampoline(Encoder& e) {
++bool js::wasm::WJEmitTrampoline(Encoder& e, uint32_t mainFuncIdx) {
+   if constexpr (kWJEHABI) {
+     // EHABI trampoline: main returns just i64 (or throws a wasm exn). Wrap `call $main`
+     // in try(result i64)/catch_all: on catch restore gWJRootSP (wholesale cleanup of all
+@@ -14016,7 +14037,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
+           !e.writeVarU32(3) || !e.writeVarU32(i * 8))
+         return false;  // arg i
+     }
+-    if (!e.writeOp(Op::Call) || !e.writeVarU32(1)) return false;  // main -> i64
++    if (!e.writeOp(Op::Call) || !e.writeVarU32(mainFuncIdx)) return false;  // main -> i64
+     // catch_all: restore SP, flag=1, push dummy i64 result.
+     if (!e.writeOp(Op::CatchAll)) return false;
+     if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(spAddr)) ||
+@@ -14060,7 +14081,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
+       return false;  // arg i
+     }
+   }
+-  if (!e.writeOp(Op::Call) || !e.writeVarU32(1)) return false;  // main -> [flag,result]
++  if (!e.writeOp(Op::Call) || !e.writeVarU32(mainFuncIdx)) return false;  // main -> [flag,result]
+   if (!e.writeOp(Op::LocalSet) || !e.writeVarU32(3)) return false;  // result
+   if (!e.writeOp(Op::LocalSet) || !e.writeVarU32(2)) return false;  // flag
+   // Store the boxed result to gWJScratch[kWJResultOff] for the host entry path.
+@@ -14080,6 +14101,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+     JSScript* brs = mir.outerInfo().script();
+     js::wasm::gWJBailLine = brs ? brs->lineno() : 0;
+     js::wasm::gWJBailReason = "unknown";
++    gWJCurScript = brs;
+   }
+   // Bisection: GECKO_WJ_BAILLINE=<n[,n...]> bails (stays PBL) any function defined
+   // at one of those source lines. Used to find which function's JIT codegen is
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index b7dbbc5370..aa8d687285 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -9,6 +9,11 @@
+ 
+ #include <stdint.h>
+ 
++#include <utility>
++#include <vector>
++
++#include "js/TypeDecls.h"  // JSScript (correct visibility, matches WasmJit.h)
++
+ namespace js {
+ namespace jit {
+ class MIRGenerator;
+@@ -32,10 +37,11 @@ bool WJEmitBody(jit::MIRGenerator& mir, jit::MIRGraph& graph, uint32_t nargs,
+                 bool useThis, jit::WarpSnapshot* snapshot, Encoder& e);
+ 
+ // Emit the per-module entry trampoline body (wasm type (f64 scratchbase)->f64):
+-// loads `this` + args from gWJScratch and calls the module's main (func idx 1)
+-// with the register-argument ABI. Used for the host-entry path. Returns false on
++// loads `this` + args from gWJScratch and calls the module's main (func idx
++// `mainFuncIdx`; 1 for single-function modules, 1+i for cohort member i) with
++// the register-argument ABI. Used for the host-entry path. Returns false on
+ // encoder failure.
+-bool WJEmitTrampoline(Encoder& e);
++bool WJEmitTrampoline(Encoder& e, uint32_t mainFuncIdx);
+ void WJDumpDeoptSiteHist();
+ 
+ // GC-constant pool (WASMJIT_REARCH_PLAN.md §4.2). Interns a boxed JS::Value (a
+@@ -286,6 +292,9 @@ extern bool gWJHadAlwaysBails;
+ // a numeric/type-dominated fn's respec is the beneficial re-typing case (crypto/cdjs).
+ extern uint32_t gWJEmitShapeDeopts;
+ extern uint32_t gWJEmitTotalDeopts;
++// Per-compile OSR-target sink the backend appends to via WJAddOsrTarget.
++// Cleared before each member's emit; copied into WJCohortReq/WJEntry.
++extern std::vector<std::pair<uint32_t, uint32_t>> gWJPendingOsrTargets;
+ extern bool gWJForceMega;  // next compile: megamorphic property reads (post-storm)
+ extern bool gWJForceNumberArith;  // next compile: de-speculate Int32 arith/elem ICs (post-deopt)
+ 
+@@ -401,9 +410,37 @@ static constexpr uint32_t kWJCallSites = 16384;
+ static constexpr uint32_t kWJCallWays = 8;
+ extern uint32_t gWJCallFn[];      // cached callee obj ptr (0 = empty)
+ extern int32_t gWJCallTblIdx[];   // callee's shared-table index
++// Call-edge attribution for the cohort tier (GECKO_WJ_COHORT): the script that
++// OWNS the module containing each call site (set at compile; outermost script).
++extern JSScript* gWJCallSiteScript[];
++// Per-(site,way) PIC-hit counts. Only populated by modules compiled with
++// GECKO_WJ_CALLHIST (emitted i32++ on each way hit) -- zero hot-path cost when
++// off; without it only IC-FILL edges are observable.
++extern uint64_t gWJCallHits[];
+ // Next unused call-site id (process-global; assigned at compile).
+ uint32_t WJAllocCallSite();
+ 
++// A cohort-compile request per member script (see WJWarpCompileCohort). A
++// cohort module packs several hot functions into ONE wasm module/instance so
++// calls BETWEEN members resolve to same-instance call_indirect (which V8 can
++// speculatively inline; cross-instance calls can't).
++struct WJCohortReq {
++  JSScript* script = nullptr;
++  int tblSlot = -1;     // in: preferred shared-table slot to reuse; out: actual
++  bool forceMega = false;  // in: megamorphic recompile flag for this member
++  bool ok = false;         // out: emitted + installed in this cohort
++  int memberIdx = -1;      // out: cohort-local index = trampoline export pos
++  uint32_t nargs = 0;
++  uint32_t nlocals = 0;
++  bool hasAlwaysBails = false;
++  bool shapeDeoptDom = false;
++  std::vector<std::pair<uint32_t, uint32_t>> osrTargets;
++  // in: the member's emitted function body (cached at solo install). The bytes
++  // are module-position-independent (immediates name process-global addresses,
++  // call-site ids and shared-table slots), so cohort assembly is a plain copy.
++  const std::vector<uint8_t>* body = nullptr;
++};
++
+ // Per-construct-site monomorphic inline cache (GECKO_WJ_CTORINLINE). See
+ // WasmJitRuntime.cpp. Lets the backend inline `new X()` (alloc + ctor call) and
+ // skip the WJH_CONSTRUCT boundary for monomorphic construct sites.
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index d9508212d5..023953f186 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -18,6 +18,7 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <utility>
+ #include <map>
+ #include <vector>
+@@ -105,7 +106,9 @@ namespace js {
+ namespace wasm {
+ // Front-end + compile orchestrator (WasmJitWarp.cpp).
+ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+-                  uint32_t* nlocalsOut, int* tblSlotOut);
++                  uint32_t* nlocalsOut, int* tblSlotOut,
++                  std::vector<uint8_t>* bodyOut);
++int WJWarpCompileCohort(JSContext* cx, std::vector<WJCohortReq>& reqs);
+ }  // namespace wasm
+ namespace pbl {
+ // Resume a partially-executed JIT'd function in the Portable Baseline Interpreter
+@@ -199,7 +202,7 @@ uint64_t gWJOsrHits = 0;           // count of OSR re-entries (GECKO_WJ_OSRDBG)
+ // Per-compile sink the backend appends OSR targets to: (resume pcOff -> dispatch
+ // block index) for each OSR-able loop head. Cleared before each WJWarpCompile,
+ // copied into the WJEntry on success.
+-static std::vector<std::pair<uint32_t, uint32_t>> gWJPendingOsrTargets;
++std::vector<std::pair<uint32_t, uint32_t>> gWJPendingOsrTargets;
+ extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx) {
+   gWJPendingOsrTargets.emplace_back(pcOff, blockIdx);
+ }
+@@ -245,6 +248,8 @@ uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hi
+ uint32_t gWJCallFn[kWJCallSites * kWJCallWays];     // polymorphic call IC: callee ptrs
+ int32_t gWJCallTblIdx[kWJCallSites * kWJCallWays];  // polymorphic call IC: table slots
+ uint32_t gWJCallSiteLine[kWJCallSites] = {0};       // DEBUG: caller script line per site
++JSScript* gWJCallSiteScript[kWJCallSites] = {};     // site -> owning (caller) script
++uint64_t gWJCallHits[kWJCallSites * kWJCallWays] = {};  // per-(site,way) PIC hits
+ static uint32_t gWJNextCallSite = 0;
+ uint32_t WJAllocCallSite() {
+   if (gWJNextCallSite >= kWJCallSites) return 0;  // site 0 is a safe sentinel
+@@ -411,6 +416,8 @@ struct WJEntry {
+   int handle = -1;
+   int tblSlot = -1;  // dense shared-table slot (-1 = not call_indirect-able)
+   int directIdx = -1;  // slot in MAIN indirect table for direct PBL->JIT entry
++  int memberIdx = 0;   // this fn's index in its (possibly cohort) host module
++  int cohortId = -1;   // >=0: currently installed as a member of cohort #id
+   uint32_t jitRuns = 0;  // entries that ran fully in JIT (no deopt)
+   uint32_t deopts = 0;   // entries that deopted to PBL (resume); RESET on recompile
+   uint32_t deoptsTotal = 0;  // lifetime deopts, never reset (matches gWJDeoptByOp scale)
+@@ -455,6 +462,10 @@ struct WJEntry {
+   // this climbs; past kWJDeferStrandLimit we compile SYNCHRONOUSLY so a hot fn is
+   // never stranded in PBL forever. Loads drain at a task boundary well before this.
+   uint32_t queuedObserves = 0;
++  // Cached emitted wasm body for this fn (module-position-independent bytes).
++  // Cohort fusion (GECKO_WJ_COHORT) reassembles these into a shared module --
++  // pure byte copy, no Warp re-run, no script dereference at drain time.
++  std::vector<uint8_t> jitBody;
+ };
+ 
+ // Per-script compile state. Keyed by JSScript*; entries persist for the process.
+@@ -489,6 +500,134 @@ static WJEntry& EntryFor(JSScript* script) {
+   return e;
+ }
+ 
++// COHORT tier (GECKO_WJ_COHORT=K): after a function solo-compiles it is queued
++// here; once K are pending (or WasmJitDrainDeferred runs), they are re-emitted
++// into ONE wasm module/instance so calls BETWEEN members resolve to
++// same-instance call_indirect -- the only shape V8's speculative wasm inlining
++// fires on (measured 2.4-2.7x vs cross-instance in Chrome). Members keep their
++// shared-table slots (callers' cached ICs stay valid); each entry's handle/
++// memberIdx/directIdx are re-pointed at the cohort module's exports.
++static const int kWJCtorCacheN = 32;
++static uint32_t gWJCC_key[kWJCtorCacheN] = {0};  // wrapper fn ptr (0 = empty)
++static int gWJCC_handle[kWJCtorCacheN] = {0};    // initialize compiled handle
++static int gWJCC_member[kWJCtorCacheN] = {0};    // initialize member index (cohort)
++static uint32_t gWJCC_nargs[kWJCtorCacheN] = {0};
++static uint32_t gWJCC_env[kWJCtorCacheN] = {0};  // initialize environment ptr
++static js::SharedShape* gWJCC_shape[kWJCtorCacheN] = {0};  // `this` shape (0=use CreateThisFromIon)
++static uint8_t gWJCC_allocKind[kWJCtorCacheN] = {0};       // `this` gc::AllocKind
++
++static std::vector<JSScript*> gWJCohortPending;  // traced in WJTraceRoots
++// Observed caller->callee edges (filled call ICs): (callerScript, calleeScript),
++// unique pairs, recorded on the WJH_CALL IC-fill path. Drives cohort packing.
++static std::vector<std::pair<JSScript*, JSScript*>> gWJCallEdges;
++static uint64_t gWJCohortCount = 0;
++static uint64_t gWJCohortMembers = 0;
++static uint64_t gWJCohortEdgePulls = 0;
++
++static void WJDrainCohort(JSContext* cx) {
++  static int kMax =
++      getenv("GECKO_WJ_COHORT") ? atoi(getenv("GECKO_WJ_COHORT")) : 0;
++  static int dbg = getenv("GECKO_WJ_COHORTDBG") ? 1 : 0;
++  if (kMax <= 0 || gWJCohortPending.empty() || gWJDrainingNow || !gEntries) {
++    return;
++  }
++  std::vector<JSScript*> seeds;
++  seeds.swap(gWJCohortPending);
++  std::vector<js::wasm::WJCohortReq> reqs;
++  std::unordered_set<JSScript*> inReq;
++  auto tryAdd = [&](JSScript* s) {
++    if (!s || inReq.count(s) || reqs.size() >= size_t(kMax)) return;
++    auto it = gEntries->find(s);
++    if (it == gEntries->end() ||
++        it->second.state != WJEntry::State::Compiled ||
++        it->second.cohortId >= 0 || it->second.handle < 0) {
++      return;
++    }
++    if (it->second.jitBody.empty()) return;  // no cached body: can't fuse
++    js::wasm::WJCohortReq r;
++    r.script = s;
++    r.tblSlot = it->second.tblSlot;
++    r.forceMega = false;
++    r.nargs = it->second.nargs;
++    r.nlocals = it->second.nlocals;
++    r.hasAlwaysBails = it->second.hasAlwaysBails;
++    r.shapeDeoptDom = it->second.shapeDeoptDom;
++    r.body = &it->second.jitBody;
++    reqs.push_back(r);
++    inReq.insert(s);
++  };
++  // Edge-first packing: each observed caller->callee edge contributes both ends
++  // so the hot call pairs become same-instance. Then members' own callees
++  // transitively, then leftover pending seeds pad the module (harmless: sharing
++  // an instance costs nothing for unconnected members).
++  for (auto& pr : gWJCallEdges) {
++    if (reqs.size() >= size_t(kMax)) break;
++    JSScript *caller = pr.first, *callee = pr.second;
++    if (inReq.count(caller) && inReq.count(callee)) continue;
++    size_t before = reqs.size();
++    tryAdd(caller);
++    tryAdd(callee);
++    if (reqs.size() > before) gWJCohortEdgePulls++;
++  }
++  for (size_t mi = 0; mi < reqs.size() && reqs.size() < size_t(kMax); mi++) {
++    for (auto& pr : gWJCallEdges) {
++      if (pr.first != reqs[mi].script) continue;
++      if (!inReq.count(pr.second)) gWJCohortEdgePulls++;
++      tryAdd(pr.second);
++    }
++  }
++  for (JSScript* s : seeds) {
++    if (reqs.size() >= size_t(kMax)) {
++      gWJCohortPending.push_back(s);  // over cap: next drain's seeds
++      continue;
++    }
++    tryAdd(s);
++  }
++  uint32_t dbgSites = unsigned(gWJCallEdges.size()), dbgWays = 0;
++  if (reqs.size() < 2) {
++    if (dbg)
++      fprintf(stderr, "[wj-cohort] skip: reqs=%u sites=%u ways=%u\n",
++              unsigned(reqs.size()), dbgSites, dbgWays);
++    return;  // nothing worth fusing
++  }
++  int handle = js::wasm::WJWarpCompileCohort(cx, reqs);
++  if (handle < 0) {
++    if (dbg) fprintf(stderr, "[wj-cohort] compile failed\n");
++    return;
++  }
++  int cid = int(gWJCohortCount);
++  for (auto& r : reqs) {
++    if (!r.ok) continue;
++    WJEntry& e = EntryFor(r.script);
++    int oldHandle = e.handle;
++    e.handle = handle;
++    e.memberIdx = r.memberIdx;
++    e.tblSlot = r.tblSlot;
++    e.cohortId = cid;
++    // The per-class construct cache holds (handle, member) of a member's OLD
++    // module -- still callable (stale solo copies stay alive) but bypasses the
++    // cohort. Repoint slots that referenced this member's old module.
++    for (int k = 0; k < kWJCtorCacheN; k++) {
++      if (gWJCC_handle[k] == oldHandle) {
++        gWJCC_handle[k] = handle;
++        gWJCC_member[k] = r.memberIdx;
++      }
++    }
++    if (!getenv("GECKO_WJ_NODIRECT")) {
++      e.directIdx =
++          int(wasmhost_call(handle, -(r.memberIdx + 1), nullptr, 0));
++      if (e.directIdx <= 0) e.directIdx = -1;
++    }
++    gWJCohortMembers++;
++  }
++  gWJCohortCount++;
++  if (dbg) {
++    fprintf(stderr,
++            "[wj-cohort] #%d installed members=%u handle=%d sites=%u ways=%u\n",
++            cid, unsigned(reqs.size()), handle, dbgSites, dbgWays);
++  }
++}
++
+ // GECKO_WJ_ENTRYDUMP: dump every WJEntry with deopts >= threshold -- script
+ // filename:line, deopts, jitRuns, deopt-rate%, recompiles, final state. Tells us
+ // which functions storm-in-JIT (Compiled + high deopts) vs failed-to-PBL.
+@@ -609,9 +748,14 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
+     if (w > 0) o += size_t(w);
+   };
+   app("{\"compiled\":%u,\"failed\":%u,\"cold\":%u,\"jitRuns\":%llu,"
+-      "\"deopts\":%llu,\"deoptRatePct\":%d,\"recompiles\":%llu,\"topDeoptFns\":[",
++      "\"deopts\":%llu,\"deoptRatePct\":%d,\"recompiles\":%llu,"
++      "\"cohorts\":%llu,\"cohortMembers\":%llu,\"cohortEdgePulls\":%llu,"
++      "\"topDeoptFns\":[",
+       compiled, failed, cold, (unsigned long long)totJit,
+-      (unsigned long long)totDeopt, rate, (unsigned long long)totRecomp);
++      (unsigned long long)totDeopt, rate, (unsigned long long)totRecomp,
++      (unsigned long long)gWJCohortCount,
++      (unsigned long long)gWJCohortMembers,
++      (unsigned long long)gWJCohortEdgePulls);
+   bool first = true;
+   for (int i = 0; i < 8; i++) {
+     if (!top[i].sc || !top[i].deopts) continue;
+@@ -643,12 +787,17 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+       e.handle = -1;
+       e.tblSlot = -1;
+       e.directIdx = -1;
++      e.memberIdx = 0;
++      e.cohortId = -1;
+       e.observes = 0;
+       e.nextTry = 0;
+       e.osrTargets.clear();
++      e.jitBody.clear();
+       n++;
+     }
+   }
++  gWJCohortPending.clear();
++  gWJCallEdges.clear();
+   // Stale call-IC entries would dispatch to the abandoned table slots; clearing
+   // the callee-ptr side is sufficient (tblIdx is only read on a fn-ptr hit).
+   // NOTE: a JIT frame already ON THE STACK when the fuse pops finishes with the
+@@ -868,7 +1017,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+       getenv("GECKO_WJ_COMPILESTAT") ? atoi(getenv("GECKO_WJ_COMPILESTAT")) : 0;
+   mozilla::TimeStamp wjCompT0;
+   if (compileStat) wjCompT0 = mozilla::TimeStamp::Now();
+-  int handle = js::wasm::WJWarpCompile(cx, script, &nargs, &nlocals, &tblSlot);
++  int handle = js::wasm::WJWarpCompile(cx, script, &nargs, &nlocals, &tblSlot,
++                                       &e.jitBody);
+   js::wasm::gWJForceMega = false;
+   if (compileStat) {
+     double ms = (mozilla::TimeStamp::Now() - wjCompT0).ToMilliseconds();
+@@ -975,6 +1125,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+   e.state = WJEntry::State::Compiled;
+   e.handle = handle;
+   e.tblSlot = tblSlot;
++  e.memberIdx = 0;
++  e.cohortId = -1;
+   e.hasAlwaysBails = js::wasm::gWJHadAlwaysBails;
+   e.shapeDeoptDom = js::wasm::gWJEmitShapeDeopts > 0;  // ANY shape-family deopt site
+   e.osrTargets = gWJPendingOsrTargets;  // OSR loop-head pc->block map for this fn
+@@ -990,9 +1142,17 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+   // Register the trampoline in the MAIN indirect table for direct (no-JS-hop)
+   // PBL->JIT entry via a C function pointer. -1 if registration failed.
+   if (!getenv("GECKO_WJ_NODIRECT")) {
+-    e.directIdx = int(wasmhost_call(handle, -1, nullptr, 0));
++    e.directIdx = int(wasmhost_call(handle, -(e.memberIdx + 1), nullptr, 0));
+     if (e.directIdx <= 0) e.directIdx = -1;
+   }
++  // Cohort queue: this freshly-installed fn joins the next fusion batch; when
++  // the batch reaches GECKO_WJ_COHORT members it is fused synchronously here.
++  static int cohortMax =
++      getenv("GECKO_WJ_COHORT") ? atoi(getenv("GECKO_WJ_COHORT")) : 0;
++  if (cohortMax > 0) {
++    gWJCohortPending.push_back(script);
++    if (int(gWJCohortPending.size()) >= cohortMax) WJDrainCohort(cx);
++  }
+   if (getenv("GECKO_WJ_PBLWHO"))
+     fprintf(stderr, "[wb-directidx] %s:%u directIdx=%d\n",
+             script->filename() ? script->filename() : "?",
+@@ -1008,35 +1168,39 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+ // compile path instead of re-deferring. Bounded per-call by GECKO_WJ_DRAINBUDGET
+ // (0 = all) so a huge backlog doesn't stall one idle slot.
+ void js::wasm::WasmJitDrainDeferred() {
+-  if (gWJDeferQueue.empty() || gWJDrainingNow) return;
+-  static uint32_t budget = 0xffffffffu;
+-  if (budget == 0xffffffffu) {
+-    const char* s = getenv("GECKO_WJ_DRAINBUDGET");
+-    budget = s ? uint32_t(atoi(s)) : 0;  // 0 => drain the whole queue each call
+-  }
+-  gWJDrainingNow = true;
+-  uint32_t done = 0;
+-  size_t i = 0;
+-  for (; i < gWJDeferQueue.size(); i++) {
+-    if (budget && done >= budget) break;
+-    JSScript* s = gWJDeferQueue[i];
+-    WJEntry& e = EntryFor(s);
+-    e.queued = false;
+-    if (e.state == WJEntry::State::Cold) {
+-      WasmJitObserveCall(s);  // qualified already -> compiles inline now
+-      done++;
+-    }
+-  }
+-  // Remove the drained prefix; keep any remainder (budget-limited) for next drain.
+-  if (i >= gWJDeferQueue.size()) {
+-    gWJDeferQueue.clear();
+-  } else {
+-    gWJDeferQueue.erase(gWJDeferQueue.begin(), gWJDeferQueue.begin() + i);
+-  }
+-  gWJDrainingNow = false;
+-  if (getenv("GECKO_WJ_DEFERDBG"))
+-    fprintf(stderr, "[wj-drain] compiled=%u remaining=%zu\n", done,
+-            gWJDeferQueue.size());
++  if (!gWJDeferQueue.empty() && !gWJDrainingNow) {
++    static uint32_t budget = 0xffffffffu;
++    if (budget == 0xffffffffu) {
++      const char* s = getenv("GECKO_WJ_DRAINBUDGET");
++      budget = s ? uint32_t(atoi(s)) : 0;  // 0 => drain the whole queue each call
++    }
++    gWJDrainingNow = true;
++    uint32_t done = 0;
++    size_t i = 0;
++    for (; i < gWJDeferQueue.size(); i++) {
++      if (budget && done >= budget) break;
++      JSScript* s = gWJDeferQueue[i];
++      WJEntry& e = EntryFor(s);
++      e.queued = false;
++      if (e.state == WJEntry::State::Cold) {
++        WasmJitObserveCall(s);  // qualified already -> compiles inline now
++        done++;
++      }
++    }
++    // Remove the drained prefix; keep any remainder (budget-limited) for next.
++    if (i >= gWJDeferQueue.size()) {
++      gWJDeferQueue.clear();
++    } else {
++      gWJDeferQueue.erase(gWJDeferQueue.begin(), gWJDeferQueue.begin() + i);
++    }
++    gWJDrainingNow = false;
++    if (getenv("GECKO_WJ_DEFERDBG"))
++      fprintf(stderr, "[wj-drain] compiled=%u remaining=%zu\n", done,
++              gWJDeferQueue.size());
++  }
++  // Idle boundary is also the cohort fusion point: fuse whatever solo compiles
++  // accumulated, even below the synchronous GECKO_WJ_COHORT batch threshold.
++  if (JSContext* cx = js::TlsContext.get()) WJDrainCohort(cx);
+ }
+ 
+ // Set during the differential verifier's interpreter re-run so nested calls
+@@ -1277,7 +1441,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+     WJTrampFn fp = reinterpret_cast<WJTrampFn>(uintptr_t(e.directIdx));
+     flag = fp(ptr);
+   } else {
+-    flag = wasmhost_call(e.handle, 0, &ptr, 1);
++    flag = wasmhost_call(e.handle, e.memberIdx, &ptr, 1);
+   }
+   gWJEntryExitFP = wjPrevEntryExitFP;
+   gWJEntryAct = wjPrevEntryAct;
+@@ -1471,6 +1635,8 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+         e.state = WJEntry::State::Cold;  // re-observe + recompile with fresh ICs
+         e.handle = -1;
+         e.directIdx = -1;
++        e.memberIdx = 0;
++        e.cohortId = -1;
+         // KEEP e.tblSlot: the recompile reuses it so callers' cached call ICs
+         // (funPtr->slot, funPtr unchanged) keep resolving to the new module.
+         // Resetting it to -1 allocated a NEW slot, leaving cached ICs pointing at
+@@ -1691,13 +1857,7 @@ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
+ // handle + nargs + env) so repeats skip all lookups and call directly. Key (wrapper
+ // fn) and env (module scope) are tenured/stable; a moved/evicted key just misses ->
+ // re-resolve (sound). [GC sweep TODO: trace gWJCC_env or re-validate.]
+-static const int kWJCtorCacheN = 32;
+-static uint32_t gWJCC_key[kWJCtorCacheN] = {0};  // wrapper fn ptr (0 = empty)
+-static int gWJCC_handle[kWJCtorCacheN] = {0};    // initialize compiled handle
+-static uint32_t gWJCC_nargs[kWJCtorCacheN] = {0};
+-static uint32_t gWJCC_env[kWJCtorCacheN] = {0};  // initialize environment ptr
+-static js::SharedShape* gWJCC_shape[kWJCtorCacheN] = {0};  // `this` shape (0=use CreateThisFromIon)
+-static uint8_t gWJCC_allocKind[kWJCtorCacheN] = {0};       // `this` gc::AllocKind
++// (declarations moved above WJDrainCohort; see ~line 500)
+ static bool WJIsForwardingWrapper(JSContext* cx, JSScript* s) {
+   if (!s->function() || s->length() > 96) return false;
+   if (!gWJFwdCache) gWJFwdCache = new std::unordered_map<JSScript*, char>();
+@@ -2748,6 +2908,32 @@ static double wjhelpImpl(double kindF, double siteF) {
+             if (w == kWJCallWays) w = 0;  // all ways full: evict way 0
+             gWJCallFn[base + w] = funPtr;
+             gWJCallTblIdx[base + w] = ce.tblSlot;
++            // Record the caller->callee edge for cohort packing. site->script is
++            // the caller (attributed at emit); cs is the callee's script.
++            if (JSScript* callerSc = gWJCallSiteScript[site]) {
++              if (callerSc != cs) {
++                bool dup = false;
++                for (auto& pr : gWJCallEdges) {
++                  if (pr.first == callerSc && pr.second == cs) {
++                    dup = true;
++                    break;
++                  }
++                }
++                if (!dup) {
++                  gWJCallEdges.emplace_back(callerSc, cs);
++                  // Edge-triggered fusion: cohort assembly is a pure byte copy
++                  // (no Warp re-run), so draining on a fresh edge once enough
++                  // members are pending is cheap. Without this, GECKO_WJ_COHORT
++                  // larger than the workload's compile count never drains.
++                  static int kMin = getenv("GECKO_WJ_COHORTMIN")
++                                        ? atoi(getenv("GECKO_WJ_COHORTMIN"))
++                                        : 8;
++                  if (kMin > 0 && int(gWJCohortPending.size()) >= kMin) {
++                    WJDrainCohort(cx);
++                  }
++                }
++              }
++            }
+           }
+           // Resume context is self-contained (emitted code sets it), so just run.
+           gWJCurrentEnv = uint32_t(uintptr_t(static_cast<void*>(fun->environment())));
+@@ -2796,7 +2982,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+           if (js::wasm::kWJEHABI)  // EHABI: stage the boxed callee for the trampoline.
+             gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*fun).asRawBits();
+           double ptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
+-          double flag = wasmhost_call(ce.handle, 0, &ptr, 1);
++          double flag = wasmhost_call(ce.handle, ce.memberIdx, &ptr, 1);
+           gWJFastCalls++;
+           if (flag == 2.0) {
+             // Entry GuardGlobalGeneration mismatch: the callee did NOT run.
+@@ -5043,7 +5229,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+         gWJScratch[js::wasm::kWJThisSlot] = thisv.get().asRawBits();
+         gWJCurrentEnv = gWJCC_env[cslot];
+         double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
+-        double iflag = wasmhost_call(gWJCC_handle[cslot], 0, &iptr, 1);
++        double iflag =
++            wasmhost_call(gWJCC_handle[cslot], gWJCC_member[cslot], &iptr, 1);
+         if (iflag == 1.0) return 1.0;
+         if (iflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to the slow path
+           gWJFastCalls++;
+@@ -5096,6 +5283,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+               if (fillSlot < 0) fillSlot = 0;  // evict slot 0 if full
+               gWJCC_key[fillSlot] = ntKey2;
+               gWJCC_handle[fillSlot] = iit->second.handle;
++              gWJCC_member[fillSlot] = iit->second.memberIdx;
+               gWJCC_nargs[fillSlot] = iit->second.nargs;
+               gWJCC_env[fillSlot] = gWJCurrentEnv;
+               // Capture the `this` shape for the inline-alloc fast path (only for
+@@ -5108,7 +5296,9 @@ static double wjhelpImpl(double kindF, double siteF) {
+               if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
+                 gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*ifun).asRawBits();
+               double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
+-              double iflag = wasmhost_call(iit->second.handle, 0, &iptr, 1);
++              double iflag =
++                  wasmhost_call(iit->second.handle, iit->second.memberIdx,
++                                &iptr, 1);
+               if (iflag == 1.0) return 1.0;  // initialize threw
+               if (iflag == 0.0) {  // flag 2.0 -> !done -> VM path runs it
+                 gWJFastCalls++;
+@@ -5171,7 +5361,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+           if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
+             gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*cfun).asRawBits();
+           double cptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
+-          double cflag = wasmhost_call(cit->second.handle, 0, &cptr, 1);
++          double cflag = wasmhost_call(cit->second.handle,
++                                       cit->second.memberIdx, &cptr, 1);
+           if (cflag == 1.0) return 1.0;  // threw
+           if (cflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to slow construct
+             // Construct result: the ctor's return if it's an object, else `this`.
+@@ -5654,6 +5845,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+   for (JSScript*& s : gWJDeferQueue) {
+     js::TraceRoot(trc, &s, "wjdeferq");
+   }
++  for (JSScript*& s : gWJCohortPending) {
++    js::TraceRoot(trc, &s, "wjcohortq");
++  }
++  for (auto& pr : gWJCallEdges) {
++    js::TraceRoot(trc, &pr.first, "wjedge-caller");
++    js::TraceRoot(trc, &pr.second, "wjedge-callee");
++  }
+   for (uint32_t i = 0; i < gWJConstPoolCount; i++) {
+     WJDbgLogRoot(trc, "const", i, &gWJConstPool[i]);
+     JS::TraceRoot(trc, reinterpret_cast<JS::Value*>(&gWJConstPool[i]), "wjconst");
+@@ -5730,6 +5928,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+         js::TraceRoot(trc, reinterpret_cast<JSObject**>(&gWJCallFn[i]), "wjcallfn");
+       }
+     }
++    // Site->caller map (cohort edge attribution): caller scripts must stay live
++    // and pointer-current or edges attribute to a dead/moved JSScript*.
++    for (uint32_t i = 1; i < js::wasm::gWJNextCallSite; i++) {
++      if (gWJCallSiteScript[i]) {
++        js::TraceRoot(trc, &gWJCallSiteScript[i], "wjcallsite");
++      }
++    }
+   }
+   // Per-site ctor inline cache: callee fn, `this` shape, and ctor env are GC ptrs.
+   // If any moves and a slot isn't updated, the backend's `callee==gWJCtorCallee`
+diff --git a/js/src/wasm/WasmJitWarp.cpp b/js/src/wasm/WasmJitWarp.cpp
+index cd527a8514..2a5ccc8d30 100644
+--- a/js/src/wasm/WasmJitWarp.cpp
++++ b/js/src/wasm/WasmJitWarp.cpp
+@@ -13,8 +13,10 @@
+ #include "mozilla/ScopeExit.h"
+ #include "mozilla/TimeStamp.h"  // GECKO_WJ_COMPILESTAT split compile timing
+ 
++#include <memory>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <vector>
+ 
+ #include "gc/GC.h"
+ #include "jit/BaselineIC.h"
+@@ -41,6 +43,7 @@
+ #include "jit/InlineScriptTree-inl.h"
+ #include "jit/JitScript-inl.h"
+ #include "vm/Realm-inl.h"
++#include "js/GCVector.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+@@ -52,7 +55,7 @@ int wasmhost_instantiate(int handle, const int* callbackIds, int importCount);
+ int wasmhost_guest_mem_objid();
+ int wasmhost_guest_mem_shared();
+ int wasmhost_jit_table();
+-int wasmhost_jit_table_set(int handle, int idx);
++int wasmhost_jit_table_set(int handle, int idx, int member);
+ }
+ 
+ namespace js {
+@@ -82,11 +85,6 @@ static void DumpMIR(JSScript* script, MIRGraph& graph) {
+   }
+ }
+ 
+-// Assemble the wasm module wrapping `e`'s emitted body and host-compile +
+-// instantiate it. Module shape (mirrors the proven jitref layout):
+-//   type0 (f64)->f64 [body], type1 (f64,f64)->f64 [wjhelp]
+-//   import m.help(func type1), m.mem(memory)
+-//   func[0]: type0 ; export "f" = func index 1 (wjhelp import is index 0)
+ // Dense allocator for shared-table slots. The host's funcref table has a fixed
+ // size (kWJTableSize); module handles are a process-global counter that easily
+ // exceeds it, so the table slot must NOT be the handle (call_indirect would trap
+@@ -95,236 +93,47 @@ static void DumpMIR(JSScript* script, MIRGraph& graph) {
+ static constexpr int kWJTableSize = 4096;
+ static int gWJNextTblSlot = 0;
+ 
+-static int AssembleAndInstall(MIRGenerator& mirGen, MIRGraph& graph,
+-                              uint32_t nargs, WarpSnapshot* snapshot, int* tblSlotOut,
+-                              bool dump) {
+-  Bytes out;
+-  Encoder e(out);
+-  const uint8_t kF64 = uint8_t(TypeCode::F64);
+-  const uint8_t kI64 = uint8_t(TypeCode::I64);
+-  if (!e.writeFixedU32(MagicNumber) || !e.writeFixedU32(EncodingVersionModule)) {
+-    return -1;
+-  }
+-  size_t s;
+-  if constexpr (kWJEHABI) {
+-    // EHABI: 4 types. type0 = main (f64 sb, i64 callee, i64 this, i64 args...) -> i64
+-    // (no flag; exceptions via wasm EH). type1 = wjhelp (f64,f64)->f64. type2 =
+-    // trampoline (f64)->f64. type3 = $wjexn tag ()->() (payload-less; the JS exception
+-    // value stays on cx).
+-    if (!e.startSection(SectionId::Type, &s) || !e.writeVarU32(4)) return -1;
+-    if (!e.writeFixedU8(0x60) || !e.writeVarU32(3 + kWJMaxArgs) ||
+-        !e.writeFixedU8(kF64)) {
+-      return -1;
+-    }
+-    for (uint32_t i = 0; i < 2 + kWJMaxArgs; i++) {
+-      if (!e.writeFixedU8(kI64)) return -1;  // callee + this + args
+-    }
+-    if (!e.writeVarU32(1) || !e.writeFixedU8(kI64)) return -1;  // result: i64 only
+-    if (!e.writeFixedU8(0x60) || !e.writeVarU32(2) || !e.writeFixedU8(kF64) ||
+-        !e.writeFixedU8(kF64) || !e.writeVarU32(1) || !e.writeFixedU8(kF64))
+-      return -1;  // type1 wjhelp
+-    if (!e.writeFixedU8(0x60) || !e.writeVarU32(1) || !e.writeFixedU8(kF64) ||
+-        !e.writeVarU32(1) || !e.writeFixedU8(kF64))
+-      return -1;  // type2 trampoline
+-    if (!e.writeFixedU8(0x60) || !e.writeVarU32(0) || !e.writeVarU32(0))
+-      return -1;  // type3 tag ()->()
+-    e.finishSection(s);
+-  } else {
+-    // 3 types: type0 = main (f64 scratchbase, i64 this, i64 arg0..arg[kWJMaxArgs-1])
+-    // -> f64; type1 = wjhelp (f64,f64)->f64; type2 = trampoline (f64)->f64.
+-    if (!e.startSection(SectionId::Type, &s) || !e.writeVarU32(3)) return -1;
+-    if (!e.writeFixedU8(0x60) || !e.writeVarU32(2 + kWJMaxArgs) ||
+-        !e.writeFixedU8(kF64)) {
+-      return -1;
+-    }
+-    for (uint32_t i = 0; i < 1 + kWJMaxArgs; i++) {
+-      if (!e.writeFixedU8(kI64)) return -1;  // this + args
+-    }
+-    if (!e.writeVarU32(2) || !e.writeFixedU8(kF64) || !e.writeFixedU8(kI64))
+-      return -1;  // main results: [f64 deopt-flag, i64 boxed-result]
+-    if (!e.writeFixedU8(0x60) || !e.writeVarU32(2) || !e.writeFixedU8(kF64) ||
+-        !e.writeFixedU8(kF64) || !e.writeVarU32(1) || !e.writeFixedU8(kF64)) {
+-      return -1;  // type1 wjhelp
+-    }
+-    if (!e.writeFixedU8(0x60) || !e.writeVarU32(1) || !e.writeFixedU8(kF64) ||
+-        !e.writeVarU32(1) || !e.writeFixedU8(kF64)) {
+-      return -1;  // type2 trampoline
+-    }
+-    e.finishSection(s);
+-  }
+-
+-  int memId = wasmhost_guest_mem_objid();
+-  if (memId < 0) return -1;
+-  int tblId = wasmhost_jit_table();  // shared funcref table for wasm->wasm calls
+-  if (tblId < 0) return -1;
+-  bool sharedMem = wasmhost_guest_mem_shared() != 0;
+-  // 3 imports: m.help (func type1), m.mem (memory), m.tbl (funcref table).
+-  if (!e.startSection(SectionId::Import, &s) || !e.writeVarU32(3) ||
+-      !e.writeBytes("m", 1) || !e.writeBytes("help", 4) || !e.writeFixedU8(0x00) ||
+-      !e.writeVarU32(1) ||  // wjhelp: func import of type 1
+-      !e.writeBytes("m", 1) || !e.writeBytes("mem", 3) || !e.writeFixedU8(0x02)) {
+-    return -1;
+-  }
+-  if (sharedMem) {
+-    if (!e.writeFixedU8(0x03) || !e.writeVarU32(1) || !e.writeVarU32(65536)) return -1;
+-  } else {
+-    if (!e.writeFixedU8(0x00) || !e.writeVarU32(0)) return -1;
+-  }
+-  // m.tbl: table import, elemtype funcref (0x70), limits min=4096 (matches host).
+-  if (!e.writeBytes("m", 1) || !e.writeBytes("tbl", 3) || !e.writeFixedU8(0x01) ||
+-      !e.writeFixedU8(0x70) || !e.writeFixedU8(0x00) || !e.writeVarU32(4096)) {
+-    return -1;
+-  }
+-  e.finishSection(s);
+-
+-  // 2 local funcs: main (type0, func idx 1), trampoline (type2, func idx 2).
+-  // (wjhelp import is func idx 0.)
+-  if (!e.startSection(SectionId::Function, &s) || !e.writeVarU32(2) ||
+-      !e.writeVarU32(0) || !e.writeVarU32(2)) {
+-    return -1;
+-  }
+-  e.finishSection(s);
+-
+-  if constexpr (kWJEHABI) {
+-    // Tag section (id 13): one local tag $wjexn (index 0), attribute 0x00 (exception),
+-    // type index 3 (()->()). `throw 0` raises it; caught by try/catch_all. The JS
+-    // exception value rides on cx, not the tag payload.
+-    if (!e.startSection(SectionId::Tag, &s) || !e.writeVarU32(1) ||
+-        !e.writeFixedU8(0x00) || !e.writeVarU32(3)) {
+-      return -1;
+-    }
+-    e.finishSection(s);
+-  }
+-
+-  // Exports: "f" = trampoline (host entry, func idx 2) FIRST so it is export 0;
+-  // "m" = main (func idx 1) for shared-table registration.
+-  if (!e.startSection(SectionId::Export, &s) || !e.writeVarU32(2) ||
+-      !e.writeBytes("f", 1) || !e.writeFixedU8(0x00) || !e.writeVarU32(2) ||
+-      !e.writeBytes("m", 1) || !e.writeFixedU8(0x00) || !e.writeVarU32(1)) {
+-    return -1;
+-  }
+-  e.finishSection(s);
+-
+-  // 2 code bodies: main (func idx 1) then trampoline (func idx 2).
+-  if (!e.startSection(SectionId::Code, &s) || !e.writeVarU32(2)) return -1;
+-  size_t bodyOff;
+-  if (!e.writePatchableVarU32(&bodyOff)) return -1;
+-  size_t bodyStart = e.currentOffset();
+-  if (!WJEmitBody(mirGen, graph, nargs, /*useThis=*/true, snapshot, e)) {
+-    if (dump) fprintf(stderr, "[wb-compile] WJEmitBody bailed (unsupported node)\n");
+-    static int cdbg = getenv("GECKO_WJ_CDBG") ? 1 : 0;
+-    if (cdbg)
+-      fprintf(stderr, "[wj-cdbg] BAIL line=%u reason=%s\n",
+-              js::wasm::gWJBailLine, js::wasm::gWJBailReason);
+-    return -1;
+-  }
+-  e.patchVarU32(bodyOff, uint32_t(e.currentOffset() - bodyStart));
+-  size_t trampOff;
+-  if (!e.writePatchableVarU32(&trampOff)) return -1;
+-  size_t trampStart = e.currentOffset();
+-  if (!WJEmitTrampoline(e)) return -1;
+-  e.patchVarU32(trampOff, uint32_t(e.currentOffset() - trampStart));
+-  e.finishSection(s);
+-
+-  // jitdis debugger: GECKO_WJ_WASMDUMP dumps emitted wasm to /tmp/wbjit_<lineno>.wasm
+-  // (disassemble with `wasm-dis`). A numeric value >1 dumps ONLY that lineno (targeted);
+-  // any other set value dumps all compiled functions.
+-  bool wasmDump = getenv("GECKO_WJWARP_DUMP") || getenv("GECKO_WJ_WASMDUMP") ||
+-                  (js::wasm::gWJForceMega && getenv("GECKO_WJ_MEGADUMP"));
+-  if (wasmDump) {
+-    if (const char* wd = getenv("GECKO_WJ_WASMDUMP")) {
+-      int want = atoi(wd);
+-      JSScript* ds = mirGen.outerInfo().script();
+-      if (want > 1 && ds && int(ds->lineno()) != want) wasmDump = false;
+-    }
+-  }
+-  if (wasmDump) {
+-    JSScript* dscript = mirGen.outerInfo().script();
+-    char path[128];
+-    // Megamorphic recompiles dump to a SEPARATE file so they're not overwritten
+-    // by interleaved non-mega compiles of the same function (deltablue 414 diag).
+-    snprintf(path, sizeof(path), js::wasm::gWJForceMega ? "/tmp/wbjit_mega_%u.wasm"
+-                                              : "/tmp/wbjit_%u.wasm",
+-             dscript ? dscript->lineno() : 0);
+-    if (FILE* f = fopen(path, "wb")) {
+-      fwrite(out.begin(), 1, out.length(), f);
+-      fclose(f);
+-      fprintf(stderr, "[wb-compile] wrote %s (%zu bytes)\n", path,
+-              size_t(out.length()));
+-    }
+-  }
+-
+-  static int compileStat = getenv("GECKO_WJ_COMPILESTAT") ? 1 : 0;
+-  mozilla::TimeStamp hostT0;
+-  if (compileStat) hostT0 = mozilla::TimeStamp::Now();
+-  int handle = wasmhost_compile(out.begin(), int(out.length()));
+-  if (compileStat) {
+-    js::wasm::gWJHostCompileMs +=
+-        (mozilla::TimeStamp::Now() - hostT0).ToMilliseconds();
+-    js::wasm::gWJEmitBytes += uint64_t(out.length());
+-  }
+-  if (handle < 0) {
+-    // The host (V8) REJECTED the emitted wasm module -- our codegen produced
+-    // invalid/oversized wasm for this function. This is NOT an unsupported-node
+-    // bail; the stale gWJBailReason (last emitted op) would mislead. Record it +
+-    // the body size so LOGBAIL points here. GECKO_WJ_DUMPBADWASM writes the bytes.
+-    js::wasm::gWJBailReason = "host-compile-reject";
+-    if (getenv("GECKO_WJ_DUMPBADWASM")) {
+-      fprintf(stderr, "[wb-badwasm] host rejected module: %zu bytes (fn line %u)\n",
+-              size_t(out.length()),
+-              mirGen.outerInfo().script() ? mirGen.outerInfo().script()->lineno() : 0);
+-    }
+-    return -1;
+-  }
+-  const int importIds[3] = {-3, memId, tblId};  // help (shim), mem, tbl
+-  mozilla::TimeStamp instT0;
+-  if (compileStat) instT0 = mozilla::TimeStamp::Now();
+-  int instRes = wasmhost_instantiate(handle, importIds, 3);
+-  if (compileStat) {
+-    js::wasm::gWJHostInstMs +=
+-        (mozilla::TimeStamp::Now() - instT0).ToMilliseconds();
+-  }
+-  if (instRes != 0) {
+-    js::wasm::gWJBailReason = "host-instantiate-fail";
+-    return -1;
+-  }
+-  // Register this function in the shared table at a dense slot, so other JIT'd
+-  // functions can call_indirect it. -1 if the table is full (slow path only).
+-  // REUSE an existing slot (*tblSlotOut >= 0 on a deopt-storm RECOMPILE): callers'
+-  // polymorphic call ICs cache (funPtr -> tblSlot), and the funPtr is unchanged
+-  // across a recompile, so the new module MUST take over the same slot -- else the
+-  // cached ICs call_indirect the stale slot (old/garbage module -> deltablue wrong
+-  // results). On the first compile *tblSlotOut is -1 -> allocate a fresh slot.
+-  int slot = (*tblSlotOut >= 0)
+-                 ? *tblSlotOut
+-                 : ((gWJNextTblSlot < kWJTableSize) ? gWJNextTblSlot++ : -1);
+-  if (slot >= 0) (void)wasmhost_jit_table_set(handle, slot);
+-  *tblSlotOut = slot;
+-  return handle;
+-}
++// A member build: the MIR-pipeline artifacts for ONE function of a (possibly
++// multi-function "cohort") module. Owns the LifoAlloc backing TempAllocator,
++// graph, CompileInfo and the Warp snapshot -- they must outlive the member's
++// emit, which runs after ALL member builds complete. Zone/realm globals baked
++// during build are captured here and restored before THIS member's emit, so
++// members compiled under different zone globals still lower correctly.
++struct WJMemberBuild {
++  LifoAlloc lifo;
++  TempAllocator temp;
++  MIRGraph graph;
++  CompileInfo* info = nullptr;
++  WarpSnapshot* snapshot = nullptr;
++  MIRGenerator* mirGen = nullptr;
++  JSScript* script = nullptr;
++  uint32_t nargs = 0, nlocals = 0;
++  bool forceMega = false;
++  uintptr_t markBarrierAddr = 0, wholeCellLastAddr = 0, nurseryPosAddr = 0;
++  uint64_t globalLexEnvVal = 0, objHeaderWord = 0, strHeaderWord = 0;
++  Bytes body;
++  bool emitted = false;
++  bool hasAlwaysBails = false;
++  uint32_t emitShapeDeopts = 0;
++  std::vector<std::pair<uint32_t, uint32_t>> osrTargets;
++  explicit WJMemberBuild()
++      : lifo(TempAllocator::PreferredLifoChunkSize, js::MallocArena),
++        temp(&lifo), graph(&temp) {}
++  ~WJMemberBuild() { delete mirGen; }
++  WJMemberBuild(const WJMemberBuild&) = delete;
++  void operator=(const WJMemberBuild&) = delete;
++};
+ 
+ // Build Warp MIR for `script`, optimize, lower to wasm, host-compile. Returns a
+ // host handle (>=0) on success and writes *nargsOut, or -1 to stay in PBL.
+ // Monotonic count of INSTALLED compiles (for GECKO_WJ_COMPILEMAX bisection).
+ static uint32_t gWJCompileSerial = 0;
+ 
+-int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+-                  uint32_t* nlocalsOut, int* tblSlotOut) {
+-  bool dump = getenv("GECKO_WJWARP_DUMP");
+-  // Compile-count bisection (tasks #57/#64): GECKO_WJ_COMPILEMAX=N lets only
+-  // the first N functions install (later ones bail to PBL = correct-by-
+-  // definition). With GECKO_WJ_INSTLOG=1 printing each install's serial,
+-  // binary-search N to find WHICH compiled fn breaks a workload, then MIRDUMP
+-  // that fn. (A fn that fails only when OTHER fns are compiled points at a
+-  // caller/callee interaction instead.)
+-  static int compileMax = getenv("GECKO_WJ_COMPILEMAX")
+-                              ? atoi(getenv("GECKO_WJ_COMPILEMAX"))
+-                              : -1;
+-  if (compileMax >= 0 && gWJCompileSerial >= uint32_t(compileMax)) {
+-    js::wasm::gWJBailReason = "compilemax";
+-    return -1;
+-  }
+-  // Functions with try/catch/finally (try-notes): our JIT propagates a thrown
++// snapshot+build+optimize one function into a WJMemberBuild (emit runs later
++// via AssembleAndInstallN). nullptr -> caller keeps the function in PBL.
++static std::unique_ptr<WJMemberBuild> WJBuildMember(JSContext* cx,
++                                                  JSScript* script,
++                                                  bool forceMega, bool dump) {
+   // exception OUT of a function via a return flag, but has NO in-function CATCH
+   // landing pad. So a throw inside a try region unwinds PAST its own catch instead
+   // of landing in it -- e.g. gbemu initLCD's `try { new GameBoyCanvas() } catch`
+@@ -347,7 +156,7 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+       if (tn.kind() == js::TryNoteKind::Catch ||
+           tn.kind() == js::TryNoteKind::Finally) {
+         js::wasm::gWJBailReason = "trycatch";
+-        return -1;
++        return nullptr;
+       }
+     }
+   }
+@@ -396,7 +205,7 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+     const char* p = sl;
+     while (*p) {
+       uint32_t v = uint32_t(atoi(p));
+-      if (v == ln) return -1;
++      if (v == ln) return nullptr;
+       while (*p && *p != ',') p++;
+       if (*p == ',') p++;
+     }
+@@ -404,10 +213,10 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+   RootedScript scriptRoot(cx, script);
+ 
+   if (!script->hasJitScript()) {
+-    if (!cx->zone()->ensureJitZoneExists(cx)) return -1;
++    if (!cx->zone()->ensureJitZoneExists(cx)) return nullptr;
+     AutoRealm ar(cx, script);
+     AutoKeepJitScripts keep(cx);
+-    if (!script->ensureHasJitScript(cx, keep)) return -1;
++    if (!script->ensureHasJitScript(cx, keep)) return nullptr;
+   }
+ 
+   // Drive trial inlining RIGHT BEFORE building the snapshot, so WarpBuilder
+@@ -440,35 +249,34 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+     }
+   }
+ 
+-  LifoAlloc lifo(TempAllocator::PreferredLifoChunkSize, js::MallocArena);
+-  TempAllocator temp(&lifo);
+-  JitContext jctx(cx);
+-  MIRGraph graph(&temp);
++  auto mb = std::make_unique<WJMemberBuild>();
++  JitContext jctx(cx);  // scoped to the build; emit creates its own (no nesting)
+ 
+   InlineScriptTree* inlineScriptTree =
+-      InlineScriptTree::New(&temp, nullptr, nullptr, script);
+-  if (!inlineScriptTree) return -1;
+-  CompileInfo* info = temp.lifoAlloc()->new_<CompileInfo>(
++      InlineScriptTree::New(&mb->temp, nullptr, nullptr, script);
++  if (!inlineScriptTree) return nullptr;
++  CompileInfo* info = mb->temp.lifoAlloc()->new_<CompileInfo>(
+       CompileRuntime::get(cx->runtime()), script, /*osrPc=*/nullptr,
+       script->needsArgsObj(), inlineScriptTree);
+-  if (!info || info->compilingWasm()) return -1;
++  if (!info || info->compilingWasm()) return nullptr;
++  mb->info = info;
+ 
+   const OptimizationInfo* optimizationInfo =
+       IonOptimizations.get(OptimizationLevel::Normal);
+   const JitCompileOptions options(cx);
+-  MIRGenerator mirGen(CompileRealm::get(cx->realm()), options, &temp, &graph,
+-                      info, optimizationInfo);
++  mb->mirGen = new MIRGenerator(CompileRealm::get(cx->realm()), options,
++                                &mb->temp, &mb->graph, info, optimizationInfo);
++  js::wasm::gWJForceMega = forceMega;
+ 
+   static int compileStatP = getenv("GECKO_WJ_COMPILESTAT") ? 1 : 0;
+-  WarpSnapshot* snapshot = nullptr;
+   {
+     gc::AutoSuppressGC suppressGC(cx);
+     mozilla::TimeStamp t0;
+     if (compileStatP) t0 = mozilla::TimeStamp::Now();
+-    WarpOracle oracle(cx, mirGen, scriptRoot);
++    WarpOracle oracle(cx, *mb->mirGen, scriptRoot);
+     AbortReasonOr<WarpSnapshot*> result = oracle.createSnapshot();
+-    if (result.isErr()) return -1;
+-    snapshot = result.unwrap();
++    if (result.isErr()) return nullptr;
++    mb->snapshot = result.unwrap();
+     if (compileStatP)
+       js::wasm::gWJSnapshotMs += (mozilla::TimeStamp::Now() - t0).ToMilliseconds();
+   }
+@@ -476,9 +284,9 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+     gc::AutoSuppressGC suppressGC(cx);
+     mozilla::TimeStamp t0;
+     if (compileStatP) t0 = mozilla::TimeStamp::Now();
+-    WarpCompilation comp(mirGen.alloc());
+-    WarpBuilder builder(*snapshot, mirGen, &comp);
+-    if (!builder.build()) return -1;
++    WarpCompilation comp(mb->mirGen->alloc());
++    WarpBuilder builder(*mb->snapshot, *mb->mirGen, &comp);
++    if (!builder.build()) return nullptr;
+     if (compileStatP)
+       js::wasm::gWJBuildMs += (mozilla::TimeStamp::Now() - t0).ToMilliseconds();
+   }
+@@ -491,34 +299,391 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+     // instructions, so emit + host-compile (which scale with graph/output size) grow
+     // MORE than OptimizeMIR shrinks (per-compile 1.96ms -> 2.27ms). The optimizer
+     // pays for itself by shrinking the graph. So run the full Normal pipeline.
+-    if (!OptimizeMIR(&mirGen)) return -1;
++    if (!OptimizeMIR(mb->mirGen)) return nullptr;
+     if (compileStatP)
+       js::wasm::gWJOptimizeMs += (mozilla::TimeStamp::Now() - t0).ToMilliseconds();
+   }
+   if (dump) {
+     fprintf(stderr, "[wb-compile] %s:%u optimized, %u blocks\n",
+             script->filename() ? script->filename() : "?",
+-            uint32_t(script->lineno()), unsigned(graph.numBlocks()));
+-    DumpMIR(script, graph);
++            uint32_t(script->lineno()), unsigned(mb->graph.numBlocks()));
++    DumpMIR(script, mb->graph);
++  }
++
++  mb->script = script;
++  mb->nargs = script->function() ? script->function()->nargs() : 0;
++  mb->nlocals = info->nlocals();
++  mb->forceMega = forceMega;
++  mb->markBarrierAddr = js::wasm::gWJMarkBarrierAddr;
++  mb->wholeCellLastAddr = js::wasm::gWJWholeCellLastAddr;
++  mb->globalLexEnvVal = js::wasm::gWJGlobalLexEnvVal;
++  mb->nurseryPosAddr = js::wasm::gWJNurseryPosAddr;
++  mb->objHeaderWord = js::wasm::gWJObjHeaderWord;
++  mb->strHeaderWord = js::wasm::gWJStringHeaderWord;
++  return mb;
++}
++
++// Emit `mb`'s body into mb.body so a mid-body bail leaves the module encoder
++// untouched (a failed member is simply dropped from a cohort). Restores the
++// member's baked zone/realm globals first: they are consumed as emit-time
++// immediates, and cohort members may have been built under different globals.
++static bool WJEmitMemberBody(WJMemberBuild& mb) {
++  js::wasm::gWJMarkBarrierAddr = mb.markBarrierAddr;
++  js::wasm::gWJWholeCellLastAddr = mb.wholeCellLastAddr;
++  js::wasm::gWJGlobalLexEnvVal = mb.globalLexEnvVal;
++  js::wasm::gWJNurseryPosAddr = mb.nurseryPosAddr;
++  js::wasm::gWJObjHeaderWord = mb.objHeaderWord;
++  js::wasm::gWJStringHeaderWord = mb.strHeaderWord;
++  js::wasm::gWJForceMega = mb.forceMega;
++  js::wasm::gWJPendingOsrTargets.clear();
++  Encoder be(mb.body);
++  mb.emitted = WJEmitBody(*mb.mirGen, mb.graph, mb.nargs, /*useThis=*/true,
++                        mb.snapshot, be);
++  if (mb.emitted) {
++    mb.hasAlwaysBails = js::wasm::gWJHadAlwaysBails;
++    mb.emitShapeDeopts = js::wasm::gWJEmitShapeDeopts;
++    mb.osrTargets = js::wasm::gWJPendingOsrTargets;
++  }
++  return mb.emitted;
++}
++
++// Type section + imports + function decls + tag + exports for an N-member
++// module. Func index space: help(import)=0, main_i = 1+i, tramp_i = 1+N+i.
++// Export order is f{,1..N-1} then m{,1..N-1}, so the host's fns[] has member
++// i's trampoline at index i and its register-ABI main at N+i.
++static bool WJWriteModuleHead(Encoder& e, uint32_t n, bool sharedMem) {
++  const uint8_t kF64 = uint8_t(TypeCode::F64);
++  const uint8_t kI64 = uint8_t(TypeCode::I64);
++  size_t s;
++  if constexpr (kWJEHABI) {
++    if (!e.startSection(SectionId::Type, &s) || !e.writeVarU32(4)) return false;
++    if (!e.writeFixedU8(0x60) || !e.writeVarU32(3 + kWJMaxArgs) ||
++        !e.writeFixedU8(kF64)) {
++      return false;
++    }
++    for (uint32_t i = 0; i < 2 + kWJMaxArgs; i++) {
++      if (!e.writeFixedU8(kI64)) return false;
++    }
++    if (!e.writeVarU32(1) || !e.writeFixedU8(kI64)) return false;
++    if (!e.writeFixedU8(0x60) || !e.writeVarU32(2) || !e.writeFixedU8(kF64) ||
++        !e.writeFixedU8(kF64) || !e.writeVarU32(1) || !e.writeFixedU8(kF64))
++      return false;
++    if (!e.writeFixedU8(0x60) || !e.writeVarU32(1) || !e.writeFixedU8(kF64) ||
++        !e.writeVarU32(1) || !e.writeFixedU8(kF64))
++      return false;
++    if (!e.writeFixedU8(0x60) || !e.writeVarU32(0) || !e.writeVarU32(0))
++      return false;
++    e.finishSection(s);
++  } else {
++    if (!e.startSection(SectionId::Type, &s) || !e.writeVarU32(3)) return false;
++    if (!e.writeFixedU8(0x60) || !e.writeVarU32(2 + kWJMaxArgs) ||
++        !e.writeFixedU8(kF64)) {
++      return false;
++    }
++    for (uint32_t i = 0; i < 1 + kWJMaxArgs; i++) {
++      if (!e.writeFixedU8(kI64)) return false;
++    }
++    if (!e.writeVarU32(2) || !e.writeFixedU8(kF64) || !e.writeFixedU8(kI64))
++      return false;
++    if (!e.writeFixedU8(0x60) || !e.writeVarU32(2) || !e.writeFixedU8(kF64) ||
++        !e.writeFixedU8(kF64) || !e.writeVarU32(1) || !e.writeFixedU8(kF64))
++      return false;
++    if (!e.writeFixedU8(0x60) || !e.writeVarU32(1) || !e.writeFixedU8(kF64) ||
++        !e.writeVarU32(1) || !e.writeFixedU8(kF64))
++      return false;
++    e.finishSection(s);
++  }
++
++  if (!e.startSection(SectionId::Import, &s) || !e.writeVarU32(3) ||
++      !e.writeBytes("m", 1) || !e.writeBytes("help", 4) || !e.writeFixedU8(0x00) ||
++      !e.writeVarU32(1) ||
++      !e.writeBytes("m", 1) || !e.writeBytes("mem", 3) || !e.writeFixedU8(0x02)) {
++    return false;
++  }
++  if (sharedMem) {
++    if (!e.writeFixedU8(0x03) || !e.writeVarU32(1) || !e.writeVarU32(65536)) return false;
++  } else {
++    if (!e.writeFixedU8(0x00) || !e.writeVarU32(0)) return false;
++  }
++  if (!e.writeBytes("m", 1) || !e.writeBytes("tbl", 3) || !e.writeFixedU8(0x01) ||
++      !e.writeFixedU8(0x70) || !e.writeFixedU8(0x00) || !e.writeVarU32(4096)) {
++    return false;
++  }
++  e.finishSection(s);
++
++  if (!e.startSection(SectionId::Function, &s) || !e.writeVarU32(2 * n)) return false;
++  for (uint32_t c = 0; c < n; c++) {
++    if (!e.writeVarU32(0)) return false;  // main_c: type0
++  }
++  for (uint32_t c = 0; c < n; c++) {
++    if (!e.writeVarU32(2)) return false;  // tramp_c: type2
++  }
++  e.finishSection(s);
++
++  if constexpr (kWJEHABI) {
++    if (!e.startSection(SectionId::Tag, &s) || !e.writeVarU32(1) ||
++        !e.writeFixedU8(0x00) || !e.writeVarU32(3)) {
++      return false;
++    }
++    e.finishSection(s);
++  }
++
++  if (!e.startSection(SectionId::Export, &s) || !e.writeVarU32(2 * n)) return false;
++  for (uint32_t c = 0; c < n; c++) {
++    char nb[16];
++    int nl = c ? snprintf(nb, sizeof(nb), "f%u", c) : snprintf(nb, sizeof(nb), "f");
++    if (!e.writeBytes(nb, uint32_t(nl)) || !e.writeFixedU8(0x00) ||
++        !e.writeVarU32(1 + n + c))
++      return false;
++  }
++  for (uint32_t c = 0; c < n; c++) {
++    char nb[16];
++    int nl = c ? snprintf(nb, sizeof(nb), "m%u", c) : snprintf(nb, sizeof(nb), "m");
++    if (!e.writeBytes(nb, uint32_t(nl)) || !e.writeFixedU8(0x00) ||
++        !e.writeVarU32(1 + c))
++      return false;
++  }
++  e.finishSection(s);
++  return true;
++}
++
++// Assemble N already-emitted bodies into ONE module and host-install.
++// tblSlots/memberIdx are parallel to `bodies`: tblSlots[i] in = preferred slot
++// (recompile keeps the slot so callers' cached ICs stay valid; -1 = allocate
++// fresh), out = actual; memberIdx[i] out = this member's position (-1 dropped).
++// Bodies are module-position-independent: their immediates name process-global
++// addresses, call-site ids and shared-table slots -- identical in the cohort
++// module, so no re-emit is needed.
++static int AssembleBodiesAndInstall(
++    std::vector<std::pair<const uint8_t*, uint32_t>>& bodies,
++    std::vector<int>& tblSlots, std::vector<int>& memberIdx, bool dump,
++    JSScript* dumpScript) {
++  uint32_t n = uint32_t(bodies.size());
++  Bytes out;
++  Encoder e(out);
++  if (!e.writeFixedU32(MagicNumber) || !e.writeFixedU32(EncodingVersionModule)) {
++    return -1;
++  }
++  int memId = wasmhost_guest_mem_objid();
++  if (memId < 0) return -1;
++  int tblId = wasmhost_jit_table();
++  if (tblId < 0) return -1;
++  bool sharedMem = wasmhost_guest_mem_shared() != 0;
++  if (!WJWriteModuleHead(e, n, sharedMem)) return -1;
++
++  size_t s;
++  if (!e.startSection(SectionId::Code, &s) || !e.writeVarU32(2 * n)) return -1;
++  for (uint32_t c = 0; c < n; c++) {
++    size_t bodyOff;
++    if (!e.writePatchableVarU32(&bodyOff) ||
++        !out.append(bodies[c].first, bodies[c].second))
++      return -1;
++    e.patchVarU32(bodyOff, bodies[c].second);
++  }
++  for (uint32_t c = 0; c < n; c++) {
++    size_t trampOff;
++    if (!e.writePatchableVarU32(&trampOff)) return -1;
++    size_t trampStart = e.currentOffset();
++    if (!WJEmitTrampoline(e, 1 + c)) return -1;
++    e.patchVarU32(trampOff, uint32_t(e.currentOffset() - trampStart));
++  }
++  e.finishSection(s);
++
++  bool wasmDump = getenv("GECKO_WJWARP_DUMP") || getenv("GECKO_WJ_WASMDUMP") ||
++                  (js::wasm::gWJForceMega && getenv("GECKO_WJ_MEGADUMP"));
++  if (wasmDump && n == 1) {
++    if (const char* wd = getenv("GECKO_WJ_WASMDUMP")) {
++      int want = atoi(wd);
++      if (want > 1 && dumpScript && int(dumpScript->lineno()) != want)
++        wasmDump = false;
++    }
++  }
++  if (wasmDump) {
++    char path[128];
++    snprintf(path, sizeof(path),
++             n > 1 ? "/tmp/wjcohort_%u.wasm"
++                   : (js::wasm::gWJForceMega ? "/tmp/wbjit_mega_%u.wasm"
++                                             : "/tmp/wbjit_%u.wasm"),
++             dumpScript ? dumpScript->lineno() : 0);
++    if (FILE* f = fopen(path, "wb")) {
++      fwrite(out.begin(), 1, out.length(), f);
++      fclose(f);
++      fprintf(stderr, "[wb-compile] wrote %s (%zu bytes)\n", path,
++              size_t(out.length()));
++    }
+   }
+ 
+-  uint32_t nargs = script->function() ? script->function()->nargs() : 0;
+-  // NB: *tblSlotOut is IN/OUT -- a >=0 value on entry is a preferred slot to REUSE
+-  // (deopt-storm recompile keeps the same slot so cached call ICs stay valid).
+-  int handle = AssembleAndInstall(mirGen, graph, nargs, snapshot, tblSlotOut, dump);
++  static int compileStat = getenv("GECKO_WJ_COMPILESTAT") ? 1 : 0;
++  mozilla::TimeStamp hostT0;
++  if (compileStat) hostT0 = mozilla::TimeStamp::Now();
++  int handle = wasmhost_compile(out.begin(), int(out.length()));
++  if (compileStat) {
++    js::wasm::gWJHostCompileMs +=
++        (mozilla::TimeStamp::Now() - hostT0).ToMilliseconds();
++    js::wasm::gWJEmitBytes += uint64_t(out.length());
++  }
++  if (handle < 0) {
++    js::wasm::gWJBailReason = "host-compile-reject";
++    if (getenv("GECKO_WJ_DUMPBADWASM")) {
++      fprintf(stderr, "[wb-badwasm] host rejected module: %zu bytes (fn line %u)\n",
++              size_t(out.length()),
++              dumpScript ? dumpScript->lineno() : 0);
++    }
++    return -1;
++  }
++  const int importIds[3] = {-3, memId, tblId};  // help (shim), mem, tbl
++  mozilla::TimeStamp instT0;
++  if (compileStat) instT0 = mozilla::TimeStamp::Now();
++  int instRes = wasmhost_instantiate(handle, importIds, 3);
++  if (compileStat) {
++    js::wasm::gWJHostInstMs +=
++        (mozilla::TimeStamp::Now() - instT0).ToMilliseconds();
++  }
++  if (instRes != 0) {
++    js::wasm::gWJBailReason = "host-instantiate-fail";
++    return -1;
++  }
++  for (uint32_t c = 0; c < n; c++) {
++    int slot = (tblSlots[c] >= 0)
++                   ? tblSlots[c]
++                   : ((gWJNextTblSlot < kWJTableSize) ? gWJNextTblSlot++ : -1);
++    if (slot >= 0) (void)wasmhost_jit_table_set(handle, slot, int(c));
++    tblSlots[c] = slot;
++    memberIdx[c] = int(c);
++  }
++  return handle;
++}
++
++// Assemble members into ONE module and host-install. tblSlots/memberIdx are
++// parallel to `members`: tblSlots[i] in = preferred slot (recompile keeps the
++// slot so callers' cached ICs stay valid; -1 = allocate fresh), out = actual;
++// memberIdx[i] out = this member's trampoline export position (-1 if dropped).
++// Members whose emit bails are dropped; an empty cohort fails.
++static int AssembleAndInstallN(
++    JSContext* cx, std::vector<std::unique_ptr<WJMemberBuild>>& members,
++    std::vector<int>& tblSlots, std::vector<int>& memberIdx, bool dump) {
++  {
++    JitContext jctx(cx);  // emit phase; sequential per member (no nesting)
++    for (auto& mb : members) WJEmitMemberBody(*mb);
++  }
++  std::vector<std::pair<const uint8_t*, uint32_t>> bodies;
++  std::vector<uint32_t> live;
++  for (uint32_t i = 0; i < members.size(); i++) {
++    memberIdx[i] = -1;
++    if (members[i]->emitted) live.push_back(i);
++  }
++  uint32_t n = uint32_t(live.size());
++  if (!n) {
++    if (dump)
++      fprintf(stderr, "[wb-compile] WJEmitBody bailed (unsupported node)\n");
++    static int cdbg = getenv("GECKO_WJ_CDBG") ? 1 : 0;
++    if (cdbg)
++      fprintf(stderr, "[wj-cdbg] BAIL line=%u reason=%s\n",
++              js::wasm::gWJBailLine, js::wasm::gWJBailReason);
++    return -1;
++  }
++  std::vector<int> liveSlots(n), liveIdx(n);
++  for (uint32_t c = 0; c < n; c++) {
++    liveSlots[c] = tblSlots[live[c]];
++    bodies.push_back({members[live[c]]->body.begin(),
++                      uint32_t(members[live[c]]->body.length())});
++  }
++  int handle = AssembleBodiesAndInstall(
++      bodies, liveSlots, liveIdx, dump,
++      members[live[0]]->mirGen->outerInfo().script());
++  if (handle < 0) return handle;
++  for (uint32_t c = 0; c < n; c++) {
++    tblSlots[live[c]] = liveSlots[c];
++    memberIdx[live[c]] = liveIdx[c];
++  }
++  return handle;
++}
++
++int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
++                  uint32_t* nlocalsOut, int* tblSlotOut,
++                  std::vector<uint8_t>* bodyOut) {
++  bool dump = getenv("GECKO_WJWARP_DUMP");
++  // Compile-count bisection (tasks #57/#64): GECKO_WJ_COMPILEMAX=N lets only
++  // the first N functions install (later ones bail to PBL = correct-by-
++  // definition). With GECKO_WJ_INSTLOG=1 printing each install's serial,
++  // binary-search N to find WHICH compiled fn breaks a workload, then MIRDUMP
++  // that fn. (A fn that fails only when OTHER fns are compiled points at a
++  // caller/callee interaction instead.)
++  static int compileMax = getenv("GECKO_WJ_COMPILEMAX")
++                              ? atoi(getenv("GECKO_WJ_COMPILEMAX"))
++                              : -1;
++  if (compileMax >= 0 && gWJCompileSerial >= uint32_t(compileMax)) {
++    js::wasm::gWJBailReason = "compilemax";
++    return -1;
++  }
++  auto mb = WJBuildMember(cx, script, js::wasm::gWJForceMega, dump);
++  if (!mb) return -1;
++  std::vector<std::unique_ptr<WJMemberBuild>> members;
++  members.push_back(std::move(mb));
++  // NB: *tblSlotOut is IN/OUT -- a >=0 value on entry is a preferred slot to
++  // REUSE (deopt-storm recompile keeps the same slot so cached call ICs stay
++  // valid).
++  std::vector<int> tblSlots(1, *tblSlotOut);
++  std::vector<int> memberIdx(1, -1);
++  int handle = AssembleAndInstallN(cx, members, tblSlots, memberIdx, dump);
+   if (handle < 0) {
+     if (dump) fprintf(stderr, "[wb-compile] assemble/host-compile failed\n");
+     return -1;
+   }
+-  *nargsOut = nargs;
+-  *nlocalsOut = info->nlocals();
++  *tblSlotOut = tblSlots[0];
++  *nargsOut = members[0]->nargs;
++  *nlocalsOut = members[0]->nlocals;
++  if (bodyOut) {
++    bodyOut->assign(members[0]->body.begin(),
++                    members[0]->body.begin() + members[0]->body.length());
++  }
+   gWJCompileSerial++;
+   static int instlog = getenv("GECKO_WJ_INSTLOG") ? 1 : 0;
+   if (dump || instlog)
+     fprintf(stderr, "[wb-compile] installed #%u %s:%u handle=%d nargs=%u\n",
+             gWJCompileSerial,
+             script->filename() ? script->filename() : "?",
+-            uint32_t(script->lineno()), handle, nargs);
++            uint32_t(script->lineno()), handle, members[0]->nargs);
++  return handle;
++}
++
++// Cohort compile (GECKO_WJ_COHORT): re-emit `reqs` member functions into ONE
++// wasm module/instance. Calls between members then resolve to same-instance
++// call_indirect (V8's speculative wasm inlining only fires when caller and
++// callee share an instance -- measured 2.4-2.7x faster than cross-instance in
++// Chrome). Members keep their scripts'/entries' slots; the cohort is a second,
++// better-connected copy of already-proven code. Returns the module handle or
++// -1 (reqs[].ok/memberIdx/tblSlot/nargs/nlocals fill in per member).
++// reqs[].body must point at the member's cached emitted bytes (WJEntry::jitBody)
++// -- cohort assembly is pure byte copying: no Warp re-run, no script dereference.
++int WJWarpCompileCohort(JSContext* cx, std::vector<WJCohortReq>& reqs) {
++  bool dump = getenv("GECKO_WJWARP_DUMP") || getenv("GECKO_WJ_WASMDUMP");
++  std::vector<std::pair<const uint8_t*, uint32_t>> bodies;
++  std::vector<uint32_t> reqIdx;
++  for (size_t i = 0; i < reqs.size(); i++) {
++    if (!reqs[i].body || reqs[i].body->empty()) continue;
++    reqIdx.push_back(uint32_t(i));
++    bodies.push_back({reqs[i].body->data(), uint32_t(reqs[i].body->size())});
++  }
++  if (bodies.size() < 2) return -1;
++  std::vector<int> tblSlots(bodies.size(), -1), memberIdx(bodies.size(), -1);
++  for (size_t i = 0; i < bodies.size(); i++)
++    tblSlots[i] = reqs[reqIdx[i]].tblSlot;
++  int handle = AssembleBodiesAndInstall(bodies, tblSlots, memberIdx, dump,
++                                        reqs[reqIdx[0]].script);
++  if (handle < 0) return -1;
++  for (size_t i = 0; i < bodies.size(); i++) {
++    if (memberIdx[i] < 0) continue;
++    WJCohortReq& r = reqs[reqIdx[i]];
++    r.ok = true;
++    r.memberIdx = memberIdx[i];
++    r.tblSlot = tblSlots[i];
++  }
++  gWJCompileSerial++;
++  static int instlog = getenv("GECKO_WJ_INSTLOG") ? 1 : 0;
++  if (dump || instlog)
++    fprintf(stderr, "[wb-cohort] installed #%u members=%u handle=%d\n",
++            gWJCompileSerial, unsigned(bodies.size()), handle);
+   return handle;
+ }
+ 
+diff --git a/mozglue/misc/PerfStats.h b/mozglue/misc/PerfStats.h
+index 8c4000fd97..a3924beafc 100644
+--- a/mozglue/misc/PerfStats.h
++++ b/mozglue/misc/PerfStats.h
+@@ -222,7 +222,7 @@ class PerfStats {
+   // std::atomic<double>::fetch_add is a C++20 feature missing from the libc++
+   // shipped with emscripten 3.1.56; fall back to a portable CAS loop there.
+   static void AtomicAddDouble(std::atomic<double>& aTarget, double aValue) {
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) || defined(__wasi__)
+     double expected = aTarget.load(std::memory_order_relaxed);
+     while (!aTarget.compare_exchange_weak(expected, expected + aValue,
+                                           std::memory_order_relaxed,
+diff --git a/mozglue/misc/SSE.h b/mozglue/misc/SSE.h
+index f2a65c4a3f..835b4dc639 100644
+--- a/mozglue/misc/SSE.h
++++ b/mozglue/misc/SSE.h
+@@ -208,7 +208,7 @@
+ #    define MOZILLA_PRESUME_SSE2
+ #  endif
+ 
+-#elif defined(__wasm_simd128__)
++#elif defined(__wasm_simd128__) && defined(__EMSCRIPTEN__)
+ 
+ // Emscripten/WebAssembly: SSE intrinsics are provided by emscripten's shim headers
+ // (emmintrin.h, tmmintrin.h, ...) and lowered to wasm 128-bit SIMD. The engine is
+diff --git a/mozglue/static/lz4/xxhash.h b/mozglue/static/lz4/xxhash.h
+index 78fc2e8dbf..36d9dd9319 100644
+--- a/mozglue/static/lz4/xxhash.h
++++ b/mozglue/static/lz4/xxhash.h
+@@ -3847,7 +3847,7 @@ XXH_PUBLIC_API XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const XXH64_can
+ #  if defined(__ARM_NEON__) || defined(__ARM_NEON) \
+    || (defined(_M_ARM) && _M_ARM >= 7) \
+    || defined(_M_ARM64) || defined(_M_ARM64EC) \
+-   || (defined(__wasm_simd128__) && XXH_HAS_INCLUDE(<arm_neon.h>)) /* WASM SIMD128 via SIMDe */
++   || (defined(__wasm_simd128__) && !defined(__wasi__) && XXH_HAS_INCLUDE(<arm_neon.h>)) /* WASM SIMD128 via SIMDe */
+ #    define inline __inline__  /* circumvent a clang bug */
+ #    include <arm_neon.h>
+ #    undef inline
+@@ -3975,7 +3975,7 @@ XXH_PUBLIC_API XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const XXH64_can
+ #  elif ( \
+         defined(__ARM_NEON__) || defined(__ARM_NEON) /* gcc */ \
+      || defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC) /* msvc */ \
+-     || (defined(__wasm_simd128__) && XXH_HAS_INCLUDE(<arm_neon.h>)) /* wasm simd128 via SIMDe */ \
++     || (defined(__wasm_simd128__) && !defined(__wasi__) && XXH_HAS_INCLUDE(<arm_neon.h>)) /* wasm simd128 via SIMDe */ \
+    ) && ( \
+         defined(_WIN32) || defined(__LITTLE_ENDIAN__) /* little endian only */ \
+     || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) \
+diff --git a/third_party/weval/weval.h b/third_party/weval/weval.h
+new file mode 100644
+index 0000000000..8ac5248972
+--- /dev/null
++++ b/third_party/weval/weval.h
+@@ -0,0 +1,490 @@
++#pragma once
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* ------------------------------------------------------------------------- */
++/* partial-evaluation async requests and queues                              */
++/* ------------------------------------------------------------------------- */
++
++typedef void (*weval_func_t)();
++
++typedef struct weval_req_t weval_req_t;
++typedef struct weval_req_arg_t weval_req_arg_t;
++typedef struct weval_lookup_entry_t weval_lookup_entry_t;
++typedef struct weval_lookup_t weval_lookup_t;
++
++struct weval_req_t {
++  weval_req_t* next;
++  weval_req_t* prev;
++  /* A user-provided ID of the weval'd function, for stability of
++   * collected request bodies across relinkings: */
++  uint32_t func_id;
++  uint32_t
++      num_globals; /* how many globals to specialize (prepended to arg list)? */
++  weval_func_t func;
++  uint8_t* argbuf;
++  uint32_t arglen;
++  weval_func_t* specialized;
++};
++
++typedef enum {
++  weval_req_arg_i32 = 0,
++  weval_req_arg_i64 = 1,
++  weval_req_arg_f32 = 2,
++  weval_req_arg_f64 = 3,
++  weval_req_arg_buffer = 4,
++  weval_req_arg_none = 255,
++} weval_req_arg_type;
++
++struct weval_req_arg_t {
++  uint32_t specialize; /* is this argument specialized? */
++  uint32_t
++      ty; /* type of specialization value (`weval_req_arg_type` enum value). */
++  /* The value to specialize on: */
++  union {
++    uint64_t raw;
++    uint32_t i32;
++    uint64_t i64;
++    float f32;
++    double f64;
++    struct {
++      /* A pointer to arbitrary memory with constant contents of the
++       * given length; data follows. */
++      uint32_t len;
++      /* Size of buffer in data stream; next arg follows inline data. */
++      uint32_t padded_len;
++    } buffer;
++  } u;
++};
++
++/* Lookup table created by weval for pre-inserted wevaled function bodies */
++struct weval_lookup_t {
++  weval_lookup_entry_t* entries;
++  uint32_t nentries;
++};
++
++struct weval_lookup_entry_t {
++  uint32_t func_id;
++  const uint8_t* argbuf;
++  uint32_t arglen;
++  weval_func_t specialized;
++};
++
++extern weval_req_t* weval_req_pending_head;
++extern bool weval_is_wevaled;
++extern weval_lookup_t weval_lookup_table;
++
++#define WEVAL_DEFINE_GLOBALS()                                          \
++  weval_req_t* weval_req_pending_head;                                  \
++  __attribute__((export_name("weval.pending.head"))) weval_req_t**      \
++  __weval_pending_head() {                                              \
++    return &weval_req_pending_head;                                     \
++  }                                                                     \
++                                                                        \
++  bool weval_is_wevaled;                                                \
++  __attribute__((export_name("weval.is.wevaled"))) bool*                \
++  __weval_is_wevaled() {                                                \
++    return &weval_is_wevaled;                                           \
++  }
++
++#define WEVAL_DEFINE_TARGET(index, func)             \
++  __attribute__((export_name("weval.func." #index))) \
++      weval_func_t __weval_func_##index() {          \
++    return (weval_func_t) & (func);                  \
++  }
++
++static inline void weval_request(weval_req_t* req) {
++  if (weval_is_wevaled) {
++      /* nothing! */
++  } else {
++    req->next = weval_req_pending_head;
++    req->prev = NULL;
++    if (weval_req_pending_head) {
++      weval_req_pending_head->prev = req;
++    }
++    weval_req_pending_head = req;
++  }
++}
++
++static inline void weval_free(weval_req_t* req) {
++  if (req->prev) {
++    req->prev->next = req->next;
++  } else if (weval_req_pending_head == req) {
++    weval_req_pending_head = req->next;
++  }
++  if (req->next) {
++    req->next->prev = req->prev;
++  }
++  if (req->argbuf) {
++    free(req->argbuf);
++  }
++  free(req);
++}
++
++/* ------------------------------------------------------------------------- */
++/* intrinsics                                                                */
++/* ------------------------------------------------------------------------- */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define WEVAL_WASM_IMPORT(name) \
++  __attribute__((__import_module__("weval"), __import_name__(name)))
++
++/* Core intrinsics for interpreter loops: contexts, registers, value
++ * specialization */
++    
++void weval_push_context(uint32_t pc) WEVAL_WASM_IMPORT("push.context");
++void weval_pop_context() WEVAL_WASM_IMPORT("pop.context");
++void weval_update_context(uint32_t pc) WEVAL_WASM_IMPORT("update.context");
++uint64_t weval_read_reg(uint64_t idx) WEVAL_WASM_IMPORT("read.reg");
++void weval_write_reg(uint64_t idx, uint64_t value)
++    WEVAL_WASM_IMPORT("write.reg");
++uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
++    WEVAL_WASM_IMPORT("specialize.value");
++uint64_t weval_read_specialization_global(uint32_t index)
++    WEVAL_WASM_IMPORT("read.specialization.global");
++
++/* Operand-stack virtualization */
++
++/*
++ * The stack is tracked abstractly as part of block specialization
++ * context, and has entries of the form:
++ *
++ * /// Some value pushed onto stack. Not actually stored until
++ * /// state is synced.
++ * struct StackEntry {
++ *     /// The address at which the value is stored.
++ *     stackptr: Value,
++ *     /// The value to store (and return from pops/stack-reads).
++ *     value: Value,
++ * }
++ */
++
++/* Push a value on the abstract stack; does not yet actually store
++ * memory until sync'd. */
++void weval_push_stack(uint64_t* ptr, uint64_t value)
++    WEVAL_WASM_IMPORT("push.stack");
++/* Synchronize all stack entries to the actual stack. */
++void weval_sync_stack() WEVAL_WASM_IMPORT("sync.stack");
++/* Read an entry from the virtual stack if available (index 0 is
++ * just-pushed, 1 is one push before that, etc.) Loads from the
++ * pointer if that index is not available. */
++uint64_t weval_read_stack(uint64_t* ptr, uint32_t index)
++    WEVAL_WASM_IMPORT("read.stack");
++/* Write an entry at an existing stack index */
++void weval_write_stack(uint64_t* ptr, uint32_t index, uint64_t value)
++    WEVAL_WASM_IMPORT("write.stack");
++/* Pops an entry from the stack, canceling its store if any (the
++ * effect never occurs). */
++uint64_t weval_pop_stack(uint64_t* ptr) WEVAL_WASM_IMPORT("pop.stack");
++
++/* Locals virtualization; locals are also flushed when the stack is
++ * flushed */
++
++uint64_t weval_read_local(uint64_t* ptr, uint32_t index)
++    WEVAL_WASM_IMPORT("read.local");
++void weval_write_local(uint64_t* ptr, uint32_t index, uint64_t value)
++    WEVAL_WASM_IMPORT("write.local");
++
++/* Denote the path following this path as an "exit": it will never
++ * join a block that is specialized again. Used to defeat some kinds
++ * of path-merging that source-to-Wasm toolchains might perform on the
++ * interpreter. */
++void weval_exit_path() WEVAL_WASM_IMPORT("exit.path");
++/* Stop partial evaluation if on an exit path. */
++void weval_stop_exit_path() WEVAL_WASM_IMPORT("stop.exit.path");
++
++/* Debugging and stats intrinsics */
++    
++void weval_trace_line(uint32_t line_number) WEVAL_WASM_IMPORT("trace.line");
++void weval_abort_specialization(uint32_t line_number, uint32_t fatal)
++    WEVAL_WASM_IMPORT("abort.specialization");
++void weval_assert_const32(uint32_t value, uint32_t line_no)
++    WEVAL_WASM_IMPORT("assert.const32");
++void weval_print(const char* message, uint32_t line, uint32_t val)
++    WEVAL_WASM_IMPORT("print");
++void weval_context_bucket(uint32_t bucket) WEVAL_WASM_IMPORT("context.bucket");
++
++#undef WEVAL_WASM_IMPORT
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++
++#ifdef __cplusplus
++namespace weval {
++static inline void push_context(uint32_t pc) { weval_push_context(pc); }
++static inline void pop_context() { weval_pop_context(); }
++static inline void update_context(uint32_t pc) { weval_update_context(pc); }
++}  // namespace weval
++#endif  // __cplusplus
++
++/* ------------------------------------------------------------------------- */
++/* C++ type-safe wrapper for partial evaluation of functions                 */
++/* ------------------------------------------------------------------------- */
++
++#ifdef __cplusplus
++namespace weval {
++
++struct ArgWriter {
++  static const size_t MAX = 1024 * 1024;
++
++  uint8_t* buffer;
++  size_t len;
++  size_t cap;
++
++  ArgWriter() : buffer(nullptr), len(0), cap(0) {}
++
++  uint8_t* alloc(size_t bytes) {
++    if (bytes + len > MAX) {
++      return nullptr;
++    }
++    if (bytes + len > cap) {
++      size_t desired_cap = (cap == 0) ? 1024 : cap;
++      while (desired_cap < (len + bytes)) {
++        desired_cap *= 2;
++      }
++      buffer = reinterpret_cast<uint8_t*>(realloc(buffer, desired_cap));
++      if (!buffer) {
++        return nullptr;
++      }
++      cap = desired_cap;
++    }
++    uint8_t* ret = buffer + len;
++    len += bytes;
++    return ret;
++  }
++
++  template <typename T>
++  bool write(T t) {
++    uint8_t* mem = alloc(sizeof(T));
++    if (!mem) {
++      return false;
++    }
++    memcpy(mem, reinterpret_cast<uint8_t*>(&t), sizeof(T));
++    return true;
++  }
++
++  uint8_t* take() {
++    uint8_t* ret = buffer;
++    buffer = nullptr;
++    len = 0;
++    cap = 0;
++    return ret;
++  }
++};
++
++template <typename T>
++struct ArgSpec {};
++
++template <typename T>
++struct RuntimeArg : ArgSpec<T> {};
++
++template <typename T>
++RuntimeArg<T> Runtime() {
++  return RuntimeArg<T>{};
++}
++
++template <typename T>
++struct Specialize : ArgSpec<T> {
++  T value;
++  explicit Specialize(T value_) : value(value_) {}
++};
++
++template <typename T>
++struct SpecializeMemory : ArgSpec<T> {
++  T ptr;
++  uint32_t len;
++  SpecializeMemory(T ptr_, uint32_t len_) : ptr(ptr_), len(len_) {}
++  SpecializeMemory(const SpecializeMemory& other) = default;
++};
++
++namespace impl {
++template <typename Ret, typename... Args>
++using FuncPtr = Ret (*)(Args...);
++
++template <typename T>
++struct StoreArg;
++
++template <>
++struct StoreArg<uint32_t> {
++  bool operator()(ArgWriter& args, uint32_t value) {
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_i32;
++    arg.u.raw = 0;
++    arg.u.i32 = value;
++    return args.write(arg);
++  }
++};
++template <>
++struct StoreArg<bool> {
++  bool operator()(ArgWriter& args, bool value) {
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_i32;
++    arg.u.raw = 0;
++    arg.u.i32 = value ? 1 : 0;
++    return args.write(arg);
++  }
++};
++template <>
++struct StoreArg<uint64_t> {
++  bool operator()(ArgWriter& args, uint64_t value) {
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_i64;
++    arg.u.raw = 0;
++    arg.u.i64 = value;
++    return args.write(arg);
++  }
++};
++template <>
++struct StoreArg<float> {
++  bool operator()(ArgWriter& args, float value) {
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_f32;
++    arg.u.raw = 0;
++    arg.u.f32 = value;
++    return args.write(arg);
++  }
++};
++template <>
++struct StoreArg<double> {
++  bool operator()(ArgWriter& args, double value) {
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_f64;
++    arg.u.raw = 0;
++    arg.u.f64 = value;
++    return args.write(arg);
++  }
++};
++template <typename T>
++struct StoreArg<T*> {
++  bool operator()(ArgWriter& args, T* value) {
++    static_assert(sizeof(T*) == 4, "Only 32-bit Wasm supported");
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_i32;
++    arg.u.raw = 0;
++    arg.u.i32 = reinterpret_cast<uint32_t>(value);
++    return args.write(arg);
++  }
++};
++template <typename T>
++struct StoreArg<T&> {
++  bool operator()(ArgWriter& args, T& value) {
++    return StoreArg<T*>(args, &value);
++  }
++};
++template <typename T>
++struct StoreArg<const T*> {
++  bool operator()(ArgWriter& args, const T* value) {
++    static_assert(sizeof(const T*) == 4, "Only 32-bit Wasm supported");
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_i32;
++    arg.u.raw = 0;
++    arg.u.i32 = reinterpret_cast<uint32_t>(value);
++    return args.write(arg);
++  }
++};
++
++template <typename... Args>
++struct StoreArgs {};
++
++template <>
++struct StoreArgs<> {
++  bool operator()(ArgWriter& args) { return true; }
++};
++
++template <typename T, typename... Rest>
++struct StoreArgs<Specialize<T>, Rest...> {
++  bool operator()(ArgWriter& args, Specialize<T> arg0, Rest... rest) {
++    if (!StoreArg<T>()(args, arg0.value)) {
++      return false;
++    }
++    return StoreArgs<Rest...>()(args, rest...);
++  }
++};
++
++template <typename T, typename... Rest>
++struct StoreArgs<SpecializeMemory<T>, Rest...> {
++  bool operator()(ArgWriter& args, SpecializeMemory<T> arg0, Rest... rest) {
++    weval_req_arg_t arg;
++    arg.specialize = 1;
++    arg.ty = weval_req_arg_buffer;
++    arg.u.raw = 0;
++    arg.u.buffer.len = arg0.len;
++    arg.u.buffer.padded_len = (arg0.len + 7) & ~7;  // Align to 8-byte boundary.
++    if (!args.write(arg)) {
++      return false;
++    }
++    const uint8_t* src = reinterpret_cast<const uint8_t*>(arg0.ptr);
++    uint8_t* dst = args.alloc(arg.u.buffer.padded_len);
++    if (!dst) {
++      return false;
++    }
++    memcpy(dst, src, arg0.len);
++    if (arg.u.buffer.padded_len > arg.u.buffer.len) {
++      // Ensure deterministic (zeroed) padding bytes.
++      memset(dst + arg.u.buffer.len, 0,
++             arg.u.buffer.padded_len - arg.u.buffer.len);
++    }
++    return StoreArgs<Rest...>()(args, rest...);
++  }
++};
++
++template <typename T, typename... Rest>
++struct StoreArgs<RuntimeArg<T>, Rest...> {
++  bool operator()(ArgWriter& args, RuntimeArg<T> arg0, Rest... rest) {
++    weval_req_arg_t arg;
++    arg.specialize = 0;
++    arg.ty = weval_req_arg_none;
++    arg.u.raw = 0;
++    if (!args.write(arg)) {
++      return false;
++    }
++    return StoreArgs<Rest...>()(args, rest...);
++  }
++};
++
++}  // namespace impl
++
++template <typename Ret, typename... Args, typename... WrappedArgs>
++weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
++                   impl::FuncPtr<Ret, Args...> generic, uint32_t func_id,
++                   uint32_t num_globals,
++                   WrappedArgs... args) {
++  weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
++  if (!req) {
++    return nullptr;
++  }
++  ArgWriter writer;
++  if (!impl::StoreArgs<WrappedArgs...>()(writer, args...)) {
++    return nullptr;
++  }
++
++  req->func_id = func_id;
++  req->num_globals = num_globals;
++  req->func = (weval_func_t)generic;
++  req->arglen = writer.len;
++  req->argbuf = writer.take();
++  req->specialized = (weval_func_t*)dest;
++
++  weval_request(req);
++
++  return req;
++}
++
++inline void free(weval_req_t* req) { weval_free(req); }
++
++}  // namespace weval
++
++#endif  // __cplusplus
+diff --git a/third_party/wizer/wizer.h b/third_party/wizer/wizer.h
+new file mode 100644
+index 0000000000..e374a5c960
+--- /dev/null
++++ b/third_party/wizer/wizer.h
+@@ -0,0 +1,128 @@
++/*
++ * Wizer interface for Wasm module to be initialized.
++ *
++ * This header provides several macros that allow a Wasm module written in C/C++
++ * to declare an initializer function, and ensure that global constructors (in
++ * C++'s case) are run at initialization time rather than on startup of the
++ * pre-initialized module.
++ */
++#ifndef _WIZER_H_
++#define _WIZER_H_
++
++#ifdef __cplusplus
++#define __WIZER_EXTERN_C extern "C"
++#else
++#define __WIZER_EXTERN_C extern
++#endif
++
++#ifdef __clang_major__
++// wasi-sdk-16 was the first wasi-sdk version that shipped with a version of
++// wasi-libc that did not include __original_main. However, wasi-sdk-15 shipped
++// with clang-14.0.0. To correctly identify the boundary where __original_main
++// no longer exists, we check for either clang-15+ or specifically clang-14.0.4.
++//
++// wasi-sdk-17 ships with clang-15.0.6
++// wasi-sdk-16 ships with clang-14.0.4
++#if __clang_major__ >= 15 || (__clang_major__ == 14 && __clang_patchlevel__ == 4)
++#define WIZER_MAIN_VOID __main_void
++#else
++#define WIZER_MAIN_VOID __original_main
++#endif
++#endif
++
++// We default to assuming that the compiler is new enough to provide
++// __main_void.
++#ifndef WIZER_MAIN_VOID
++#define WIZER_MAIN_VOID __main_void
++#endif
++
++/*
++ * This macro inserts the exported functions necessary to allow Wizer to
++ * pre-initialize a Wasm module.
++ *
++ * To use, simply invoke the macro in exactly one compilation unit (C/C++ file)
++ * that is compiled into the Wasm module to be pre-initialized:
++ *
++ *     static void my_init_function() { ... }
++ *
++ *     WIZER_INIT(my_init_function);
++ *
++ * (The macro refers to the provided init function, so it must have been defined
++ * or must have a forward declaration at the point the macro is used.)
++ *
++ * The resulting module should be processed by Wizer as follows:
++ *
++ *     $ wizer -r _start=wizer.resume -o out.wasm in.wasm
++ *
++ * The result of this will be the following behavior:
++ *
++ * - If the `in.wasm` (the direct compilation output of a program including this
++ *   macro invocation) is run directly according to the WASI ABI (i.e., by
++ *   invoking `_start`), then nothing changes: global constructors are run,
++ *   `main()` is invoked, then global destructors are run. The initialization
++ *   function is *not* run in this case.
++ *
++ * - During pre-initialization (i.e., during this `wizer` invocation), global
++ *   constructors will run, and then the provided initialization function will
++ *   run. The module's memory and global-variable state is then snapshotted and
++ *   saved into `out.wasm`.
++ *
++ *   All other Wizer restrictions apply (see Wizer documentation for details):
++ *   for example, WASI hostcalls may be blocked, depending on options, and
++ *   invoking any other imported function will result in an immediate trap
++ *   and failure of the Wizer run.
++ *
++ * - If the resulting `out.wasm` is then run using the WASI ABI, the program's
++ *   global constructors are *not* re-run. Instead, execution starts directly at
++ *   `main()`, using the heap and global-variable state left by the global
++ *   constructor and initialization function execution during the Wizer
++ *   invocation.
++ *
++ * If no initialization function is needed (i.e., only C++ global constructors
++ * should be run), use `WIZER_DEFAULT_INIT()` instead.
++ */
++#define WIZER_INIT(init_func)                                                  \
++    __WIZER_EXTERN_C void __wasm_call_ctors();                                 \
++    __WIZER_EXTERN_C void __wasm_call_dtors();                                 \
++    __WIZER_EXTERN_C int WIZER_MAIN_VOID();                                    \
++    /* This function's export name `wizer.initialize` is specially          */ \
++    /* recognized by Wizer. It is the direct entry point for pre-init.      */ \
++    __attribute__((export_name("wizer.initialize"))) void                      \
++    __wizer_initialize() {                                                     \
++        /* `__wasm_call_ctors()` is generated by `wasm-ld` and invokes all  */ \
++        /* of the global constructors. It is safe (and in fact necessary)   */ \
++        /* to manually invoke it here because `wizer.initialize` is the     */ \
++        /* direct entry point, and no libc startup (crt1.o or equivalent)   */ \
++        /* is executed before this code does. */                               \
++        __wasm_call_ctors();                                                   \
++        /* We now invoke the provided init function before returning.       */ \
++        init_func();                                                           \
++    }                                                                          \
++    /* This function replaces `_start` (the WASI-specified entry point) in  */ \
++    /* the pre-initialized Wasm module.                                     */ \
++    __attribute__((export_name("wizer.resume"))) void __wizer_resume() {       \
++        /* `__main_void()` is defined by the WASI SDK toolchain due to      */ \
++        /* special semantics in C/C++ for the `main()` function, i.e., ito  */ \
++        /* can either take argc/argv or not. It collects arguments using    */ \
++        /* the appropriate WASI calls and then invokes the user program's   */ \
++        /* `main()`. This may change in the future; when it does, we will   */ \
++        /* coordinate with the WASI-SDK toolchain to implement this entry   */ \
++        /* point in an alternate way. */                                       \
++        WIZER_MAIN_VOID();                                                     \
++        /* Because we are replacing `_start()`, we need to manually invoke  */ \
++        /* destructors as well.                                             */ \
++        __wasm_call_dtors();                                                   \
++    }
++
++/*
++ * This macro is like `WIZER_INIT()`, but takes no initialization function.
++ * Instead, the pre-initialization phase only executes C++ global constructors
++ * before snapshotting the module state.
++ *
++ * See documentation for `WIZER_INIT()` for more details and usage instructions.
++ */
++#define WIZER_DEFAULT_INIT()      \
++    static void __empty_init() {} \
++    WIZER_INIT(__empty_init)
++
++#endif  // _WIZER_H_

@@ -299,13 +299,18 @@ mergeInto(LibraryManager.library, {
     // indirect table so the engine can call the JIT'd fn via a C function pointer
     // (no JS hop). Returns the slot (a valid fn pointer); 0 if it can't be
     // registered (C++ treats <= 0 as "no direct entry" and falls back to the shim).
-    if (idx === -1) {
-      if (r.directIdx === undefined) {
-        var f0 = r.fns[0];
-        try { r.directIdx = (typeof f0 === 'function') ? addFunction(f0, 'dd') : 0; }
-        catch (e) { r.directIdx = 0; }
+    if (idx < 0) {
+      // idx = -(member+1): register member `mi`'s trampoline export (fns[mi] =
+      // tramp_i: (f64)->f64) into the MAIN indirect table so the engine can call
+      // the JIT'd fn via a C function pointer (no JS hop). idx===-1 = member 0.
+      var mi = -idx - 1;
+      if (!r.directIdxs) r.directIdxs = [];
+      if (r.directIdxs[mi] === undefined) {
+        var f0 = r.fns[mi];
+        try { r.directIdxs[mi] = (typeof f0 === 'function') ? addFunction(f0, 'dd') : 0; }
+        catch (e) { r.directIdxs[mi] = 0; }
       }
-      return r.directIdx;
+      return r.directIdxs[mi];
     }
     var fn = r.fns[idx];
     if (typeof fn !== 'function') return 0;
@@ -426,17 +431,18 @@ mergeInto(LibraryManager.library, {
   // `call_indirect` it (type 0). NOT the (f64)->f64 host trampoline (export "f" =
   // fns[0], used only for direct/shim entry). Falls back to fns[0] for single-export
   // modules.
-  wasmhost_jit_table_set: function (h, idx) {
+  wasmhost_jit_table_set: function (h, idx, member) {
     var tid = globalThis.__whJitTableId;
     if (tid === undefined || tid < 0) return -1;
     var t = globalThis.__whObj[tid];
     var r = globalThis.__whReg && globalThis.__whReg[h];
     if (!t || !r || !r.fns) return -1;
+    var name = member > 0 ? 'm' + member : 'm';
     var fn = null;
     for (var i = 0; i < r.exps.length; i++) {
-      if (r.exps[i].name === 'm') { fn = r.fns[i]; break; }
+      if (r.exps[i].name === name) { fn = r.fns[i]; break; }
     }
-    if (!fn) fn = r.fns[0];
+    if (!fn && !member) fn = r.fns[0];
     if (typeof fn !== 'function') return -1;
     try { t.set(idx, fn); return 0; } catch (e) { return -1; }
   },
