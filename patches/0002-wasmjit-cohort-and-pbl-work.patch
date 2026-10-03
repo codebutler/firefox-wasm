@@ -2317,10 +2317,19 @@ index 0fd3b857c6..606f9fa3af 100644
 +if CONFIG["ENABLE_JS_PBL_WEVAL"]:
 +    LOCAL_INCLUDES += ["../../../third_party/weval"]
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index 3c612d8006..24a5f48604 100644
+index 3c612d8006..821804d796 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -126,6 +126,9 @@ uint32_t gWJUnboxExpectTag = 0;
+@@ -84,6 +84,8 @@ extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx);
+ using namespace js;
+ const uint32_t js::wasm::gWJOpGuardGlobalGeneration =
+     uint32_t(js::jit::MDefinition::Opcode::GuardGlobalGeneration);
++const uint32_t js::wasm::gWJOpGuardSpecificFunction =
++    uint32_t(js::jit::MDefinition::Opcode::GuardSpecificFunction);
+ using namespace js::jit;
+ using namespace js::wasm;
+ 
+@@ -126,6 +128,9 @@ uint32_t gWJUnboxExpectTag = 0;
  // Current function's script start-line, set per-instruction; used by GECKO_WJ_HYBSTORELINE
  // to scope the WIP store-hybrid to ONE function while bisecting the correctness bug.
  uint32_t gWJCurScriptLine = 0;
@@ -2330,17 +2339,20 @@ index 3c612d8006..24a5f48604 100644
  void WJDumpSiteHist() {
    // Top sites by runtime hit count.
    uint32_t n = gWJSiteCounter < kWJMaxDSites ? gWJSiteCounter : kWJMaxDSites;
-@@ -346,6 +349,9 @@ struct WJBackend {
+@@ -346,6 +351,12 @@ struct WJBackend {
                                    // property reads -> multi-shape EmitPropIC (no
                                    // deopt) instead of a monomorphic GuardShape
                                    // that storms on a polymorphic receiver.
 +  bool forceGenericCmp = false;   // post type-storm recompile: numeric compares
 +                                  // with Value operands -> number-or-helper
 +                                  // branch (no unbox deopt).
++  bool forceGenericCall = false;  // post call-storm recompile: GuardSpecificFunction
++                                  // whose uses are all call callees -> passthrough
++                                  // (PIC/slow-call dispatch handles polymorphism).
    bool inDispatchBody = false;    // currently emitting a hot dispatch block body
    bool inReloopBody = false;      // currently emitting a relooper (WJEmitStructured) block
                                    // body -- deopt-resume into a reloop'd switch is the
-@@ -1660,6 +1666,9 @@ static bool EmitDeoptResume(Encoder& e, WJBackend& be) {
+@@ -1660,6 +1671,9 @@ static bool EmitDeoptResume(Encoder& e, WJBackend& be) {
          op == uint32_t(MDefinition::Opcode::GuardGlobalGeneration) ||
          op == uint32_t(MDefinition::Opcode::GuardObjectIdentity)) {
        gWJEmitShapeDeopts++;
@@ -2350,7 +2362,7 @@ index 3c612d8006..24a5f48604 100644
      }
    }
    // Per-deopt-site hit counter (GECKO_WJ_SITEHIST). Emitted HERE -- at the guard,
-@@ -4306,8 +4315,55 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4306,8 +4320,55 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
                    WJOpName(u->input()->op()), StringFromMIRType(u->input()->type()));
          return false;
        }
@@ -2408,7 +2420,34 @@ index 3c612d8006..24a5f48604 100644
      }
      case MDefinition::Opcode::GuardShape: {
        // Passthrough the object; deopt if obj->shape() != the recorded Shape*.
-@@ -10772,7 +10828,10 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4884,6 +4945,26 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       int32_t ol = be.local(obj), xl = be.local(expected);
+       if (ol < 0 || xl < 0) return false;
+       if (WJGETENV("GECKO_WJ_GSFPASS")) return GetLocal(e, uint32_t(ol));
++      // forceGenericCall (post call-storm recompile): a GSF consumed ONLY as
++      // call callees guards nothing but the PIC's dispatch input -- the PIC
++      // already handles polymorphism (multi-way match + WJH_CALL fallback), so
++      // the monomorphic bake only deopts on legitimately polymorphic callees
++      // (combine-style `a(elem)` closures over per-instance upvalues: wiki:dom
++      // 4181 storms ~200k/run through a fast-call path no valve sees). Keep the
++      // guard when ANY use is not a call callee -- it may protect an inlined
++      // region or an identity-sensitive consumer.
++      if (be.forceGenericCall) {
++        bool allCallCallee = true;
++        for (jit::MUseIterator u = ins->usesBegin(); u != ins->usesEnd(); u++) {
++          jit::MNode* c = u->consumer();
++          if (!c->isDefinition()) continue;  // resume points: shape-agnostic
++          jit::MDefinition* d = c->toDefinition();
++          if (d->isCall() && d->toCall()->getCallee() == ins) continue;
++          allCallCallee = false;
++          break;
++        }
++        if (allCallCallee) return GetLocal(e, uint32_t(ol));
++      }
+       if (!GetLocal(e, uint32_t(ol)) || !GetLocal(e, uint32_t(xl)) ||
+           !e.writeOp(Op::I32Ne)) {
+         return false;
+@@ -10772,7 +10853,10 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        if (nRoots && !emitSPAdjust(int32_t(nRoots))) return false;
  
        uint32_t site = WJAllocCallSite();
@@ -2420,7 +2459,7 @@ index 3c612d8006..24a5f48604 100644
        // DEBUG (GECKO_WJ_CALLARGDBG=<line>): map call-site serials to their MIR
        // arg sources for one fn -- pairs with the VALIDATEHELPER stale-arg site
        // number to name the exact def feeding a corrupt argument.
-@@ -10871,6 +10930,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10871,6 +10955,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
              !e.writeOp(Op::I32LtU) || !e.writeOp(Op::I32And))
            return false;
          if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
@@ -2442,7 +2481,7 @@ index 3c612d8006..24a5f48604 100644
          // gWJCurrentEnv = callee->environment(): the callee's prologue saves this
          // into its envLocal so its MFunctionEnvironment is correct (closures).
          {
-@@ -11172,6 +11246,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11172,6 +11271,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
                : ct == MCompare::Compare_BigInt ? TagWord(JSVAL_TYPE_BIGINT)
                                                 : TagWord(JSVAL_TYPE_STRING);
            static int noGuard = WJGETENV("GECKO_WJ_STRCMP2NOGUARD") ? 1 : 0;
@@ -2465,7 +2504,7 @@ index 3c612d8006..24a5f48604 100644
            if (!noGuard && l->type() == MIRType::Value &&
                !EmitTagGuardLocal(e, be, uint32_t(be.local(l)), wantTag))
              return false;
-@@ -11197,6 +11287,88 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11197,6 +11312,88 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        // types reach here (String/Symbol/BigInt/UInt32 took the !dbl&&!i32 path above).
        bool refCmp = ct == MCompare::Compare_Object || ct == MCompare::Compare_Null ||
                      ct == MCompare::Compare_Undefined;
@@ -2554,7 +2593,7 @@ index 3c612d8006..24a5f48604 100644
        const uint8_t kI32 = uint8_t(TypeCode::I32), kF64 = uint8_t(TypeCode::F64);
        uint8_t ltc = WJValType(l->type()), rtc = WJValType(r->type());
        bool useF64;
-@@ -13973,7 +14145,7 @@ const char* js::wasm::WJMirOpName(uint32_t op) {
+@@ -13973,7 +14170,7 @@ const char* js::wasm::WJMirOpName(uint32_t op) {
  
  void js::wasm::WJDumpDeoptSiteHist() { WJDumpSiteHist(); }
  
@@ -2563,7 +2602,7 @@ index 3c612d8006..24a5f48604 100644
    if constexpr (kWJEHABI) {
      // EHABI trampoline: main returns just i64 (or throws a wasm exn). Wrap `call $main`
      // in try(result i64)/catch_all: on catch restore gWJRootSP (wholesale cleanup of all
-@@ -14016,7 +14188,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
+@@ -14016,7 +14213,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
            !e.writeVarU32(3) || !e.writeVarU32(i * 8))
          return false;  // arg i
      }
@@ -2572,7 +2611,7 @@ index 3c612d8006..24a5f48604 100644
      // catch_all: restore SP, flag=1, push dummy i64 result.
      if (!e.writeOp(Op::CatchAll)) return false;
      if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(spAddr)) ||
-@@ -14060,7 +14232,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
+@@ -14060,7 +14257,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
        return false;  // arg i
      }
    }
@@ -2581,7 +2620,7 @@ index 3c612d8006..24a5f48604 100644
    if (!e.writeOp(Op::LocalSet) || !e.writeVarU32(3)) return false;  // result
    if (!e.writeOp(Op::LocalSet) || !e.writeVarU32(2)) return false;  // flag
    // Store the boxed result to gWJScratch[kWJResultOff] for the host entry path.
-@@ -14080,6 +14252,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -14080,6 +14277,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
      JSScript* brs = mir.outerInfo().script();
      js::wasm::gWJBailLine = brs ? brs->lineno() : 0;
      js::wasm::gWJBailReason = "unknown";
@@ -2589,7 +2628,7 @@ index 3c612d8006..24a5f48604 100644
    }
    // Bisection: GECKO_WJ_BAILLINE=<n[,n...]> bails (stays PBL) any function defined
    // at one of those source lines. Used to find which function's JIT codegen is
-@@ -14359,6 +14532,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -14359,6 +14557,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    gWJHadAlwaysBails = false;  // set true if any block is emitted as alwaysBails deopt
    gWJEmitShapeDeopts = 0;
    gWJEmitTotalDeopts = 0;
@@ -2597,17 +2636,19 @@ index 3c612d8006..24a5f48604 100644
    WJBackend be;
    be.info = &mir.outerInfo();
    be.snapshot = snapshot;
-@@ -14927,6 +15101,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -14927,6 +15126,10 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    // storm-triggered per-function (now crash-free; crypto 1240, deltablue 283).
    be.forceMega = WJGETENV("GECKO_WJ_FORCEMEGA") ||
                   (WJGETENV("GECKO_WJ_MEGAVALVE") && js::wasm::gWJForceMega);
 +  be.forceGenericCmp = js::wasm::gWJForceGenericCmp ||
 +                       WJGETENV("GECKO_WJ_GENERICCMP");
++  be.forceGenericCall = js::wasm::gWJForceGenericCall ||
++                        WJGETENV("GECKO_WJ_GENCALL");
    // GECKO_WJ_REMATCACHE: DISPROVEN (2026-06-27). Caching re-derived Unbox/GuardShape
    // pointers in locals to "avoid rematerialization" REGRESSES splay ~42% (266 vs 470)
    // -- TurboFan (V8, --no-liftoff) ALREADY CSEs the on-stack re-derivation optimally;
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index b7dbbc5370..a55ffc01c4 100644
+index b7dbbc5370..b37f6c5f37 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
 @@ -9,6 +9,11 @@
@@ -2637,7 +2678,7 @@ index b7dbbc5370..a55ffc01c4 100644
  void WJDumpDeoptSiteHist();
  
  // GC-constant pool (WASMJIT_REARCH_PLAN.md §4.2). Interns a boxed JS::Value (a
-@@ -286,7 +292,12 @@ extern bool gWJHadAlwaysBails;
+@@ -286,7 +292,13 @@ extern bool gWJHadAlwaysBails;
  // a numeric/type-dominated fn's respec is the beneficial re-typing case (crypto/cdjs).
  extern uint32_t gWJEmitShapeDeopts;
  extern uint32_t gWJEmitTotalDeopts;
@@ -2647,10 +2688,19 @@ index b7dbbc5370..a55ffc01c4 100644
 +extern std::vector<std::pair<uint32_t, uint32_t>> gWJPendingOsrTargets;
  extern bool gWJForceMega;  // next compile: megamorphic property reads (post-storm)
 +extern bool gWJForceGenericCmp;  // next compile: de-spec numeric compares (post-storm)
++extern bool gWJForceGenericCall;  // next compile: de-spec fn-identity call guards (post-storm)
  extern bool gWJForceNumberArith;  // next compile: de-speculate Int32 arith/elem ICs (post-deopt)
  
  // Synchronous main-thread tier-up compile cost (GECKO_WJ_COMPILESTAT).
-@@ -401,9 +412,37 @@ static constexpr uint32_t kWJCallSites = 16384;
+@@ -369,6 +381,7 @@ extern uint32_t gWJExitFPLastSite;   // task #60 exitFP setter tracer
+ extern uint32_t gWJExitFPSetCount;
+ extern uint32_t gWJLastDeoptOp;         // MIR opcode of the most recent deopt site
+ extern const uint32_t gWJOpGuardGlobalGeneration;  // numeric MIR opcode (backend-exported)
++extern const uint32_t gWJOpGuardSpecificFunction;  // numeric MIR opcode (backend-exported)
+ // Call boundary: callee + argc for wjhelp(WJH_CALL).
+ extern uint64_t gWJCallCallee;
+ extern uint32_t gWJCallSiteLine[];  // DEBUG: caller script line per call site
+@@ -401,9 +414,37 @@ static constexpr uint32_t kWJCallSites = 16384;
  static constexpr uint32_t kWJCallWays = 8;
  extern uint32_t gWJCallFn[];      // cached callee obj ptr (0 = empty)
  extern int32_t gWJCallTblIdx[];   // callee's shared-table index
@@ -2689,7 +2739,7 @@ index b7dbbc5370..a55ffc01c4 100644
  // WasmJitRuntime.cpp. Lets the backend inline `new X()` (alloc + ctor call) and
  // skip the WJH_CONSTRUCT boundary for monomorphic construct sites.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index d9508212d5..bf6107b83c 100644
+index d9508212d5..1f57f24f56 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -18,6 +18,7 @@
@@ -2720,17 +2770,18 @@ index d9508212d5..bf6107b83c 100644
  extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx) {
    gWJPendingOsrTargets.emplace_back(pcOff, blockIdx);
  }
-@@ -208,7 +211,9 @@ int gWJExecDepth = 0;              // >0 while emitted wasm-JIT code is on the s
+@@ -208,7 +211,10 @@ int gWJExecDepth = 0;              // >0 while emitted wasm-JIT code is on the s
  bool gWJHadAlwaysBails = false;    // last compile emitted an alwaysBails deopt block
  uint32_t gWJEmitShapeDeopts = 0;   // last compile: # GuardShape-family deopt sites
  uint32_t gWJEmitTotalDeopts = 0;   // last compile: # total deopt sites
 +uint32_t gWJEmitGggDeopts = 0;     // last compile: # GuardGlobalGeneration deopt sites
  bool gWJForceMega = false;         // megamorphic recompile (set per-compile by the valve)
 +bool gWJForceGenericCmp = false;   // generic numeric-compare recompile (per-compile)
++bool gWJForceGenericCall = false;  // generic call-guard recompile (per-compile)
  bool gWJForceNumberArith = false;  // de-speculate Int32 arith/elem (set per-compile by the valve)
  uint64_t gWJCompileAttempts = 0;
  uint64_t gWJCompileOK = 0;
-@@ -245,6 +250,8 @@ uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hi
+@@ -245,6 +251,8 @@ uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hi
  uint32_t gWJCallFn[kWJCallSites * kWJCallWays];     // polymorphic call IC: callee ptrs
  int32_t gWJCallTblIdx[kWJCallSites * kWJCallWays];  // polymorphic call IC: table slots
  uint32_t gWJCallSiteLine[kWJCallSites] = {0};       // DEBUG: caller script line per site
@@ -2739,7 +2790,7 @@ index d9508212d5..bf6107b83c 100644
  static uint32_t gWJNextCallSite = 0;
  uint32_t WJAllocCallSite() {
    if (gWJNextCallSite >= kWJCallSites) return 0;  // site 0 is a safe sentinel
-@@ -411,6 +418,8 @@ struct WJEntry {
+@@ -411,6 +419,8 @@ struct WJEntry {
    int handle = -1;
    int tblSlot = -1;  // dense shared-table slot (-1 = not call_indirect-able)
    int directIdx = -1;  // slot in MAIN indirect table for direct PBL->JIT entry
@@ -2748,7 +2799,7 @@ index d9508212d5..bf6107b83c 100644
    uint32_t jitRuns = 0;  // entries that ran fully in JIT (no deopt)
    uint32_t deopts = 0;   // entries that deopted to PBL (resume); RESET on recompile
    uint32_t deoptsTotal = 0;  // lifetime deopts, never reset (matches gWJDeoptByOp scale)
-@@ -422,7 +431,8 @@ struct WJEntry {
+@@ -422,7 +432,8 @@ struct WJEntry {
                              // without this the per-entry deopt->resume->PBL->JIT
                              // nesting exhausted the V8 stack UNCATCHABLY (webtooling).
    bool hasAlwaysBails = false;  // compiled fn has a cold-IC alwaysBails deopt block
@@ -2758,7 +2809,7 @@ index d9508212d5..bf6107b83c 100644
    uint32_t nargs = 0;
    uint32_t nlocals = 0;
    uint32_t observes = 0;
-@@ -443,6 +453,10 @@ struct WJEntry {
+@@ -443,6 +454,19 @@ struct WJEntry {
    // current JIT version (it's net-positive-ish; failing to PBL would cost the JIT<->PBL
    // boundary, measured WORSE than the residual deopts). Only >50% storms fail to PBL.
    bool recompileDone = false;
@@ -2766,10 +2817,19 @@ index d9508212d5..bf6107b83c 100644
 +  // with Value operands emit number-or-helper branches instead of unbox-guard
 +  // deopts (lodash compareAscending: fresh recompile storms on at 46%).
 +  bool forceGenericCmp = false;
++  // GSF (GuardSpecificFunction) storm bookkeeping. Deopts inside a JIT->JIT
++  // fast call (PIC call_indirect / WJH_CALL's direct wasm call) never reach a
++  // host entry, so e.deopts stays ~0 and the valve can't see them; WJH_RESUME
++  // charges them HERE on the deopting module's own entry. Once past the gate
++  // the next compile drops call-only GSFs (combine-style closures over
++  // per-instance upvalue callees, wiki:dom 4181); a persisting storm -> PBL.
++  uint32_t gsfDeopts = 0;
++  bool forceGenericCall = false;
++  bool genericCallDone = false;
    // OSR cheap-resume targets: (resume pcOff -> dispatch block index) for each
    // OSR-able loop head, recorded at compile time (GECKO_WJ_OSR). A single-frame
    // deopt landing at one of these pcs re-enters the JIT there instead of PBL.
-@@ -455,6 +469,10 @@ struct WJEntry {
+@@ -455,6 +479,10 @@ struct WJEntry {
    // this climbs; past kWJDeferStrandLimit we compile SYNCHRONOUSLY so a hot fn is
    // never stranded in PBL forever. Loads drain at a task boundary well before this.
    uint32_t queuedObserves = 0;
@@ -2780,7 +2840,7 @@ index d9508212d5..bf6107b83c 100644
  };
  
  // Per-script compile state. Keyed by JSScript*; entries persist for the process.
-@@ -489,6 +507,137 @@ static WJEntry& EntryFor(JSScript* script) {
+@@ -489,6 +517,137 @@ static WJEntry& EntryFor(JSScript* script) {
    return e;
  }
  
@@ -2918,7 +2978,7 @@ index d9508212d5..bf6107b83c 100644
  // GECKO_WJ_ENTRYDUMP: dump every WJEntry with deopts >= threshold -- script
  // filename:line, deopts, jitRuns, deopt-rate%, recompiles, final state. Tells us
  // which functions storm-in-JIT (Compiled + high deopts) vs failed-to-PBL.
-@@ -609,9 +758,14 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
+@@ -609,9 +768,14 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
      if (w > 0) o += size_t(w);
    };
    app("{\"compiled\":%u,\"failed\":%u,\"cold\":%u,\"jitRuns\":%llu,"
@@ -2935,7 +2995,7 @@ index d9508212d5..bf6107b83c 100644
    bool first = true;
    for (int i = 0; i < 8; i++) {
      if (!top[i].sc || !top[i].deopts) continue;
-@@ -643,12 +797,17 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+@@ -643,12 +807,17 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
        e.handle = -1;
        e.tblSlot = -1;
        e.directIdx = -1;
@@ -2953,15 +3013,16 @@ index d9508212d5..bf6107b83c 100644
    // Stale call-IC entries would dispatch to the abandoned table slots; clearing
    // the callee-ptr side is sufficient (tblIdx is only read on a fn-ptr hit).
    // NOTE: a JIT frame already ON THE STACK when the fuse pops finishes with the
-@@ -858,6 +1017,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -858,6 +1027,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    // must take over the same slot). -1 (first compile) allocates a fresh one.
    int tblSlot = e.tblSlot;
    js::wasm::gWJForceMega = e.forceMega;  // megamorphic recompile (post-storm)
 +  js::wasm::gWJForceGenericCmp = e.forceGenericCmp;  // generic compares (post-storm)
++  js::wasm::gWJForceGenericCall = e.forceGenericCall;  // generic call guards (post-storm)
    gWJPendingOsrTargets.clear();  // backend appends OSR targets during this compile
    // COMPILE-COST instrumentation (GECKO_WJ_COMPILESTAT): synchronous main-thread
    // tier-up compile is on the load critical path -- a real-site load compiles
-@@ -868,8 +1028,10 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -868,8 +1039,11 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
        getenv("GECKO_WJ_COMPILESTAT") ? atoi(getenv("GECKO_WJ_COMPILESTAT")) : 0;
    mozilla::TimeStamp wjCompT0;
    if (compileStat) wjCompT0 = mozilla::TimeStamp::Now();
@@ -2970,10 +3031,11 @@ index d9508212d5..bf6107b83c 100644
 +                                       &e.jitBody);
    js::wasm::gWJForceMega = false;
 +  js::wasm::gWJForceGenericCmp = false;
++  js::wasm::gWJForceGenericCall = false;
    if (compileStat) {
      double ms = (mozilla::TimeStamp::Now() - wjCompT0).ToMilliseconds();
      // Per-compile (bytecode-length, ms) log to test emit super-linearity:
-@@ -975,8 +1137,12 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -975,8 +1149,12 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    e.state = WJEntry::State::Compiled;
    e.handle = handle;
    e.tblSlot = tblSlot;
@@ -2987,7 +3049,7 @@ index d9508212d5..bf6107b83c 100644
    e.osrTargets = gWJPendingOsrTargets;  // OSR loop-head pc->block map for this fn
    if (getenv("GECKO_WJ_COMPILECNT")) {
      static uint64_t cc = 0;
-@@ -990,9 +1156,17 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -990,9 +1168,17 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    // Register the trampoline in the MAIN indirect table for direct (no-JS-hop)
    // PBL->JIT entry via a C function pointer. -1 if registration failed.
    if (!getenv("GECKO_WJ_NODIRECT")) {
@@ -3006,7 +3068,7 @@ index d9508212d5..bf6107b83c 100644
    if (getenv("GECKO_WJ_PBLWHO"))
      fprintf(stderr, "[wb-directidx] %s:%u directIdx=%d\n",
              script->filename() ? script->filename() : "?",
-@@ -1008,35 +1182,39 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1008,35 +1194,39 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
  // compile path instead of re-deferring. Bounded per-call by GECKO_WJ_DRAINBUDGET
  // (0 = all) so a huge backlog doesn't stall one idle slot.
  void js::wasm::WasmJitDrainDeferred() {
@@ -3075,7 +3137,7 @@ index d9508212d5..bf6107b83c 100644
  }
  
  // Set during the differential verifier's interpreter re-run so nested calls
-@@ -1277,7 +1455,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1277,7 +1467,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
      WJTrampFn fp = reinterpret_cast<WJTrampFn>(uintptr_t(e.directIdx));
      flag = fp(ptr);
    } else {
@@ -3084,7 +3146,7 @@ index d9508212d5..bf6107b83c 100644
    }
    gWJEntryExitFP = wjPrevEntryExitFP;
    gWJEntryAct = wjPrevEntryAct;
-@@ -1371,10 +1549,17 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1371,10 +1561,17 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
      // The count-trigger respec recompile of a SHAPE-deopt-dominated fn re-bakes a stale
      // GC const (acorn tokenizer mis-parse, task #27). Block it for such fns -- the
      // count-trigger is for numeric/type re-typing (crypto/cdjs), where the rate gate
@@ -3104,7 +3166,7 @@ index d9508212d5..bf6107b83c 100644
      // CRITICAL (2026-06-29): the function ALREADY RAN this call (flag==0 -> its
      // result is in gWJScratch[kWJResultSlot], and any side effects -- incl. those
      // completed by the deopt-RESUME -- are done). The valve paths below change e.state
-@@ -1462,15 +1647,24 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1462,15 +1659,24 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
        static int megaRetries = getenv("GECKO_WJ_MEGARETRIES")
                                     ? atoi(getenv("GECKO_WJ_MEGARETRIES"))
                                     : 1;
@@ -3130,7 +3192,7 @@ index d9508212d5..bf6107b83c 100644
          // KEEP e.tblSlot: the recompile reuses it so callers' cached call ICs
          // (funPtr->slot, funPtr unchanged) keep resolving to the new module.
          // Resetting it to -1 allocated a NEW slot, leaving cached ICs pointing at
-@@ -1691,13 +1885,7 @@ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
+@@ -1691,13 +1897,7 @@ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
  // handle + nargs + env) so repeats skip all lookups and call directly. Key (wrapper
  // fn) and env (module scope) are tenured/stable; a moved/evicted key just misses ->
  // re-resolve (sound). [GC sweep TODO: trace gWJCC_env or re-validate.]
@@ -3145,7 +3207,59 @@ index d9508212d5..bf6107b83c 100644
  static bool WJIsForwardingWrapper(JSContext* cx, JSScript* s) {
    if (!s->function() || s->length() > 96) return false;
    if (!gWJFwdCache) gWJFwdCache = new std::unordered_map<JSScript*, char>();
-@@ -2748,6 +2936,41 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2236,6 +2436,51 @@ static double wjhelpImpl(double kindF, double siteF) {
+         fprintf(stderr, "[wj-resume-noexc] bad nframes=%u\n", nframes);
+       return 1.0;
+     }
++    // GSF-storm attribution: a deopt inside a JIT->JIT fast call (PIC
++    // call_indirect, or WJH_CALL's direct wasm call) passes no host entry, so
++    // the per-call valve's e.deopts never sees it (combine-style closures over
++    // per-instance upvalue callees stormed ~200k/run on wiki:dom 4181 while
++    // the entry showed deopts=2). When the deopt op is GuardSpecificFunction,
++    // charge the DEOPTING MODULE's own entry (outermost resume frame = the fn
++    // whose wasm code bailed). Past the gate -> recompile with
++    // forceGenericCall (drops GSFs consumed only as call callees; the PIC
++    // already dispatches polymorphically). If it still storms -> PBL.
++    // GECKO_WJ_NOGSFVALVE reverts to pre-valve behavior.
++    static int noGsfValve = getenv("GECKO_WJ_NOGSFVALVE") ? 1 : 0;
++    static int gsfGate = getenv("GECKO_WJ_GSFGATE")
++                             ? atoi(getenv("GECKO_WJ_GSFGATE"))
++                             : 1500;
++    if (!noGsfValve && gsfGate > 0 && gEntries &&
++        gWJLastDeoptOp == js::wasm::gWJOpGuardSpecificFunction) {
++      JSScript* ds = reinterpret_cast<JSScript*>(
++          uintptr_t(gWJResumeScriptPtr[nframes - 1]));
++      if (ds) {
++        auto dit = gEntries->find(ds);
++        if (dit != gEntries->end() &&
++            dit->second.state == WJEntry::State::Compiled) {
++          WJEntry& de = dit->second;
++          de.gsfDeopts++;
++          if (de.gsfDeopts >= uint32_t(gsfGate)) {
++            if (de.genericCallDone) {
++              de.state = WJEntry::State::Failed;
++            } else {
++              de.genericCallDone = true;
++              de.forceGenericCall = true;
++              de.state = WJEntry::State::Cold;
++              de.handle = -1;
++              de.directIdx = -1;
++              de.memberIdx = 0;
++              de.cohortId = -1;
++              de.gsfDeopts = 0;
++              de.deopts = 0;
++              de.jitRuns = 0;
++              de.observes = 0;
++              de.nextTry = 0;
++            }
++          }
++        }
++      }
++    }
+     // try/catch: capture + clear the in-error flag now so it can't leak to a later
+     // (normal) deopt. Used for the innermost frame below.
+     const uint32_t resumeErr = gWJResumeInError;
+@@ -2748,6 +2993,41 @@ static double wjhelpImpl(double kindF, double siteF) {
              if (w == kWJCallWays) w = 0;  // all ways full: evict way 0
              gWJCallFn[base + w] = funPtr;
              gWJCallTblIdx[base + w] = ce.tblSlot;
@@ -3187,7 +3301,7 @@ index d9508212d5..bf6107b83c 100644
            }
            // Resume context is self-contained (emitted code sets it), so just run.
            gWJCurrentEnv = uint32_t(uintptr_t(static_cast<void*>(fun->environment())));
-@@ -2796,7 +3019,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2796,7 +3076,7 @@ static double wjhelpImpl(double kindF, double siteF) {
            if (js::wasm::kWJEHABI)  // EHABI: stage the boxed callee for the trampoline.
              gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*fun).asRawBits();
            double ptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3196,7 +3310,7 @@ index d9508212d5..bf6107b83c 100644
            gWJFastCalls++;
            if (flag == 2.0) {
              // Entry GuardGlobalGeneration mismatch: the callee did NOT run.
-@@ -5043,7 +5266,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5043,7 +5323,8 @@ static double wjhelpImpl(double kindF, double siteF) {
          gWJScratch[js::wasm::kWJThisSlot] = thisv.get().asRawBits();
          gWJCurrentEnv = gWJCC_env[cslot];
          double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3206,7 +3320,7 @@ index d9508212d5..bf6107b83c 100644
          if (iflag == 1.0) return 1.0;
          if (iflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to the slow path
            gWJFastCalls++;
-@@ -5096,6 +5320,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5096,6 +5377,7 @@ static double wjhelpImpl(double kindF, double siteF) {
                if (fillSlot < 0) fillSlot = 0;  // evict slot 0 if full
                gWJCC_key[fillSlot] = ntKey2;
                gWJCC_handle[fillSlot] = iit->second.handle;
@@ -3214,7 +3328,7 @@ index d9508212d5..bf6107b83c 100644
                gWJCC_nargs[fillSlot] = iit->second.nargs;
                gWJCC_env[fillSlot] = gWJCurrentEnv;
                // Capture the `this` shape for the inline-alloc fast path (only for
-@@ -5108,7 +5333,9 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5108,7 +5390,9 @@ static double wjhelpImpl(double kindF, double siteF) {
                if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
                  gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*ifun).asRawBits();
                double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3225,7 +3339,7 @@ index d9508212d5..bf6107b83c 100644
                if (iflag == 1.0) return 1.0;  // initialize threw
                if (iflag == 0.0) {  // flag 2.0 -> !done -> VM path runs it
                  gWJFastCalls++;
-@@ -5171,7 +5398,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5171,7 +5455,8 @@ static double wjhelpImpl(double kindF, double siteF) {
            if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
              gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*cfun).asRawBits();
            double cptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3235,7 +3349,7 @@ index d9508212d5..bf6107b83c 100644
            if (cflag == 1.0) return 1.0;  // threw
            if (cflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to slow construct
              // Construct result: the ctor's return if it's an object, else `this`.
-@@ -5654,6 +5882,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -5654,6 +5939,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
    for (JSScript*& s : gWJDeferQueue) {
      js::TraceRoot(trc, &s, "wjdeferq");
    }
@@ -3249,7 +3363,7 @@ index d9508212d5..bf6107b83c 100644
    for (uint32_t i = 0; i < gWJConstPoolCount; i++) {
      WJDbgLogRoot(trc, "const", i, &gWJConstPool[i]);
      JS::TraceRoot(trc, reinterpret_cast<JS::Value*>(&gWJConstPool[i]), "wjconst");
-@@ -5730,6 +5965,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -5730,6 +6022,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
          js::TraceRoot(trc, reinterpret_cast<JSObject**>(&gWJCallFn[i]), "wjcallfn");
        }
      }

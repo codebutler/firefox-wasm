@@ -285,3 +285,24 @@ Measured (embed, wiki:lodash A/B, NORECOMPILEN=1 as pre-fix): perIter
 319.2 -> 303.5ms, deopts @2056 unbounded -> 3000 total then 0.
 A storm-threshold PBL fallback alternative was measured ~10% SLOWER and
 rejected.
+
+### D. GSF call-guard attribution + genericCall recompile
+
+css-select `combine` closures (dom.js:4181, `a(elem) || b(elem)` over
+per-instance upvalue callees) stormed ~200k GuardSpecificFunction deopts/run
+that were INVISIBLE to the valve: the deopts happen inside JIT->JIT fast
+calls (PIC call_indirect / WJH_CALL's direct wasm call), so no host entry
+runs and `e.deopts` stayed ~0 (entry showed 2 while site-hist saw 199k).
+
+- WJH_RESUME attributes GSF deopts to the deopting module's own entry
+  (`gWJResumeScriptPtr[nframes-1]`, `WJEntry::gsfDeopts`). Past
+  `GECKO_WJ_GSFGATE` (default 1500) -> Cold + `forceGenericCall`; a second
+  storm -> Failed (PBL). `GECKO_WJ_NOGSFVALVE` reverts; `GECKO_WJ_GENCALL=1`
+  forces the flag for testing.
+- Under `be.forceGenericCall`, a GSF whose uses are all call callees (the
+  GuardFunctionScript `allCallCallee` precedent) becomes a passthrough --
+  the PIC already dispatches polymorphically; a non-callee use (inlined
+  region / identity consumer) keeps the guard.
+- Measured: synthetic 8-closure repro 7463 -> 972ms (7.7x, SINK identical,
+  sitehist silent); wiki:dom 3803 -> 2135ms/iter (1.78x, MICROSUM OK);
+  micro --ab all OK; octane deltablue/richards/splay healthy.
