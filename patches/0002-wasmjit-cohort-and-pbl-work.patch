@@ -2479,7 +2479,7 @@ index b7dbbc5370..aa8d687285 100644
  // WasmJitRuntime.cpp. Lets the backend inline `new X()` (alloc + ctor call) and
  // skip the WJH_CONSTRUCT boundary for monomorphic construct sites.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index d9508212d5..023953f186 100644
+index d9508212d5..1616faefda 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -18,6 +18,7 @@
@@ -2539,7 +2539,7 @@ index d9508212d5..023953f186 100644
  };
  
  // Per-script compile state. Keyed by JSScript*; entries persist for the process.
-@@ -489,6 +500,134 @@ static WJEntry& EntryFor(JSScript* script) {
+@@ -489,6 +500,137 @@ static WJEntry& EntryFor(JSScript* script) {
    return e;
  }
  
@@ -2599,10 +2599,11 @@ index d9508212d5..023953f186 100644
 +    reqs.push_back(r);
 +    inReq.insert(s);
 +  };
-+  // Edge-first packing: each observed caller->callee edge contributes both ends
-+  // so the hot call pairs become same-instance. Then members' own callees
-+  // transitively, then leftover pending seeds pad the module (harmless: sharing
-+  // an instance costs nothing for unconnected members).
++  // Edge-only packing: each observed caller->callee edge contributes both ends
++  // so the hot call pairs become same-instance, then members' own callees
++  // transitively. Unconnected pending seeds stay pending: site workloads showed
++  // padding whole modules with unrelated functions costs more than it wins.
++  // GECKO_WJ_COHORTPAD=1 restores padding with leftover seeds.
 +  for (auto& pr : gWJCallEdges) {
 +    if (reqs.size() >= size_t(kMax)) break;
 +    JSScript *caller = pr.first, *callee = pr.second;
@@ -2619,9 +2620,11 @@ index d9508212d5..023953f186 100644
 +      tryAdd(pr.second);
 +    }
 +  }
++  static const int kPad =
++      getenv("GECKO_WJ_COHORTPAD") ? atoi(getenv("GECKO_WJ_COHORTPAD")) : 0;
 +  for (JSScript* s : seeds) {
-+    if (reqs.size() >= size_t(kMax)) {
-+      gWJCohortPending.push_back(s);  // over cap: next drain's seeds
++    if (!kPad || reqs.size() >= size_t(kMax)) {
++      gWJCohortPending.push_back(s);  // over cap / no edge yet: next drain
 +      continue;
 +    }
 +    tryAdd(s);
@@ -2674,7 +2677,7 @@ index d9508212d5..023953f186 100644
  // GECKO_WJ_ENTRYDUMP: dump every WJEntry with deopts >= threshold -- script
  // filename:line, deopts, jitRuns, deopt-rate%, recompiles, final state. Tells us
  // which functions storm-in-JIT (Compiled + high deopts) vs failed-to-PBL.
-@@ -609,9 +748,14 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
+@@ -609,9 +751,14 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
      if (w > 0) o += size_t(w);
    };
    app("{\"compiled\":%u,\"failed\":%u,\"cold\":%u,\"jitRuns\":%llu,"
@@ -2691,7 +2694,7 @@ index d9508212d5..023953f186 100644
    bool first = true;
    for (int i = 0; i < 8; i++) {
      if (!top[i].sc || !top[i].deopts) continue;
-@@ -643,12 +787,17 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+@@ -643,12 +790,17 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
        e.handle = -1;
        e.tblSlot = -1;
        e.directIdx = -1;
@@ -2709,7 +2712,7 @@ index d9508212d5..023953f186 100644
    // Stale call-IC entries would dispatch to the abandoned table slots; clearing
    // the callee-ptr side is sufficient (tblIdx is only read on a fn-ptr hit).
    // NOTE: a JIT frame already ON THE STACK when the fuse pops finishes with the
-@@ -868,7 +1017,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -868,7 +1020,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
        getenv("GECKO_WJ_COMPILESTAT") ? atoi(getenv("GECKO_WJ_COMPILESTAT")) : 0;
    mozilla::TimeStamp wjCompT0;
    if (compileStat) wjCompT0 = mozilla::TimeStamp::Now();
@@ -2719,7 +2722,7 @@ index d9508212d5..023953f186 100644
    js::wasm::gWJForceMega = false;
    if (compileStat) {
      double ms = (mozilla::TimeStamp::Now() - wjCompT0).ToMilliseconds();
-@@ -975,6 +1125,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -975,6 +1128,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    e.state = WJEntry::State::Compiled;
    e.handle = handle;
    e.tblSlot = tblSlot;
@@ -2728,7 +2731,7 @@ index d9508212d5..023953f186 100644
    e.hasAlwaysBails = js::wasm::gWJHadAlwaysBails;
    e.shapeDeoptDom = js::wasm::gWJEmitShapeDeopts > 0;  // ANY shape-family deopt site
    e.osrTargets = gWJPendingOsrTargets;  // OSR loop-head pc->block map for this fn
-@@ -990,9 +1142,17 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -990,9 +1145,17 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    // Register the trampoline in the MAIN indirect table for direct (no-JS-hop)
    // PBL->JIT entry via a C function pointer. -1 if registration failed.
    if (!getenv("GECKO_WJ_NODIRECT")) {
@@ -2747,7 +2750,7 @@ index d9508212d5..023953f186 100644
    if (getenv("GECKO_WJ_PBLWHO"))
      fprintf(stderr, "[wb-directidx] %s:%u directIdx=%d\n",
              script->filename() ? script->filename() : "?",
-@@ -1008,35 +1168,39 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1008,35 +1171,39 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
  // compile path instead of re-deferring. Bounded per-call by GECKO_WJ_DRAINBUDGET
  // (0 = all) so a huge backlog doesn't stall one idle slot.
  void js::wasm::WasmJitDrainDeferred() {
@@ -2816,7 +2819,7 @@ index d9508212d5..023953f186 100644
  }
  
  // Set during the differential verifier's interpreter re-run so nested calls
-@@ -1277,7 +1441,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1277,7 +1444,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
      WJTrampFn fp = reinterpret_cast<WJTrampFn>(uintptr_t(e.directIdx));
      flag = fp(ptr);
    } else {
@@ -2825,7 +2828,7 @@ index d9508212d5..023953f186 100644
    }
    gWJEntryExitFP = wjPrevEntryExitFP;
    gWJEntryAct = wjPrevEntryAct;
-@@ -1471,6 +1635,8 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1471,6 +1638,8 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
          e.state = WJEntry::State::Cold;  // re-observe + recompile with fresh ICs
          e.handle = -1;
          e.directIdx = -1;
@@ -2834,7 +2837,7 @@ index d9508212d5..023953f186 100644
          // KEEP e.tblSlot: the recompile reuses it so callers' cached call ICs
          // (funPtr->slot, funPtr unchanged) keep resolving to the new module.
          // Resetting it to -1 allocated a NEW slot, leaving cached ICs pointing at
-@@ -1691,13 +1857,7 @@ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
+@@ -1691,13 +1860,7 @@ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
  // handle + nargs + env) so repeats skip all lookups and call directly. Key (wrapper
  // fn) and env (module scope) are tenured/stable; a moved/evicted key just misses ->
  // re-resolve (sound). [GC sweep TODO: trace gWJCC_env or re-validate.]
@@ -2849,7 +2852,7 @@ index d9508212d5..023953f186 100644
  static bool WJIsForwardingWrapper(JSContext* cx, JSScript* s) {
    if (!s->function() || s->length() > 96) return false;
    if (!gWJFwdCache) gWJFwdCache = new std::unordered_map<JSScript*, char>();
-@@ -2748,6 +2908,32 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2748,6 +2911,41 @@ static double wjhelpImpl(double kindF, double siteF) {
              if (w == kWJCallWays) w = 0;  // all ways full: evict way 0
              gWJCallFn[base + w] = funPtr;
              gWJCallTblIdx[base + w] = ce.tblSlot;
@@ -2868,12 +2871,21 @@ index d9508212d5..023953f186 100644
 +                  gWJCallEdges.emplace_back(callerSc, cs);
 +                  // Edge-triggered fusion: cohort assembly is a pure byte copy
 +                  // (no Warp re-run), so draining on a fresh edge once enough
-+                  // members are pending is cheap. Without this, GECKO_WJ_COHORT
-+                  // larger than the workload's compile count never drains.
++                  // members are pending is cheap. Fire only when THIS edge has
++                  // both endpoints compiled and unpackable -- otherwise a
++                  // saturated pending list would rescan all edges per IC fill.
 +                  static int kMin = getenv("GECKO_WJ_COHORTMIN")
 +                                        ? atoi(getenv("GECKO_WJ_COHORTMIN"))
 +                                        : 8;
-+                  if (kMin > 0 && int(gWJCohortPending.size()) >= kMin) {
++                  auto packable = [](JSScript* s) {
++                    auto it = gEntries->find(s);
++                    return it != gEntries->end() &&
++                           it->second.state == WJEntry::State::Compiled &&
++                           it->second.cohortId < 0 && !it->second.jitBody.empty();
++                  };
++                  if (kMin > 0 && gEntries &&
++                      int(gWJCohortPending.size()) >= kMin &&
++                      packable(callerSc) && packable(cs)) {
 +                    WJDrainCohort(cx);
 +                  }
 +                }
@@ -2882,7 +2894,7 @@ index d9508212d5..023953f186 100644
            }
            // Resume context is self-contained (emitted code sets it), so just run.
            gWJCurrentEnv = uint32_t(uintptr_t(static_cast<void*>(fun->environment())));
-@@ -2796,7 +2982,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2796,7 +2994,7 @@ static double wjhelpImpl(double kindF, double siteF) {
            if (js::wasm::kWJEHABI)  // EHABI: stage the boxed callee for the trampoline.
              gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*fun).asRawBits();
            double ptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -2891,7 +2903,7 @@ index d9508212d5..023953f186 100644
            gWJFastCalls++;
            if (flag == 2.0) {
              // Entry GuardGlobalGeneration mismatch: the callee did NOT run.
-@@ -5043,7 +5229,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5043,7 +5241,8 @@ static double wjhelpImpl(double kindF, double siteF) {
          gWJScratch[js::wasm::kWJThisSlot] = thisv.get().asRawBits();
          gWJCurrentEnv = gWJCC_env[cslot];
          double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -2901,7 +2913,7 @@ index d9508212d5..023953f186 100644
          if (iflag == 1.0) return 1.0;
          if (iflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to the slow path
            gWJFastCalls++;
-@@ -5096,6 +5283,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5096,6 +5295,7 @@ static double wjhelpImpl(double kindF, double siteF) {
                if (fillSlot < 0) fillSlot = 0;  // evict slot 0 if full
                gWJCC_key[fillSlot] = ntKey2;
                gWJCC_handle[fillSlot] = iit->second.handle;
@@ -2909,7 +2921,7 @@ index d9508212d5..023953f186 100644
                gWJCC_nargs[fillSlot] = iit->second.nargs;
                gWJCC_env[fillSlot] = gWJCurrentEnv;
                // Capture the `this` shape for the inline-alloc fast path (only for
-@@ -5108,7 +5296,9 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5108,7 +5308,9 @@ static double wjhelpImpl(double kindF, double siteF) {
                if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
                  gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*ifun).asRawBits();
                double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -2920,7 +2932,7 @@ index d9508212d5..023953f186 100644
                if (iflag == 1.0) return 1.0;  // initialize threw
                if (iflag == 0.0) {  // flag 2.0 -> !done -> VM path runs it
                  gWJFastCalls++;
-@@ -5171,7 +5361,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5171,7 +5373,8 @@ static double wjhelpImpl(double kindF, double siteF) {
            if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
              gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*cfun).asRawBits();
            double cptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -2930,7 +2942,7 @@ index d9508212d5..023953f186 100644
            if (cflag == 1.0) return 1.0;  // threw
            if (cflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to slow construct
              // Construct result: the ctor's return if it's an object, else `this`.
-@@ -5654,6 +5845,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -5654,6 +5857,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
    for (JSScript*& s : gWJDeferQueue) {
      js::TraceRoot(trc, &s, "wjdeferq");
    }
@@ -2944,7 +2956,7 @@ index d9508212d5..023953f186 100644
    for (uint32_t i = 0; i < gWJConstPoolCount; i++) {
      WJDbgLogRoot(trc, "const", i, &gWJConstPool[i]);
      JS::TraceRoot(trc, reinterpret_cast<JS::Value*>(&gWJConstPool[i]), "wjconst");
-@@ -5730,6 +5928,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -5730,6 +5940,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
          js::TraceRoot(trc, reinterpret_cast<JSObject**>(&gWJCallFn[i]), "wjcallfn");
        }
      }
