@@ -227,7 +227,10 @@ module/instance:
   assembly (`WJWarpCompileCohort` -> `AssembleBodiesAndInstall`) is a pure byte
   copy into a shared module - no second Warp/MIR run.
 - Call-IC fill records observed caller->callee edges (`gWJCallEdges`); drain
-  packs edge endpoints first, expands transitively, pads with pending seeds.
+  packs edge endpoints first, expands transitively. Packing is edge-only by
+  default (`GECKO_WJ_COHORTPAD=1` restores padding with unrelated pending
+  seeds) -- on real site workloads padding packed ~all compiled functions and
+  regressed 1.1-1.6x at cap16.
 - Members keep their existing shared-table slots (caller IC caches stay valid);
   trampolines are exported as `f`/`f1..`, register-ABI bodies as `m`/`m1..`;
   host dispatch selects the member via `wasmhost_call(handle, memberIdx)`.
