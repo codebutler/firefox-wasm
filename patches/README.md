@@ -483,3 +483,89 @@ recursion both delegate and complete (fin(2600), f(3000)-4500); truly
 excessive recursion throws catchable InternalError (PBL quota) and the
 process survives. Octane richards 4092 vs 4254 unguarded (~4% worst-case
 entry cost); earley/splay/deltablue unchanged-correct.
+
+## 0008-wasmjit-fresh-script-family.patch
+
+Same-source fresh scripts (every `new Function("x","return x*2+1")` call
+makes a new JSScript) used to each pay the full warmup + compile cost --
+or never compiled at all, when each clone died before the per-script
+threshold. SM already dedups bytecode+atoms into a shared
+`SharedImmutableScriptData` (verified: 50 clones -> identical sd pointer),
+so that sd is a zero-cost family key. One shared compile now serves the
+whole family.
+
+### A. Family records (WasmJitRuntime.cpp)
+
+- `gFamilies`: `SharedImmutableScriptData* -> WJFamily`, realm-confined
+  (baked GGG/global cells are realm-specific). The sd key is AddRef'd --
+  `SweepScriptDataTable` frees interned data with no live scripts, and the
+  family record is long-lived.
+- `WasmJitFamilyObserve(script)` counts aggregate cold calls; at
+  `GECKO_WJ_FAMWARM` (default 64) it arms `compilePending` and the caller
+  routes through the normal ObserveCall path. `refCount() >= 3` gate keeps
+  one-off interned-but-never-cloned scripts out of the map.
+- The next eligible member (has jitScript -- Warp needs BaselineIC
+  feedback; not eval/module/generator/async) gets the shared compile
+  (`gWJSharedCompile`); on success the artifact metadata (handle, tblSlot,
+  directIdx, jitBody, osrTargets, ...) publishes onto the family and the
+  representative entry links to it.
+- Later siblings alias-install (`WJAliasInstall`) instead of compiling --
+  creating their jitScript first, since a deopt resume requires it and the
+  alias path skips the compile that would have made it.
+
+### B. Member compatibility (the load-bearing check)
+
+gcthings live in per-script `PrivateScriptData`, NOT in the shared sd --
+each clone measured its own body-Scope cell. The shared artifact bakes the
+representative's cells, so a member may run it iff every gcthing actually
+REFERENCED by a bytecode immediate is pointer-identical:
+`WJMemberCompatible` scans the representative's bytecode for JOF_GCTHING /
+OBJECT / REGEXP / SCOPE / BIGINT / STRING / SHAPE / ATOM ops (all read
+GCThingIndex at pc+1; atoms share cells realm-wide so they pass naturally)
+and compares `GCCellPtr::asCell()`. Unreferenced slots (the outermost
+scope every function carries) may differ. Verified: lambda/object-template
+clones correctly FAIL (`gcmp FAIL kind=0`, per-clone template cells) and
+fall back to per-script compile; the inner same-source lambdas form their
+own compatible family.
+
+### C. Runtime-bound resume (WasmJitBackend)
+
+The artifact can no longer bake `info.script()` into
+`gWJResumeScriptPtr[outermost]` -- an alias must resume its OWN script.
+In shared mode the emit loads it at runtime: `gWJCallRoots[envRootIdx+1]`
+(the rooted runtime callee) -> `JSFunction::offsetOfJitInfoOrScript`.
+Shared compiles force `usesCallee`/`useEnvRoot` and bail on inlined
+frames (`shared-inline`) -- inline frames would bake the representative's
+callee scripts. pcOff/nargs/nlocals stay baked: the bytecode is identical
+across the family.
+
+### D. Call-edge coverage + lifecycle
+
+- FamilyObserve runs BEFORE the per-script warmup gates on all four call
+  edges: PBL fast path (pre-jitScript block and the warmUpCount>=10 gate),
+  the direct `Interpret` Call-op dispatch (which bypasses RunScript), and
+  the RunScript invoke path (native->JS callbacks).
+- The rep script is rooted in `WJTraceRoots` (it owns both the
+  member-compat reference cells and every baked gcthing).
+- `WJStormDecision` detaches aliases (fresh tblSlot, charge family deopts)
+  only INSIDE the transition -- detach-before-check previously left a
+  Compiled entry with tblSlot=-1 on the below-threshold return. Family
+  artifacts accumulate deopts across members; >=1000 fails the family so
+  no NEW sibling aliases (existing aliases keep their own valves).
+- Shared artifacts are excluded from cohort fusion (fusion rewrites
+  tblSlot; sibling aliases would keep the stale slot).
+- `WasmJitInvalidateAll` resets Compiled families to Warming (rep/slots/
+  counters cleared) and unlinks `entry.family` everywhere.
+
+`GECKO_WJ_NOFAMILY=1` disables; `GECKO_WJ_FAMDBG`/`GECKO_WJ_SDDBG` trace.
+
+Measured (embed shell): 50-clone `new Function` bench does ONE shared
+compile + 49 alias installs (~52 compiles -> 3 total in the run),
+acc=72000000 correct. 200-clone perf probe: family ~288ms vs per-script
+WJ (NOFAMILY) ~500ms vs PBL-only ~670ms. Deopt through an alias on a
+changed arg type resumes the member's own script (fresh str/num correct).
+Env/global reads, deep-recursion suspend delegation, and invalidate-all
+all verified. Octane + realapp suites: no family ever activates there (no
+refCount>=3 sd), results unchanged. jit-test function/eval/arguments
+subset: 36 failures, ALL identical with GECKO_WJ_NOFAMILY=1 (pre-existing
+embed gaps -- no decompileFunction/drainJobQueue/Debugger/module loader).

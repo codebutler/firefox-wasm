@@ -1,0 +1,667 @@
+diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
+index c89a896645..d50bbc3db8 100644
+--- a/js/src/vm/Interpreter.cpp
++++ b/js/src/vm/Interpreter.cpp
+@@ -409,6 +409,7 @@ static void AssertExceptionResult(JSContext* cx) {
+ namespace js {
+ namespace wasm {
+ extern bool WasmJitObserveCall(JSScript* script);
++extern int WasmJitFamilyObserve(JSScript* script);
+ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
+                           const JS::Value* argv, uint32_t argc,
+                           JSObject* envChain, uint64_t* retBits);
+@@ -488,6 +489,10 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+         static int noDbg = getenv("GECKO_WJ_NOBSDBG") ? 0 : 1;
+         static uint64_t calls = 0, routed = 0;
+         static std::unordered_map<JSScript*, std::pair<uint64_t, std::string>> perFn;
++        // Cold clones (new-Function siblings) reach here before any per-script
++        // threshold: aggregate their calls into the shared-bytecode family so a
++        // hot family can arm its one shared compile (see WasmJitFamilyObserve).
++        js::wasm::WasmJitFamilyObserve(state.script());
+         bool obs = js::wasm::WasmJitObserveCall(state.script());
+         if (obs) routed++;
+         {
+@@ -3367,7 +3372,11 @@ bool MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER js::Interpret(JSContext* cx,
+         // match PBL: a hot OUTER-LOOP function (richards Scheduler.schedule) is called
+         // few times but loops heavily; combined with LoopHead warm-up counting below,
+         // it now accumulates enough warm-up to be observed for compilation.
+-        if (wjScript->getWarmUpCount() >= 10 &&
++        // Second OR-arm: cold clones (new-Function siblings) never reach 10
++        // calls each; aggregate their heat into the shared-bytecode family so
++        // a compiled family artifact routes them through WJ anyway.
++        if ((wjScript->getWarmUpCount() >= 10 ||
++             js::wasm::WasmJitFamilyObserve(wjScript)) &&
+             js::wasm::WasmJitObserveCall(wjScript)) {
+           uint64_t wbits;
+           js::wasm::gWJCallCallee = ObjectValue(*maybeFun).asRawBits();
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 03175ae376..086b4e3648 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -83,6 +83,9 @@ namespace wasm {
+ // runs that wasm version from the IC when the args are numbers.
+ extern bool WasmJitObserveCall(JSScript* script);
+ extern int WasmJitPreCall(JSScript* script);  // 0=no-jit 1=compiled 2=may-compile
++// Shared-artifact family hook for scripts below the per-script warmup gate
++// (fresh new-Function clones sharing interned bytecode). See wasm/WasmJit.h.
++extern int WasmJitFamilyObserve(JSScript* script);
+ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
+                           const JS::Value* args, uint32_t argc,
+                           JSObject* envChain, uint64_t* retBits);
+@@ -8084,6 +8087,28 @@ PBIResult PortableBaselineInterpret(
+             ReservedRooted<JSScript*> calleeScript(
+                 &state.script0, func->baseScript()->asJSScript());
+             if (!calleeScript->hasJitScript()) {
++#if defined(__EMSCRIPTEN__)
++              // Fresh clones (new-Function siblings sharing interned bytecode)
++              // die before the PBL tier-up threshold gives them a jitScript, so
++              // they never reach the family gate below. If their family is hot
++              // or already has a shared artifact, route through the IC anyway;
++              // WasmJitObserveCall creates the jitScript via the compile path
++              // or the alias install. Same realm guard as below -- jitScript
++              // creation asserts compartment affinity.
++              if (!constructing &&
++                  ctx.frameMgr.cxForLocalUseOnly()->realm() ==
++                      calleeScript->realm() &&
++                  js::wasm::WasmJitFamilyObserve(calleeScript.get())) {
++                frame->interpreterPC() = pc;
++                SYNCSP();
++                VMFrame wjvm(ctx.frameMgr, ctx.stack, sp);
++                if (wjvm.success() &&
++                    js::wasm::WasmJitObserveCall(calleeScript.get())) {
++                  TRACE_PRINTF("missed fastpath: family-routed to wasm-jit\n");
++                  break;
++                }
++              }
++#endif
+               TRACE_PRINTF("missed fastpath: no jit-script\n");
+               break;
+             }
+@@ -8109,7 +8134,14 @@ PBIResult PortableBaselineInterpret(
+             // Scheduler.schedule) is only CALLED a few times -- it loops internally --
+             // so a high call-count gate never observes it, leaving the hottest function
+             // in the interpreter while its frequently-called callees get compiled.
+-            if (!constructing && calleeScript->getWarmUpCount() >= 10) {
++            //
++            // Second gate in the OR: fresh clones (new-Function siblings sharing
++            // interned bytecode) die before reaching 10 calls each, so their
++            // aggregate family heat is counted separately; a hot family's shared
++            // artifact routes them to JIT before the per-script threshold.
++            if (!constructing &&
++                (calleeScript->getWarmUpCount() >= 10 ||
++                 js::wasm::WasmJitFamilyObserve(calleeScript.get()))) {
+               int wjpc = js::wasm::WasmJitPreCall(calleeScript.get());
+               bool wjRouted = false;
+               if (wjpc == 1) {
+diff --git a/js/src/wasm/WasmJit.h b/js/src/wasm/WasmJit.h
+index 930fd98c77..1c10d73235 100644
+--- a/js/src/wasm/WasmJit.h
++++ b/js/src/wasm/WasmJit.h
+@@ -35,6 +35,13 @@ namespace wasm {
+ extern bool WasmJitObserveCall(JSScript* script);
+ extern int WasmJitPreCall(JSScript* script);  // 0=no-jit 1=compiled 2=may-compile
+ 
++// Called from the PBL call fast path for scripts still under the per-script
++// warmup gate (fresh clones die before it): counts the call against the
++// interned-bytecode family. Returns nonzero when the caller should attempt
++// the WJ route (family artifact compiled, or the family went hot and the next
++// eligible member gets the shared compile).
++extern int WasmJitFamilyObserve(JSScript* script);
++
+ // Compile any functions that crossed the warmup threshold while GECKO_WJ_DEFERCOMPILE
+ // deferred their (synchronous) compile off the critical path. Call at an idle / task
+ // boundary (browser: between event-loop tasks; node: between top-level runs). No-op
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index 39a281ea1e..7d679568a9 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -402,6 +402,9 @@ struct WJBackend {
+                                   // into the root slot after the env (envRootIdx+1); MCallee reads it.
+                                   // Baking the script's canonical function is WRONG for closures
+                                   // sharing a script (acorn-walk NFE self-recursion read a garbage env).
++  bool sharedFamily = false;      // shareable artifact: the resume outer-frame script is the
++                                  // RUNTIME callee's script (loaded via envRootIdx+1), not baked;
++                                  // forces usesCallee/useEnvRoot; inlined frames bail the compile.
+   bool depthChecked = false;      // did the entry block emit the recursion save/check? (gates the restore)
+   bool hasCalls = false;          // graph contains a call (can recurse) -> needs the recursion guard; leaves skip it
+   uint32_t frameBytesEst = 128;   // estimated V8 wasm frame size (bytes) for the recursion BYTE-guard: (params+valuelocals+dedicated)*8 + overhead. Approximates real stack usage so the guard fires by BYTES (like a real SP check), not by a flat frame count that ignores frame size.
+@@ -1330,6 +1333,12 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+   }
+   uint32_t valsIdx = 0;  // running index into gWJResumeVals across all frames
+   for (uint32_t f = 0; f < nframes; f++) {
++    if (be.sharedFamily && f > 0) {
++      // A shared artifact can't reconstruct inline frames: the inlined scripts
++      // belong to the representative's compile, not the running family member.
++      js::wasm::gWJBailReason = "shared-inline-frame";
++      return false;
++    }
+     MResumePoint* rp = frames[f];
+     const CompileInfo& info = rp->block()->info();
+     uint32_t nargs = info.nargs();
+@@ -1466,9 +1475,31 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+     if (!storeI32(uintptr_t(&gWJResumePc[f]), int32_t(pcOff))) return false;
+     if (!storeI32(uintptr_t(&gWJResumeStackDepth[f]), int32_t(outDepth)))
+       return false;
+-    if (!storeI32(uintptr_t(&gWJResumeScriptPtr[f]),
+-                  int32_t(uintptr_t(info.script()))))
++    if (be.sharedFamily && f == nframes - 1) {
++      // Shared artifact: the running JSScript is not a compile-time constant
++      // (any same-source family member may run this code). Load it from the
++      // runtime callee rooted at gWJCallRoots[envRootIdx+1] (sharedFamily forces
++      // usesCallee in WJEmitBody). pcOff/nargs/nlocals are bytecode-identical
++      // across the family, so they stay baked.
++      uintptr_t rootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
++      if (!e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(uintptr_t(&gWJResumeScriptPtr[f]))) ||
++          !GetLocal(e, be.envRootIdx) || !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(8) || !e.writeOp(Op::I32Mul) ||
++          !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(rootsBase)) || !e.writeOp(Op::I32Add) ||
++          !e.writeOp(Op::I64Load) || !e.writeVarU32(3) ||
++          !e.writeVarU32(8) || !e.writeOp(Op::I32WrapI64) ||
++          !e.writeOp(Op::I32Load) ||
++          !e.writeVarU32(2) ||
++          !e.writeVarU32(JSFunction::offsetOfJitInfoOrScript()) ||
++          !e.writeOp(Op::I32Store) || !e.writeVarU32(2) ||
++          !e.writeVarU32(0))
++        return false;
++    } else if (!storeI32(uintptr_t(&gWJResumeScriptPtr[f]),
++                         int32_t(uintptr_t(info.script())))) {
+       return false;
++    }
+     if (!storeI32(uintptr_t(&gWJResumeNArgs[f]), int32_t(nargs))) return false;
+     if (!storeI32(uintptr_t(&gWJResumeNLocals[f]), int32_t(nlocals))) return false;
+     if (!storeI32(uintptr_t(&gWJResumeValsOff[f]), int32_t(frameValsOff)))
+@@ -16242,6 +16273,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+   WJBackend be;
+   be.info = &mir.outerInfo();
+   be.snapshot = snapshot;
++  be.sharedFamily = js::wasm::gWJSharedCompile;
+   // Params: 0 = scratch-base (f64); EHABI also 1 = callee (i64); then this (i64) and
+   // args (i64). Old ABI: 0=sb, 1=this, 2..=args. (kWJThisParam/kWJArg0Param encode this.)
+   be.paramCount = (kWJEHABI ? 3 : 2) + kWJMaxArgs;
+@@ -16438,6 +16470,17 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+       be.assign(ins);
+     }
+   }
++  if (be.sharedFamily) {
++    // Shared-artifact compile: resume needs the runtime callee's script (loaded
++    // off envRootIdx+1), so root the callee+env unconditionally. Inlined frames
++    // bake the representative's callee scripts -> bail the whole compile.
++    be.usesCallee = true;
++    be.useEnvRoot = true;
++    if (be.hasInlinedFrames) {
++      js::wasm::gWJBailReason = "shared-inline";
++      return false;
++    }
++  }
+ 
+   // alwaysBails-as-deopt: Warp marks a block alwaysBails when it ends in a cold
+   // IC (never-profiled) whose transpile yields buildBailoutForColdIC. Ion handles
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index ea2be6d5ba..0002ca8df2 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -304,6 +304,10 @@ extern bool gWJForceMega;  // next compile: megamorphic property reads (post-sto
+ extern bool gWJForceGenericCmp;  // next compile: de-spec numeric compares (post-storm)
+ extern bool gWJForceGenericCall;  // next compile: de-spec fn-identity call guards (post-storm)
+ extern bool gWJForceNumberArith;  // next compile: de-speculate Int32 arith/elem ICs (post-deopt)
++// next compile: emit a shareable artifact (source-family clone, e.g. a fresh
++// new-Function script) -- binds the running script at RUNTIME from the callee
++// instead of baking it into deopt-resume metadata.
++extern bool gWJSharedCompile;
+ 
+ // Synchronous main-thread tier-up compile cost (GECKO_WJ_COMPILESTAT).
+ extern uint64_t gWJCompileAttempts;  // total WJWarpCompile calls
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 4de9eb71e4..c22f034d47 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -43,6 +43,7 @@
+ #include "jit/InlinableNatives.h"  // InlinableNative (iterator intrinsic fast path)
+ #include "js/experimental/JitInfo.h"  // JSJitGetterOp, JSJitGetterCallArgs (WJH_GETDOMPROP)
+ #include "vm/JSScript.h"
++#include "vm/SharedStencil.h"  // SharedImmutableScriptData (family key)
+ #include "vm/JSAtomUtils.h"  // js::Atomize
+ #include "vm/JSAtomUtils-inl.h"  // js::AtomToId
+ #include "vm/BytecodeUtil.h"  // js::CodeName
+@@ -220,6 +221,7 @@ bool gWJForceMega = false;         // megamorphic recompile (set per-compile by
+ bool gWJForceGenericCmp = false;   // generic numeric-compare recompile (per-compile)
+ bool gWJForceGenericCall = false;  // generic call-guard recompile (per-compile)
+ bool gWJForceNumberArith = false;  // de-speculate Int32 arith/elem (set per-compile by the valve)
++bool gWJSharedCompile = false;     // shared-artifact family compile (per-compile)
+ uint64_t gWJCompileAttempts = 0;
+ uint64_t gWJCompileOK = 0;
+ double gWJCompileMs = 0.0;
+@@ -427,6 +429,7 @@ uintptr_t js::wasm::WJInternShape(uintptr_t shapeBits) {
+ 
+ namespace {
+ 
++struct WJFamily;
+ struct WJEntry {
+   enum class State : uint8_t { Cold, Compiled, Failed };
+   State state = State::Cold;
+@@ -497,8 +500,143 @@ struct WJEntry {
+   // Cohort fusion (GECKO_WJ_COHORT) reassembles these into a shared module --
+   // pure byte copy, no Warp re-run, no script dereference at drain time.
+   std::vector<uint8_t> jitBody;
++  // Non-null when this entry is ALIAS-installed to a shared family artifact
++  // (same interned bytecode, e.g. fresh new-Function clones): the artifact's
++  // handle/tblSlot/directIdx are borrowed, so a storm transition must detach
++  // (fresh slot) rather than take the family slot over with per-script code.
++  WJFamily* family = nullptr;
+ };
+ 
++// Shared-artifact family: scripts that share interned SharedImmutableScriptData
++// (SM dedups bytecode+atoms, so every same-source `new Function` clone has the
++// same sd pointer -- verified empirically). One shared compile (runtime-bound
++// resume script, no inlining) serves every member whose bytecode-REFERENCED
++// gcthing cells are pointer-identical to the representative's (gcthings live in
++// per-script PrivateScriptData and are NOT shared by sd dedup). Keyed by sd
++// (RefPtr'd -- a stable non-GC key). Confined to one realm: baked GGG/global
++// pointers are realm-specific.
++struct WJFamily {
++  enum class State : uint8_t { Warming, Compiled, Failed };
++  State state = State::Warming;
++  void* realm = nullptr;          // compare-only (no rooting needed)
++  uint32_t observes = 0;          // aggregate cold-call count across members
++  uint32_t fails = 0;             // shared-compile attempts that bailed
++  uint32_t deopts = 0;            // artifact-level deopt storm counter
++  bool compilePending = false;    // hot: compile the next eligible member shared
++  int handle = -1;
++  int tblSlot = -1;
++  int directIdx = -1;
++  int memberIdx = 0;
++  int cohortId = -1;
++  uint32_t nargs = 0;
++  uint32_t nlocals = 0;
++  bool hasAlwaysBails = false;
++  bool shapeDeoptDom = false;
++  bool hasGggDeopts = false;
++  JSScript* rep = nullptr;  // compile representative; traced in WJTraceRoots --
++                            // the member-compat gcthing reference AND the
++                            // baked-constant owner for the shared artifact
++  std::vector<uint8_t> jitBody;
++  std::vector<std::pair<uint32_t, uint32_t>> osrTargets;
++};
++
++static std::unordered_map<SharedImmutableScriptData*, WJFamily>* gFamilies =
++    nullptr;
++
++static WJFamily& FamilyFor(SharedImmutableScriptData* sd) {
++  if (!gFamilies)
++    gFamilies = new std::unordered_map<SharedImmutableScriptData*, WJFamily>();
++  auto it = gFamilies->find(sd);
++  if (it == gFamilies->end()) {
++    // Pin the sd: the shared-data table sweeps entries with no live script on
++    // GC (SweepScriptDataTable), and a freed sd's address could be reused by an
++    // unrelated bytecode. The family record is itself a long-lived artifact.
++    sd->AddRef();
++    it = gFamilies->emplace(sd, WJFamily{}).first;
++  }
++  return it->second;
++}
++
++static WJFamily* FamilyLookup(JSScript* script) {
++  if (!gFamilies) return nullptr;
++  SharedImmutableScriptData* sd = script->sharedData();
++  if (!sd) return nullptr;
++  auto it = gFamilies->find(sd);
++  if (it == gFamilies->end() || it->second.realm != script->realm())
++    return nullptr;
++  return &it->second;
++}
++
++// Shared-artifact eligibility for the compile REPRESENTATIVE: eval scripts
++// capture a caller scope -> exclude. Module/generator/async are gated by the
++// ObserveCall head check already.
++static bool WJShareable(JSScript* script) { return !script->isForEval(); }
++
++// Member-compat check against a compiled representative: gcthings arrays are
++// per-JSScript (PrivateScriptData) and same-source clones get DIFFERENT cells
++// (empirically each clone has its own body Scope). What matters is only the
++// gcthings actually REFERENCED by bytecode immediates (JOF_* index ops): the
++// shared artifact bakes the representative's cells, so a member may run it iff
++// every referenced slot holds the identical cell. Unreferenced slots (the
++// outermost-scope slot every function carries) differ harmlessly.
++static bool WJMemberCompatible(JSScript* member, JSScript* rep) {
++  auto mg = member->gcthings();
++  auto rg = rep->gcthings();
++  if (mg.size() != rg.size()) return false;
++  for (jsbytecode* pc = rep->code(); pc < rep->codeEnd();
++       pc += js::GetBytecodeLength(pc)) {
++    switch (js::JOF_OPTYPE(JSOp(*pc))) {
++      case JOF_GCTHING:
++      case JOF_OBJECT:
++      case JOF_REGEXP:
++      case JOF_SCOPE:
++      case JOF_BIGINT:
++      case JOF_STRING:
++      case JOF_SHAPE:
++      case JOF_ATOM: {
++        uint32_t i = GET_GCTHING_INDEX(pc).index;
++        if (i < mg.size() && mg[i].asCell() != rg[i].asCell()) {
++          if (getenv("GECKO_WJ_FAMDBG"))
++            fprintf(stderr,
++                    "[wj-fam] gcmp FAIL idx=%u kind=%d %p != %p (%s:%u)\n",
++                    i, int(rg[i].kind()), rg[i].asCell(), mg[i].asCell(),
++                    member->filename() ? member->filename() : "?",
++                    unsigned(member->lineno()));
++          return false;
++        }
++        break;
++      }
++      default:
++        break;
++    }
++  }
++  return true;
++}
++
++static void WJAliasInstall(WJEntry& e, WJFamily* f) {
++  e.state = WJEntry::State::Compiled;
++  e.handle = f->handle;
++  e.tblSlot = f->tblSlot;
++  e.directIdx = f->directIdx;
++  e.memberIdx = f->memberIdx;
++  e.cohortId = f->cohortId;
++  e.nargs = f->nargs;
++  e.nlocals = f->nlocals;
++  e.hasAlwaysBails = f->hasAlwaysBails;
++  e.shapeDeoptDom = f->shapeDeoptDom;
++  e.hasGggDeopts = f->hasGggDeopts;
++  e.osrTargets = f->osrTargets;
++  e.jitBody = f->jitBody;
++  e.family = f;
++}
++
++// Called from the PBL call edge for scripts still under the per-script
++// warmUpCount gate (fresh new-Function clones die before reaching it): count
++// the call against the interned-bytecode family; when the family proves hot,
++// arm compilePending and let the caller route through PreCall->ObserveCall,
++// which does the shared compile. Returns nonzero when the callsite should
++// attempt the WJ route now. Defined after the anonymous namespace below.
++
+ // Per-script compile state. Keyed by JSScript*; entries persist for the process.
+ static std::unordered_map<JSScript*, WJEntry>* gEntries = nullptr;
+ 
+@@ -706,6 +844,62 @@ static uint32_t WarmupDelay() {
+ 
+ }  // namespace
+ 
++int js::wasm::WasmJitFamilyObserve(JSScript* script) {
++  static int sEnabled = -1;
++  if (sEnabled < 0)
++    sEnabled = (getenv("GECKO_NOWASMJIT") || getenv("GECKO_WJ_NOFAMILY")) ? 0 : 1;
++  if (!sEnabled) return 0;
++  static int famDbgT = getenv("GECKO_WJ_FAMDBG") ? 1 : 0;
++  if (famDbgT) {
++    static uint64_t tn = 0;
++    if (++tn <= 8)
++      fprintf(stderr, "[wj-fam] observe %s:%u rc=%u\n",
++              script->filename() ? script->filename() : "?",
++              unsigned(script->lineno()),
++              script->sharedData() ? script->sharedData()->refCount() : 0);
++  }
++  if (gWJJitDepth >= gWJSuspendWatermark) return 0;
++  if (!script->function() || script->isModule() || script->isGenerator() ||
++      script->isAsync() || script->isForEval()) {
++    return 0;
++  }
++  SharedImmutableScriptData* sd = script->sharedData();
++  // refCount == 2 means table + this script only (interned but never cloned):
++  // skip the map insert so one-off functions don't grow family bookkeeping.
++  // >= 3 means a live sibling already shares this bytecode.
++  if (!sd || sd->refCount() < 3) {
++    static int famDbg0 = getenv("GECKO_WJ_FAMDBG") ? 1 : 0;
++    if (famDbg0 && sd) {
++      static uint64_t dn = 0;
++      if (++dn <= 5 || (dn % 100000) == 0)
++        fprintf(stderr, "[wj-fam] skip rc=%u %s:%u\n", sd->refCount(),
++                script->filename() ? script->filename() : "?",
++                unsigned(script->lineno()));
++    }
++    return 0;
++  }
++  WJFamily& f = FamilyFor(sd);
++  if (!f.realm) f.realm = script->realm();
++  if (f.state == WJFamily::State::Compiled)
++    return f.realm == script->realm() ? 1 : 0;
++  if (f.state != WJFamily::State::Warming || f.realm != script->realm())
++    return 0;
++  static uint32_t famWarm = 0;
++  if (!famWarm) {
++    const char* s = getenv("GECKO_WJ_FAMWARM");
++    famWarm = s ? uint32_t(atoi(s)) : 64;
++    if (!famWarm) famWarm = 64;
++  }
++  if (++f.observes >= famWarm) {
++    static int famDbg = getenv("GECKO_WJ_FAMDBG") ? 1 : 0;
++    if (famDbg && !f.compilePending)
++      fprintf(stderr, "[wj-fam] hot: sd=%p observes=%u\n", (void*)sd, f.observes);
++    f.compilePending = true;
++    return 1;
++  }
++  return 0;
++}
++
+ bool js::wasm::WasmJitInWasm() { return js::wasm::gWJExecDepth > 0; }
+ 
+ // __wjStats() backend: aggregate the ALWAYS-ON JIT counters into a JSON string
+@@ -816,6 +1010,7 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+   if (gEntries) {
+     for (auto& kv : *gEntries) {
+       WJEntry& e = kv.second;
++      e.family = nullptr;
+       if (e.state != WJEntry::State::Compiled) continue;
+       e.state = WJEntry::State::Cold;
+       e.handle = -1;
+@@ -830,6 +1025,26 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+       n++;
+     }
+   }
++  // Shared-family artifacts die with the flush: retire them so later siblings
++  // re-warm and recompile instead of aliasing an unloaded module's slot.
++  if (gFamilies) {
++    for (auto& kv : *gFamilies) {
++      WJFamily& f = kv.second;
++      if (f.state != WJFamily::State::Compiled) continue;
++      f.state = WJFamily::State::Warming;
++      f.handle = -1;
++      f.tblSlot = -1;
++      f.directIdx = -1;
++      f.memberIdx = 0;
++      f.cohortId = -1;
++      f.observes = 0;
++      f.deopts = 0;
++      f.compilePending = false;
++      f.rep = nullptr;
++      f.jitBody.clear();
++      f.osrTargets.clear();
++    }
++  }
+   gWJCohortPending.clear();
+   gWJCallEdges.clear();
+   // Stale call-IC entries would dispatch to the abandoned table slots; clearing
+@@ -909,8 +1124,54 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+   }
+ 
+   WJEntry& e = EntryFor(script);
++  static int sdDbg = getenv("GECKO_WJ_SDDBG") ? 1 : 0;
++  if (sdDbg) {
++    fprintf(stderr, "[wj-sd] script=%p sd=%p fn=%s:%u\n", (void*)script,
++            (void*)script->sharedData(),
++            script->filename() ? script->filename() : "?",
++            unsigned(script->lineno()));
++  }
+   if (e.state == WJEntry::State::Compiled) return true;
++  // Shared-artifact family: this script's interned bytecode may already have a
++  // compiled module (compiled for a same-source sibling, e.g. another
++  // new-Function clone). Alias-install it instead of recompiling.
++  WJFamily* fam = FamilyLookup(script);
++  if (fam && fam->state == WJFamily::State::Compiled && fam->rep &&
++      WJMemberCompatible(script, fam->rep)) {
++    // Alias install skips the per-script compile, so jitScript (required by a
++    // deopt resume) may not exist yet for a fresh clone. Create it here --
++    // this path only runs under the PBL edge's covering VMFrame, so the
++    // allocation's potential GC sees live PBL frames.
++    if (!script->hasJitScript()) {
++      JSContext* cx = js::TlsContext.get();
++      if (!cx) return false;
++      js::jit::AutoKeepJitScripts keep(cx);
++      if (!script->ensureHasJitScript(cx, keep)) return false;
++    }
++    WJAliasInstall(e, fam);
++    if (getenv("GECKO_WJ_FAMDBG"))
++      fprintf(stderr, "[wj-fam] alias %s:%u\n",
++              script->filename() ? script->filename() : "?",
++              unsigned(script->lineno()));
++    return true;
++  }
+   if (e.state == WJEntry::State::Failed) return false;
++  // A family that crossed its aggregate warmup threshold compiles the NEXT
++  // eligible script it sees into a shareable artifact (one compile amortized
++  // across all future same-source clones). The representative must have a
++  // jitScript -- Warp reads BaselineIC feedback, which a never-PBL'd clone
++  // doesn't have. Ineligible members leave the flag set for a later sibling.
++  bool familyCompile = fam && fam->compilePending &&
++                       fam->state == WJFamily::State::Warming &&
++                       script->hasJitScript() && WJShareable(script);
++  if (fam && familyCompile) fam->compilePending = false;
++  static int famDbgC = getenv("GECKO_WJ_FAMDBG") ? 1 : 0;
++  if (famDbgC && fam && fam->compilePending) {
++    fprintf(stderr, "[wj-fam] eval %s:%u st=%d jit=%d eval=%d -> fc=%d\n",
++            script->filename() ? script->filename() : "?",
++            unsigned(script->lineno()), int(fam->state),
++            script->hasJitScript(), script->isForEval(), familyCompile);
++  }
+ 
+   // Size-scaled warmup: the per-function wasm COMPILE cost scales with bytecode
+   // length (big parser/framework fns cost 10-25ms to compile; tiny hot loops <1ms).
+@@ -943,7 +1204,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+   ++e.observes;
+   // Post-storm: stay in PBL until the IC warms polymorphic (overrides the warm-
+   // path bypass below, which would otherwise recompile early + monomorphic).
+-  if (e.recompileFloor && e.observes < e.recompileFloor) return false;
++  if (e.recompileFloor && e.observes < e.recompileFloor && !familyCompile)
++    return false;
+   uint32_t warm =
+       script->hasJitScript() ? script->jitScript()->warmUpCount() : 0;
+   static uint32_t kLoopWarm = 0;
+@@ -974,7 +1236,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+   // ARE net-positive to compile there. Size+call-count CANNOT distinguish gbemu's
+   // net-negative tiny handlers (net-negative because reached via MEGAMORPHIC fn-ptr
+   // dispatch) from richards' net-positive tiny methods. See gbemu memory.
+-  if (e.observes < e.nextTry && warm < kLoopWarm) return false;
++  if (e.observes < e.nextTry && warm < kLoopWarm && !familyCompile) return false;
+ 
+   // NOCOMPILE-lineno-range bisection (GECKO_WJ_NOCOMPILERANGE=lo,hi): refuse to
+   // compile any function whose script lineno is in [lo,hi] -> it runs in PURE PBL
+@@ -1023,7 +1285,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+       getenv("GECKO_WJ_DEFERSTRAND") ? uint32_t(atoi(getenv("GECKO_WJ_DEFERSTRAND")))
+                                      : 4096;
+   if (deferCompile && !gWJDrainingNow && e.fails == 0 &&
+-      e.state == WJEntry::State::Cold) {
++      e.state == WJEntry::State::Cold && !familyCompile) {
+     // Enqueue on first qualification; on EVERY later observe stay in PBL (return
+     // false) until the drain compiles it -- otherwise the 2nd observe would fall
+     // through to the inline compile and defeat the deferral.
+@@ -1054,6 +1316,12 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+   js::wasm::gWJForceGenericCmp = e.forceGenericCmp;  // generic compares (post-storm)
+   js::wasm::gWJForceGenericCall = e.forceGenericCall;  // generic call guards (post-storm)
+   gWJPendingOsrTargets.clear();  // backend appends OSR targets during this compile
++  bool savedShared = gWJSharedCompile;
++  gWJSharedCompile = familyCompile;
++  if (familyCompile && getenv("GECKO_WJ_FAMDBG"))
++    fprintf(stderr, "[wj-fam] shared-compile %s:%u\n",
++            script->filename() ? script->filename() : "?",
++            unsigned(script->lineno()));
+   // COMPILE-COST instrumentation (GECKO_WJ_COMPILESTAT): synchronous main-thread
+   // tier-up compile is on the load critical path -- a real-site load compiles
+   // MANY briefly-run functions and NEVER amortizes the compile (unlike octane's
+@@ -1068,6 +1336,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+   js::wasm::gWJForceMega = false;
+   js::wasm::gWJForceGenericCmp = false;
+   js::wasm::gWJForceGenericCall = false;
++  gWJSharedCompile = savedShared;
+   if (compileStat) {
+     double ms = (mozilla::TimeStamp::Now() - wjCompT0).ToMilliseconds();
+     // Per-compile (bytecode-length, ms) log to test emit super-linearity:
+@@ -1164,6 +1433,11 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+     } else {
+       e.nextTry = e.observes + (WarmupDelay() << e.fails);
+     }
++    // A shared-compile bail counts against the family: after a couple of
++    // representative failures the family stops trying (members still get the
++    // normal per-script path).
++    if (familyCompile && fam && ++fam->fails >= 2)
++      fam->state = WJFamily::State::Failed;
+     return false;
+   }
+   if (getenv("GECKO_WJ_PBLWHO"))
+@@ -1195,11 +1469,31 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+     e.directIdx = int(wasmhost_call(handle, -(e.memberIdx + 1), nullptr, 0));
+     if (e.directIdx <= 0) e.directIdx = -1;
+   }
++  if (familyCompile && fam) {
++    // Publish the artifact on the family: later same-source siblings alias this
++    // module via WJAliasInstall instead of compiling their own copy.
++    fam->state = WJFamily::State::Compiled;
++    fam->handle = e.handle;
++    fam->tblSlot = e.tblSlot;
++    fam->directIdx = e.directIdx;
++    fam->memberIdx = e.memberIdx;
++    fam->nargs = e.nargs;
++    fam->nlocals = e.nlocals;
++    fam->hasAlwaysBails = e.hasAlwaysBails;
++    fam->shapeDeoptDom = e.shapeDeoptDom;
++    fam->hasGggDeopts = e.hasGggDeopts;
++    fam->jitBody = e.jitBody;
++    fam->osrTargets = e.osrTargets;
++    fam->rep = script;
++    e.family = fam;
++  }
+   // Cohort queue: this freshly-installed fn joins the next fusion batch; when
+   // the batch reaches GECKO_WJ_COHORT members it is fused synchronously here.
++  // Shared-family artifacts are excluded: fusion rewrites tblSlot and sibling
++  // aliases would keep pointing at the stale per-module slot.
+   static int cohortMax =
+       getenv("GECKO_WJ_COHORT") ? atoi(getenv("GECKO_WJ_COHORT")) : 0;
+-  if (cohortMax > 0) {
++  if (cohortMax > 0 && !familyCompile) {
+     gWJCohortPending.push_back(script);
+     if (int(gWJCohortPending.size()) >= cohortMax) WJDrainCohort(cx);
+   }
+@@ -1336,6 +1630,17 @@ static bool WJStormDecision(WJEntry& e, JSScript* script) {
+         !noDeoptValve && !e.recompileDone)) {
+     return false;
+   }
++  // Alias entries borrow the family's slot, so the transition must not take it
++  // over with per-script code. Detach first (fresh slot on recompile) and
++  // charge the family; once the artifact accumulates enough storms no NEW
++  // sibling aliases it (existing aliases each keep their own valve).
++  if (e.family) {
++    WJFamily* fam = e.family;
++    fam->deopts += e.deopts;
++    e.family = nullptr;
++    e.tblSlot = -1;
++    if (fam->deopts >= 1000) fam->state = WJFamily::State::Failed;
++  }
+   // A storming fn with an alwaysBails block deopts from that COLD-IC block;
+   // recompiling reproduces it identically (verified: deltablue 741's recompiled
+   // MIR is byte-identical), so recompiling is pointless AND the recompile churn
+@@ -6932,6 +7237,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+   for (JSScript*& s : gWJDeferQueue) {
+     js::TraceRoot(trc, &s, "wjdeferq");
+   }
++  // Family representatives: keep the script the shared artifact was compiled
++  // from live + pointer-current. It is both the member-compat gcthing
++  // reference and the owner of every gcthing cell baked into the artifact.
++  if (gFamilies) {
++    for (auto& kv : *gFamilies) {
++      if (kv.second.rep) js::TraceRoot(trc, &kv.second.rep, "wjfamrep");
++    }
++  }
+   for (JSScript*& s : gWJCohortPending) {
+     js::TraceRoot(trc, &s, "wjcohortq");
+   }
