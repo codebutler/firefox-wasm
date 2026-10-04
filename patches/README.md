@@ -438,3 +438,48 @@ and survives).
   per worker realm at first wasmhost_instantiate: a wasm fn with a fat frame
   (96 f64 locals, ~860B real > thin JIT frames) recurses until the host
   RangeErrors, then sets limit = depth * 800 * 0.6 clamped [200000, 2800000].
+
+## 0006-windowless-window-provider.patch
+
+`WebBrowserChrome2Stub` gains `nsIWindowProvider`: `_blank` links and
+`window.open` in the windowless browser hit `nsIWindowWatcher` with no
+provider and no `mWindowCreator` -> `NS_ERROR_FAILURE` before the
+`browser.link.open_newwindow` pref is ever consulted. The provider returns
+the browser's own docshell with `aWindowIsNew=false`, so the load lands in
+the current window (no opener assertion, no resize path). Combined with
+`browser.link.open_newwindow=1` + `browser.link.open_newwindow.restriction=0`
+in embed-init prefs.
+
+## 0007-wasmjit-depth-suspend.patch
+
+Fixes two recursion-guard bugs and turns depth overflow into a delegated
+PBL subtree instead of a throw.
+
+- **Placement bug (the real x.com crasher)**: EmitDepthCheck was invoked in
+  EmitBlockBody "at the first block", but the dispatch-loop emitter walks
+  MIR blocks in REVERSE RPO (`bi = n-1-ri`), so the guard landed in a
+  terminal return pad and never ran on entry. Verified: `DEPTHLIMIT=0`
+  still recursed to the host stack limit inside `wasm-function[1]`.
+  EmitDepthCheck now runs in the straight-line PROLOGUE (after the GGG/argc
+  entry checks, before the env-root push), covering single-block, relooper
+  and dispatch bodies plus the OSR trampoline re-entry. The refusal arms no
+  longer pop env roots (nothing is pushed yet at that point).
+- **Suspend latch**: overflow no longer throws or returns flag 2.0 (GGG
+  accounting would misfire). It restores gWJJitDepth, min-updates
+  `gWJSuspendWatermark`, and returns a dedicated flag 3.0. Every JS->WJ edge
+  (PreCall, ObserveCall, RunCall, WJH_CALL fast path, OSR resume, ctor
+  caches) refuses while `gWJJitDepth >= watermark`, so the delegated subtree
+  runs entirely in PBL; the latch self-clears when the delegating wasm
+  frames unwind (EmitDepthPop drops below the watermark) and RunCall clears
+  it at depth 0. Callsite flag compares became `flag < 2.0` so 2 and 3 both
+  take the slow path; flag 3 never increments gggDeopts.
+- `GECKO_WJ_DEPTHLIMIT` now tests env PRESENCE (0 previously fell back to
+  the default, masking refusal paths in tests). `GECKO_WJ_DEPTHTHROW` keeps
+  the old throw mode. New env-gated diagnostic helper kind 253
+  (`GECKO_WJ_SUSDBG`, prints refusals); kind 250 was already WJH_TRACE's.
+
+Verified locally (embed build): try/finally self-recursion and plain
+recursion both delegate and complete (fin(2600), f(3000)-4500); truly
+excessive recursion throws catchable InternalError (PBL quota) and the
+process survives. Octane richards 4092 vs 4254 unguarded (~4% worst-case
+entry cost); earley/splay/deltablue unchanged-correct.
