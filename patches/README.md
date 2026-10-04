@@ -357,3 +357,16 @@ wiki:dom ~1020 -> ~971ms, all MICROSUM-verified).
   section) -- the experimented name-section emit was reverted.
 - gczeal=2/7/11 MICROSUM-consistent; the earlier zeal=14 storm-recompile
   crash no longer reproduces after the PIC purge.
+
+### E. wj-nobs debug-map dangling JSScript* (browser crash fix)
+
+The RunScript-hook debug map (`[wj-nobs]`, active unless GECKO_WJ_NOBSDBG)
+kept raw JSScript* keys and dereferenced them (`filename()`/`lineno()`) in
+the every-500k-calls fprintf. Scripts are GC'd between evals, so on
+multi-workload pages (site suite running search+dom+lodash in one engine)
+the print walked freed memory -> "memory access out of bounds" trap in
+BOTH arms (PBL arm included: hooks still run, entries just never compile).
+Reproduced on the v0.0.6 release gecko.js; absent with GECKO_WJ_NOBSDBG=1.
+Fix: resolve filename/line/name eagerly at insertion; the print reads only
+the stored string. (Also explains the earlier embed sighting of the same
+trap shape.)

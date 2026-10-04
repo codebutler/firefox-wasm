@@ -12,10 +12,10 @@ index 88012d36c0..6f86e1bb18 100644
    static constexpr uint8_t ShapeHashShift2 =
        ShapeHashShift1 + mozilla::FloorLog2(NumEntries);
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
-index d3ec33f213..be59e1e793 100644
+index d3ec33f213..c89a896645 100644
 --- a/js/src/vm/Interpreter.cpp
 +++ b/js/src/vm/Interpreter.cpp
-@@ -470,6 +470,71 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+@@ -470,6 +470,81 @@ bool js::RunScript(JSContext* cx, RunState& state) {
      }
    });
  
@@ -43,10 +43,22 @@ index d3ec33f213..be59e1e793 100644
 +          auto& slot = perFn[state.script()];
 +          slot.first++;
 +          if (noDbg && slot.second.empty()) {
++            // The JSScript* key may dangle by print time (script GC'd), so
++            // resolve every display field eagerly now and never dereference
++            // the key later.
++            char buf[512];
++            snprintf(buf, sizeof(buf), "%s:%u",
++                     state.script()->filename() ? state.script()->filename()
++                                              : "?",
++                     unsigned(state.script()->lineno()));
++            slot.second = buf;
 +            JSAtom* nm = wjFun->rawAtom();
 +            if (nm) {
 +              auto ps = js::AtomToPrintableString(cx, nm);
-+              if (ps) slot.second = ps.get();
++              if (ps) {
++                slot.second += " ";
++                slot.second += ps.get();
++              }
 +            }
 +          }
 +        }
@@ -59,9 +71,7 @@ index d3ec33f213..be59e1e793 100644
 +                            v.end(),
 +                            [](auto& a, auto& b) { return a.second > b.second; });
 +          for (size_t i = 0; i < std::min<size_t>(v.size(), 6); i++)
-+            fprintf(stderr, "  #%zu %s:%u %s n=%llu\n", i,
-+                    v[i].first->filename() ? v[i].first->filename() : "?",
-+                    unsigned(v[i].first->lineno()),
++            fprintf(stderr, "  #%zu %s n=%llu\n", i,
 +                    perFn[v[i].first].second.c_str(),
 +                    (unsigned long long)v[i].second);
 +        }
