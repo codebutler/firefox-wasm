@@ -2,6 +2,7 @@
 // minimal embedding needs, plus all the runtime prefs/services XRE_main would set.
 // Split from the monolithic embed-xul.cpp. See embed-xul.h.
 #include "embed-xul.h"
+#include "nsIBrowserDOMWindow.h"
 #include "nsUserIdleService.h"
 #include "mozilla/GenericFactory.h"
 #include "mozilla/ModuleUtils.h"
@@ -492,6 +493,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
     mozilla::Preferences::SetBool(
         "security.data_uri.block_toplevel_data_uri_navigations", false);
     printf("xul_init: allowed top-level data: navigations\n");
+
+    // Single-window embedding: there is no nsIWindowProvider to create a second
+    // browsing context, so target=_blank links and window.open() were silently
+    // dropped. Divert them into the current docshell instead: open_newwindow=1
+    // (OPEN_CURRENTWINDOW) makes WindowWatcher load the URI in-place, and
+    // restriction=0 applies that to window.open calls even when they carry
+    // window features. Net effect: _blank/window.open behave like same-tab nav.
+    mozilla::Preferences::SetInt("browser.link.open_newwindow",
+                                 nsIBrowserDOMWindow::OPEN_CURRENTWINDOW);
+    mozilla::Preferences::SetInt("browser.link.open_newwindow.restriction", 0);
+    printf("xul_init: diverted _blank/window.open to current window\n");
 
     // Force IPv4: emscripten SOCKFS builds its WebSocket URL as ws://addr:port and
     // parses it with a regex that can't handle the colons in an IPv6 literal, so an
