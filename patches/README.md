@@ -569,3 +569,27 @@ all verified. Octane + realapp suites: no family ever activates there (no
 refCount>=3 sd), results unchanged. jit-test function/eval/arguments
 subset: 36 failures, ALL identical with GECKO_WJ_NOFAMILY=1 (pre-existing
 embed gaps -- no decompileFunction/drainJobQueue/Debugger/module loader).
+
+## 0009-wasmjit-pbl-deeper-stack.patch
+
+x.com verification of the 0007 suspend latch showed delegation WORKS
+(`[wj-sus]` fires, watermark latches, engine survives -- the old failure was
+an uncatchable V8 RangeError killing the app pthread) but the delegated
+sentry-filter recursion then hits PBL's own quota and the React onboarding
+still doesn't mount. Root cause of that quota: `PortableBaselineStack` is a
+fixed 512KB heap region; each delegated frame costs ~120B of StackVal, so a
+delegated subtree dies at ~4359 frames even though PBL frames are heap, not
+native stack.
+
+- `DEFAULT_SIZE` 512KB -> 4MB. Measured (embed, NOWASMJIT): plain-recursion
+  quota 4359 -> 34943 frames; host-boundary recursion (nested
+  `Array.prototype.map` callbacks) 1167 -> 9359 levels -- the shadow stack is
+  per-runtime shared, so nested PBL entries accumulate on it too.
+- `GECKO_PBL_STACKKB=<kb>` overrides the size at JSRuntime init for tests
+  (512 -> 4359 frames, 8192 -> 69895; linear).
+- WJ path verified end-to-end: suspend watermark delegates at the depth cap
+  and the PBL subtree now completes 20000-deep recursion (was ~4300).
+  Over-quota still throws catchable InternalError; family tests all pass.
+
+Cost: js_calloc commits the 4MB inside wasm linear memory per JSRuntime --
+bounded and trivial next to the engine heap.

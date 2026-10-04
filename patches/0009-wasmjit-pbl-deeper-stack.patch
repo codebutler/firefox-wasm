@@ -1,0 +1,35 @@
+diff --git a/js/src/vm/Stack.h b/js/src/vm/Stack.h
+index 697a8c7804..d8e4adfd3b 100644
+--- a/js/src/vm/Stack.h
++++ b/js/src/vm/Stack.h
+@@ -984,17 +984,26 @@ inline bool FillArgumentsFromArraylike(JSContext* cx, Args& args,
+ 
+ #ifdef ENABLE_PORTABLE_BASELINE_INTERP
+ struct PortableBaselineStack {
+-  static const size_t DEFAULT_SIZE = 512 * 1024;
++  static const size_t DEFAULT_SIZE = 4 * 1024 * 1024;
+ 
+   void* base;
+   void* top;
+ 
+   bool valid() { return base != nullptr; }
+ 
++  // The 512KB default gave ~4.3k frames of plain PBL recursion -- too small
++  // for real-site deep recursion delegated from WJ (x.com's sentry-filter
++  // needs several thousand frames past the WJ suspend watermark). This is
++  // heap, not native stack: oversized it only wastes linear-memory pages.
++  // GECKO_PBL_STACKKB overrides for tests.
+   PortableBaselineStack() {
+-    base = js_calloc(DEFAULT_SIZE);
+-    top = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(base) +
+-                                  DEFAULT_SIZE);
++    size_t size = DEFAULT_SIZE;
++    if (const char* s = getenv("GECKO_PBL_STACKKB")) {
++      unsigned long kb = strtoul(s, nullptr, 10);
++      if (kb >= 256 && kb <= 262144) size = size_t(kb) * 1024;
++    }
++    base = js_calloc(size);
++    top = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(base) + size);
+   }
+   ~PortableBaselineStack() { js_free(base); }
+ };
