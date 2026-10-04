@@ -89,8 +89,38 @@ mergeInto(LibraryManager.library, {
     else HEAPU8.set(hb.subarray(0, n), mir.ptr);
   },
 
-  wasmhost_instantiate__deps: ['$whSyncMem'],
+  // Host wasm-stack calibration for the JIT recursion guard. Compiled JIT fns
+  // bump gWJJitDepth by a per-frame byte estimate and throw a catchable
+  // over-recursion once past gWJJitDepthLimit -- but the real host wasm stack is
+  // not knowable statically (V8 worker ~1MB here, differs across browsers), and
+  // a too-high constant means deep JIT recursion dies on the host's uncatchable
+  // RangeError instead of throwing (x.com killed the engine this way). This
+  // probes the real limit once per worker realm: a wasm fn with a fat frame
+  // (96 f64 locals ~= 860B, fatter than a thin JIT fn) recurses until the host
+  // RangeErrors; the measured depth times the JIT frame charge (800B floor)
+  // times 0.6 becomes the budget.
+  $wjProbeStack: function () {
+    if (typeof WebAssembly === 'undefined' || !Module._wj_set_depth_limit) return;
+    try {
+      var bin = atob('AGFzbQEAAAABBQFgAAF/AwMCAAAGBgF/AUEACwcJAgFyAAABZAABCrUIAq0IAWB8IwBBAWokAEQAAAAAAAAAACEARAAAAAAAAAAAIQFEAAAAAAAAAAAhAkQAAAAAAAAAACEDRAAAAAAAAAAAIQREAAAAAAAAAAAhBUQAAAAAAAAAACEGRAAAAAAAAAAAIQdEAAAAAAAAAAAhCEQAAAAAAAAAACEJRAAAAAAAAAAAIQpEAAAAAAAAAAAhC0QAAAAAAAAAACEMRAAAAAAAAAAAIQ1EAAAAAAAAAAAhDkQAAAAAAAAAACEPRAAAAAAAAAAAIRBEAAAAAAAAAAAhEUQAAAAAAAAAACESRAAAAAAAAAAAIRNEAAAAAAAAAAAhFEQAAAAAAAAAACEVRAAAAAAAAAAAIRZEAAAAAAAAAAAhF0QAAAAAAAAAACEYRAAAAAAAAAAAIRlEAAAAAAAAAAAhGkQAAAAAAAAAACEbRAAAAAAAAAAAIRxEAAAAAAAAAAAhHUQAAAAAAAAAACEeRAAAAAAAAAAAIR9EAAAAAAAAAAAhIEQAAAAAAAAAACEhRAAAAAAAAAAAISJEAAAAAAAAAAAhI0QAAAAAAAAAACEkRAAAAAAAAAAAISVEAAAAAAAAAAAhJkQAAAAAAAAAACEnRAAAAAAAAAAAIShEAAAAAAAAAAAhKUQAAAAAAAAAACEqRAAAAAAAAAAAIStEAAAAAAAAAAAhLEQAAAAAAAAAACEtRAAAAAAAAAAAIS5EAAAAAAAAAAAhL0QAAAAAAAAAACEwRAAAAAAAAAAAITFEAAAAAAAAAAAhMkQAAAAAAAAAACEzRAAAAAAAAAAAITREAAAAAAAAAAAhNUQAAAAAAAAAACE2RAAAAAAAAAAAITdEAAAAAAAAAAAhOEQAAAAAAAAAACE5RAAAAAAAAAAAITpEAAAAAAAAAAAhO0QAAAAAAAAAACE8RAAAAAAAAAAAIT1EAAAAAAAAAAAhPkQAAAAAAAAAACE/RAAAAAAAAAAAIUBEAAAAAAAAAAAhQUQAAAAAAAAAACFCRAAAAAAAAAAAIUNEAAAAAAAAAAAhREQAAAAAAAAAACFFRAAAAAAAAAAAIUZEAAAAAAAAAAAhR0QAAAAAAAAAACFIRAAAAAAAAAAAIUlEAAAAAAAAAAAhSkQAAAAAAAAAACFLRAAAAAAAAAAAIUxEAAAAAAAAAAAhTUQAAAAAAAAAACFORAAAAAAAAAAAIU9EAAAAAAAAAAAhUEQAAAAAAAAAACFRRAAAAAAAAAAAIVJEAAAAAAAAAAAhU0QAAAAAAAAAACFURAAAAAAAAAAAIVVEAAAAAAAAAAAhVkQAAAAAAAAAACFXRAAAAAAAAAAAIVhEAAAAAAAAAAAhWUQAAAAAAAAAACFaRAAAAAAAAAAAIVtEAAAAAAAAAAAhXEQAAAAAAAAAACFdRAAAAAAAAAAAIV5EAAAAAAAAAAAhXxAACwQAIwAL');
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      var inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+      try { inst.exports.r(); } catch (e) {}
+      var depth = inst.exports.d() | 0;
+      if (depth < 50) return;
+      var limit = Math.floor(depth * 800 * 0.6);
+      limit = Math.max(200000, Math.min(2800000, limit));
+      Module._wj_set_depth_limit(limit);
+    } catch (e) {}
+  },
+
+  wasmhost_instantiate__deps: ['$whSyncMem', '$wjProbeStack'],
   wasmhost_instantiate: function (h, callbackIdsPtr, importCount) {
+    if (!globalThis.__wjStackProbed) {
+      globalThis.__wjStackProbed = 1;
+      wjProbeStack();
+    }
     try {
       var r = globalThis.__whReg && globalThis.__whReg[h];
       if (!r) return -1;

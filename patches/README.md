@@ -417,3 +417,24 @@ GuardShape deopts; guarded-operand MIR op + expected-shape keys at emit.
 Measured: vibey:jsparse 11787 -> ~5250ms/iter (fold; ~2.2x, PBL 9-10s);
 vibeyboot 8406 -> ~350-675ms/iter vs PBL ~340-880. MICROSUM/JSSCORE
 identical; micro suite + wiki trio no regressions.
+
+## 0005-wasmjit-depth-limit-calibration.patch
+
+JIT'd JS recursion killed the engine on x.com: gWJJitDepth's guard existed but
+its 2.5MB byte limit was baked ABOVE V8's real ~1MB wasm call stack, so deep
+recursion hit the host's uncatchable RangeError (`wasm-function[1]` self-call
+loop) instead of the catchable ReportOverRecursed throw, killing the app
+pthread outright (probe: JIT f(3000) dead; PBL f(500000) throws InternalError
+and survives).
+
+- gWJJitDepthLimit becomes a runtime-mutable global (default 480000 -> <=600
+  frames of any guarded fn even uncalibrated). EmitDepthCheck loads it per
+  entry instead of baking the const; GECKO_WJ_DEPTHLIMIT still bakes an
+  override and disables calibration.
+- Per-frame charge gets a floor: fb = max(frameBytesEst, 800). The estimate
+  misses operand-stack slots, so real V8 Liftoff frames run ~700B+ even for
+  tiny fns; without the floor thin fns under-charge and the guard fires late.
+- wj_set_depth_limit export; wasm-host-bridge probes the real host stack once
+  per worker realm at first wasmhost_instantiate: a wasm fn with a fat frame
+  (96 f64 locals, ~860B real > thin JIT frames) recurses until the host
+  RangeErrors, then sets limit = depth * 800 * 0.6 clamped [200000, 2800000].
