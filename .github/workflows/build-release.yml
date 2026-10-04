@@ -147,7 +147,7 @@ jobs:
       - name: Compute the engine objdir cache key (hosted)
         if: env.IS_HOSTED == 'true'
         run: |
-          KEY="engine-objdir-${{ hashFiles('Makefile','mozconfig.full.emscripten','em_config','vendor-std-deps.py','patches/**','gecko.js/relink-engine-r.sh','gecko.js/patch-emsdk-wasmfs.mjs','gecko.js/emsdk-patches/**') }}-patches1-emsdk${EMSDK_VERSION}-rust${RUST_VERSION}"
+          KEY="engine-objdir-${{ hashFiles('Makefile','mozconfig.full.emscripten','em_config','vendor-std-deps.py','patches/**','gecko.js/relink-engine-r.sh','gecko.js/patch-emsdk-wasmfs.mjs','gecko.js/emsdk-patches/**') }}-patches2-emsdk${EMSDK_VERSION}-rust${RUST_VERSION}"
           echo "ENGINE_CACHE_KEY=$KEY" >> "$GITHUB_ENV"
           echo ">> ENGINE_CACHE_KEY=$KEY"
 

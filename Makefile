@@ -120,8 +120,10 @@ release:
 # `git apply --check` succeeding means "not applied yet, and applies cleanly"; failing means
 # "already applied, or the tree diverged" -- in that case the patch is skipped rather than
 # failing, so a dev tree with WIP edits is never clobbered. That skip is exactly why the
-# result is then verified: the tree must equal `pin + patches` (each patch reverse-applies),
-# otherwise make FAILS instead of silently shipping the baseline JIT. Escape hatches:
+# result is then verified: the tree must equal `pin + patches`. Because stacked patches may
+# edit lines earlier patches added (an independent `--reverse --check` then always fails),
+# verification reverse-applies the series in reverse order and requires the tree to return
+# to the pristine pin, then re-applies forward to restore it. Escape hatches:
 #   FORCE_PATCH=1  reset firefox/ to the pin and re-apply all patches cleanly
 #   PATCH_STRICT=0 accept a verified-clean failure (dev tree with WIP edits)
 $(PATCH_STAMP): $(PATCH_SRC) firefox/.git
@@ -139,7 +141,15 @@ $(PATCH_STAMP): $(PATCH_SRC) firefox/.git
 	  done; \
 	fi
 	@ok=1; for p in $(PATCH_SRC_R); do \
-	  git -C firefox apply --reverse --check "$$p" >/dev/null 2>&1 || ok=0; \
+	  git -C firefox apply --reverse "$$p" >/dev/null 2>&1 || { ok=0; break; }; \
+	done; \
+	if [ "$$ok" = "1" ]; then \
+	  git -C firefox diff --quiet && \
+	    [ -z "$$(git -C firefox status --porcelain | head -1)" ] || ok=0; \
+	fi; \
+	for p in $(PATCH_SRC); do \
+	  git -C firefox apply --check "$$p" >/dev/null 2>&1 && \
+	    git -C firefox apply "$$p" || true; \
 	done; \
 	if [ "$$ok" = "1" ]; then \
 	  echo ">> engine patches verified: firefox/ == pinned revision + patches/*.patch"; \

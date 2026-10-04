@@ -306,3 +306,54 @@ runs and `e.deopts` stayed ~0 (entry showed 2 while site-hist saw 199k).
 - Measured: synthetic 8-closure repro 7463 -> 972ms (7.7x, SINK identical,
   sitehist silent); wiki:dom 3803 -> 2135ms/iter (1.78x, MICROSUM OK);
   micro --ab all OK; octane deltablue/richards/splay healthy.
+
+## 0003-wasmjit-storm-and-callback-fixes.patch
+
+Delta between `pin + 0000 + 0001 + 0002` and the work tree: the site-workload
+deopt-storm fixes and the remaining megamorphic/inline-cache work (see
+artifacts/results.md for full measurements; wiki:lodash ~336 -> ~230ms,
+wiki:dom ~1020 -> ~971ms, all MICROSUM-verified).
+
+### A. Deopt-storm attribution + PIC invalidation
+
+- Contained (JIT->JIT callee) deopts were charged to the CALLER entry:
+  callers of lodash's `compareAscending` stormed -> Failed -> 482k calls/run
+  stayed PBL forever (~28% of profile). Deopts are now attributed to the
+  outermost resume frame's script (`gWJResumeScriptPtr[nframes-1]`), and the
+  storm decision runs on that entry.
+- `WJPurgeCallICs(e)` on every Cold/Failed transition (storm valve AND gsf
+  valve -- its absence there let stale PIC ways drive a hidden 27.5k-event
+  GuardSpecificFunction storm on wiki:dom). Without the purge, callers keep
+  invoking the dead module forever.
+- Result: lodash deopts 4200 -> 300, failed 2 -> 0, perIter ~336 -> ~274ms.
+
+### B. Native->JS RunScript observation hook + interpreter-only gate
+
+- `js::RunScript` observes interpreted callees and routes them through
+  `WasmJitRunCall` once compiled -- native callbacks (array_sort comparator)
+  no longer stay PBL forever. `GECKO_WJ_NONATIVEOBS=1` disables.
+- `WasmJitObserveCall`/`WasmJitPreCall` now reject `hasForceInterpreterOp()`,
+  `isGenerator()`, `isAsync()` scripts: WJ-compiling self-hosted
+  `InterpretGeneratorResume` caused infinite wasm<->host recursion
+  (V8 stack overflow) via its JSOp::Resume -> jit::InterpretResume ->
+  CallSelfHostedFunction -> hook loop.
+
+### C. Megamorphic probes + inline cache work
+
+- Store-side `EmitByValMegaStoreProbe`: dense in-bounds writes, SetPropCache
+  atom-key hits, add-prop (newCapacity==0, no incremental marking), array
+  extension append; site5 fills via `SetElementMegamorphic<true>`.
+  SETPROP helpers 2.4M -> ~100k/run.
+- Nursery bump-alloc for WJH_NEWCALLOBJ + WJH_LAMBDA (3.1M -> 253, 1.7M -> 88).
+- Bounded (K=8) string-equality inline compare: COMPARE helpers 8M -> ~1.
+- Script-keyed call IC + wasm-side fun_call unwrap: closures sharing a
+  JSScript hit the same PIC way (megamorphic iteratee sites 0 hits ->
+  ~1-2M hits/run); lodash ~2.4x, wiki:dom ~1.3x on top of prior work.
+- WJTryNativeFast: Set/Map iterator intrinsics inline via jitInfo().
+
+### D. Misc
+
+- V8 `--perf-basic-prof` names wasm by function index (ignores the name
+  section) -- the experimented name-section emit was reverted.
+- gczeal=2/7/11 MICROSUM-consistent; the earlier zeal=14 storm-recompile
+  crash no longer reproduces after the PIC purge.
