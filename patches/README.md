@@ -370,3 +370,50 @@ Reproduced on the v0.0.6 release gecko.js; absent with GECKO_WJ_NOBSDBG=1.
 Fix: resolve filename/line/name eagerly at insertion; the print reads only
 the stored string. (Also explains the earlier embed sighting of the same
 trap shape.)
+
+## 0004-wasmjit-vibey-shape-fold.patch
+
+Delta between `pin + 0000 + 0001 + 0002 + 0003` and the work tree: the
+vibey-clover (three.js game bundle) deopt-storm fixes. All verified on the
+site bench suite (bench/site, `run.sh vibey`/`wiki`); every vibey workload
+now beats PBL (vibeyboot 0.37x -> 1.31x, jsparse 1.28x, frame3d 9.4x).
+
+### A. Unsigned-right-shift result typing (mulberry32/LCG PRNG storm)
+
+`x >>> 0` (or any shift whose count can be 0 mod 32) can produce a bit31-set
+result whose true JS value is a Double, but MIR typed MUrsh Int32 and the
+deopt->resume path never updates the IC -- so the function deopted on ~every
+call forever (three.js's PRNG runs every frame). Post-OptimizeMIR MIR pass
+flips such MUrsh to Double (dblUrsh path: i32.shr_u -> f64.convert_i32_u)
+and wraps non-Int32 bitop operands in MTruncateToInt32 (Ion lowers these at
+the LIR operand-policy layer, which WJ does not have).
+
+### B. Proxy ops (GuardIsProxy / GuardIsNotDOMProxy / ProxyGet / ProxySet)
+
+GuardIsProxy: inline clasp->JSCLASS_IS_PROXY check. GuardIsNotDOMProxy:
+ProxyData handler -> BaseProxyHandler::mFamily vs baked
+GetDOMProxyHandlerFamily(). MProxyGet[ByValue] -> WJH helpers calling
+js::ProxyGetProperty[ByValue]; MProxySet[ByValue] likewise (site bit0 =
+strict). vibeyboot now compiles clean: failed=0, zero unsupported ops.
+
+### C. Compile-time cold stub folding (acorn Parser lazy-prop storm)
+
+Acorn's Parser adds `inTemplateElement` lazily mid-parse (one-way shape
+transition S3->S4). Compiled methods bake whichever shape is firstStub, but
+the IC's older stub keeps enteredCount=0 after the attach reset, so
+TryFoldingStubs (numActive==0 gate) never folds and the transpiler bakes a
+single shape -> perpetual oscillating storm as each parse() creates a fresh
+S3 parser. `TryFoldingStubs{,Locked}` gains a `foldCold` flag (default off);
+maybeInlineIC passes true (GECKO_WJ_NOCOLDFOLD kills). Folds zero-entered
+stubs whose chain differs only in a WeakShape field -> GuardMultipleShapes
+-> MGuardShapeList (already lowered). Coverage superset, always safe.
+
+### D. Diagnostics (all env-gated)
+
+GECKO_WJ_ICDBG2=<line>: per-stub dump at compile time (stub shapes + last
+prop key). GECKO_WJ_GSRT/THISDBG/GSDUMP: expected-vs-actual shape on
+GuardShape deopts; guarded-operand MIR op + expected-shape keys at emit.
+
+Measured: vibey:jsparse 11787 -> ~5250ms/iter (fold; ~2.2x, PBL 9-10s);
+vibeyboot 8406 -> ~350-675ms/iter vs PBL ~340-880. MICROSUM/JSSCORE
+identical; micro suite + wiki trio no regressions.
