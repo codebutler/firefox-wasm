@@ -1,0 +1,30 @@
+gecko.js/select-bridge.test.mjs
+  s_6e03fa3fb4523e::t_0587c0a5d92cb7 32
+  s_6e03fa3fb4523e::t_4c3ddccbe47a54 17,28-29,33-34,37,52,74-80,82-89
+  s_6e03fa3fb4523e::t_320495dfa1bfe5 81
+  s_6e03fa3fb4523e::t_19132c702dbfc6 90-91
+gecko.js/chrome/EmbedSelect.sys.mjs
+  s_6e03fa3fb4523e::t_0587c0a5d92cb7 36
+  s_6e03fa3fb4523e::t_9d93b15edab725 25-26,31,40,46,133-134
+  s_6e03fa3fb4523e::t_bdfd4eb3c7b5af 114-119,121-132
+  s_6e03fa3fb4523e::t_320495dfa1bfe5 120
+  s_6e03fa3fb4523e::t_9ddd7d2066cd23 9-12,21-24,29,37,69,74-78,86
+gecko.js/src/embed-browser.cpp
+  s_6e03fa3fb4523e::t_0587c0a5d92cb7 8,239-243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "20b55be50f5fe0c2adef6ed83b51ed25361dca36",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
