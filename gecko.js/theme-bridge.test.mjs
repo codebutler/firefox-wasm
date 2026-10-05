@@ -19,7 +19,11 @@ function bridge() {
     Ci: { nsIStyleSheetService: {} },
     Services: {
       io: { newURI: uri => uri },
-      prefs: { setIntPref: (...args) => preferences.push(args) },
+      prefs: {
+        setIntPref: (...args) => preferences.push(args),
+        setCharPref: (...args) => preferences.push(args),
+        clearUserPref: name => preferences.push([name]),
+      },
     },
   });
   vm.runInContext(readFileSync(new URL('./chrome/EmbedTheme.sys.mjs', import.meta.url), 'utf8')
@@ -69,4 +73,16 @@ test('invalid or failed replacements preserve the existing sheet and popup', () 
   assert.equal(b.calls.length, 1);
   assert.equal(popup.textContent, blue.popupCss);
   assert.equal(b.preferences.length, 1);
+});
+
+test('system selection colors update independently and clear when removed', () => {
+  const b = bridge();
+  b.set({ ...blue, selection: { background: '#ddeeff', text: '#223344' } });
+  b.set({ ...blue, selection: { background: '#ddeeff', text: '#334455' } });
+  assert.equal(b.calls.length, 1);
+  assert.deepEqual(b.preferences.filter(([name]) => name === 'ui.selecteditemtext'),
+    [['ui.selecteditemtext', '#223344'], ['ui.selecteditemtext', '#334455']]);
+  assert.throws(() => b.set({ ...blue, selection: { background: 'bad', text: '#334455' } }), /Invalid embedding selection/);
+  b.set(blue);
+  assert.ok(b.preferences.some(([name, value]) => name === 'ui.selecteditem' && value === undefined));
 });

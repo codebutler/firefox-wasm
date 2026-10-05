@@ -62,6 +62,9 @@ The UTF-8 JSON payload must be smaller than 65,536 bytes. The theme command runs
 in a privileged module, separately from `evalChrome()` (which, despite its old
 name, evaluates in the content realm). Native controls and their DOM state are
 preserved; theming does not substitute host DOM widgets for page controls.
+Optional `selection: { background: '#rrggbb', text: '#rrggbb' }` supplies native
+selection system colors, including listboxes whose UA rules intentionally use
+`!important`. Omitting it on a later call restores the default selection palette.
 
 ## Building
 
