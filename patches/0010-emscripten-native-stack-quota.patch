@@ -1,0 +1,52 @@
+diff --git a/js/xpconnect/src/XPCJSContext.cpp b/js/xpconnect/src/XPCJSContext.cpp
+index 6698b86bda..d02e7efbc0 100644
+--- a/js/xpconnect/src/XPCJSContext.cpp
++++ b/js/xpconnect/src/XPCJSContext.cpp
+@@ -52,6 +52,10 @@
+ #include "js/Prefs.h"
+ #include "js/WasmFeatures.h"
+ #include "fmt/format.h"
++#if defined(__EMSCRIPTEN__)
++#  include <emscripten/stack.h>
++#  include <stdlib.h>
++#endif
+ #include "mozilla/dom/BindingUtils.h"
+ #include "mozilla/dom/ContentChild.h"
+ #include "mozilla/dom/Document.h"
+@@ -1359,6 +1363,21 @@ nsresult XPCJSContext::Initialize() {
+   const size_t kUncappedStackQuota =
+       kDefaultStackQuota + kDefaultStackQuota / 2;
+   const size_t kTrustedScriptBuffer = sizeof(size_t) * 12800;
++#elif defined(__EMSCRIPTEN__)
++  // The wasm C stack is emscripten's linear-memory stack, sized at link time
++  // (64MB for this build). The catch-all kDefaultStackQuota (512KB on wasm32)
++  // would cap host-boundary JS recursion at under 1% of the real stack, so
++  // derive the quota from the actual region. GECKO_NATIVE_QUOTAMB overrides.
++  const size_t kUncappedStackQuota = [] {
++    if (const char* env = getenv("GECKO_NATIVE_QUOTAMB"); env && *env) {
++      return size_t(strtoul(env, nullptr, 10)) * 1024 * 1024;
++    }
++    uintptr_t stackBase = emscripten_stack_get_base();
++    uintptr_t stackEnd = emscripten_stack_get_end();
++    size_t stackSize = stackBase > stackEnd ? size_t(stackBase - stackEnd) : 0;
++    return std::max(stackSize / 2, kDefaultStackQuota);
++  }();
++  const size_t kTrustedScriptBuffer = 1024 * 1024;
+ #else
+   // Catch-all configuration for other environments.
+ #  if defined(DEBUG)
+@@ -1379,7 +1398,14 @@ nsresult XPCJSContext::Initialize() {
+   // See bug 1537609 and bug 1562700.
+   const size_t kStackQuotaCap =
+       StaticPrefs::javascript_options_main_thread_stack_quota_cap();
++#if defined(__EMSCRIPTEN__)
++  // The 2MB web-compat cap targets 1-8MB native stacks; the wasm stack is the
++  // link-time-sized linear-memory region (64MB), so the stack-derived uncapped
++  // quota applies directly. The pref is honored when it is set larger.
++  const size_t kStackQuota = std::max(kUncappedStackQuota, kStackQuotaCap);
++#else
+   const size_t kStackQuota = std::min(kUncappedStackQuota, kStackQuotaCap);
++#endif
+ 
+   JS_SetNativeStackQuota(
+       cx, kStackQuota, kStackQuota - kSystemCodeBuffer,

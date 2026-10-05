@@ -593,3 +593,30 @@ native stack.
 
 Cost: js_calloc commits the 4MB inside wasm linear memory per JSRuntime --
 bounded and trivial next to the engine heap.
+
+## 0010-emscripten-native-stack-quota.patch
+
+x.com verification after 0007+0009 showed suspend delegation works and the
+PBL shadow stack is no longer the wall, but `sentry-filter` still dies with a
+catchable `InternalError: too much recursion` before React mounts. Root cause:
+`XPCJSContext::Initialize` falls into the catch-all quota branch because
+`canonical_os` for wasm targets is `EMSCRIPTEN`, not `XP_LINUX`. That sets
+`kUncappedStackQuota = kDefaultStackQuota` = 512KB on wasm32, so untrusted
+content JS gets only ~452KB of the 64MB linear-memory stack -- measured
+~9469 host-boundary recursion levels before the quota error. The pref cap
+(2MB) cannot help since it only lowers the quota.
+
+- New `#elif defined(__EMSCRIPTEN__)` branch derives the uncapped quota from
+  the real region: `(emscripten_stack_get_base - emscripten_stack_get_end)/2`
+  (32MB with `STACK_SIZE=64MB`), floored at `kDefaultStackQuota`.
+  `GECKO_NATIVE_QUOTAMB=<mb>` overrides at runtime.
+- `kTrustedScriptBuffer` = 1MB so untrusted script keeps ~31MB.
+- `kStackQuota`: the 2MB web-compat cap assumes 1-8MB native stacks; on
+  emscripten it becomes `max(uncapped, cap)` so the pref can only raise the
+  quota, never squeeze it below the derived value.
+- `StaticPrefList.yaml` is NOT conditional on `EMSCRIPTEN` (the define never
+  reaches `ALLDEFINES`); the cap handling lives in C++ instead.
+
+Expected effect: untrusted recursion budget ~452KB -> ~31MB (~60x), i.e.
+~620k host-boundary levels. Still catchable: quota < real stack, so
+over-quota throws `InternalError` before a real wasm stack overflow.
