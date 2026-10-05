@@ -263,15 +263,21 @@ const geckoBlobUrl = () => (_geckoUrl ??= toBlobUrl(geckoSource));
 let _engine: Promise<GeckoFactory> | undefined;
 function loadEngine(): Promise<GeckoFactory> {
   return (_engine ??= new Promise<GeckoFactory>((resolve, reject) => {
-    const have = (globalThis as Record<string, unknown>).createGecko as GeckoFactory | undefined;
-    if (have) return resolve(have);
+    // A page may import a new disc while the previous bundle is still cached.
+    // Its JS factory must stay paired with its own wasm and pthread source.
+    // Keep the classic glue's semantics, but scope its variables to this load.
+    const key = '__geckoFactory_' + crypto.randomUUID().replaceAll('-', '');
+    const globals = globalThis as Record<string, unknown>;
+    const url = toBlobUrl(`(function(){\n${geckoSource}\n;globalThis[${JSON.stringify(key)}] = createGecko;\n})();`);
     const s = document.createElement('script');
-    s.src = geckoBlobUrl(); s.async = true;
+    const cleanup = () => { delete globals[key]; s.remove(); URL.revokeObjectURL(url); };
+    s.src = url; s.async = true;
     s.onload = () => {
-      const f = (globalThis as Record<string, unknown>).createGecko as GeckoFactory | undefined;
+      const f = globals[key] as GeckoFactory | undefined;
+      cleanup();
       f ? resolve(f) : reject(new Error('gecko.js: engine evaluated but createGecko is missing'));
     };
-    s.onerror = () => reject(new Error('gecko.js: failed to evaluate the bundled engine'));
+    s.onerror = () => { cleanup(); reject(new Error('gecko.js: failed to evaluate the bundled engine')); };
     document.head.appendChild(s);
   }));
 }
