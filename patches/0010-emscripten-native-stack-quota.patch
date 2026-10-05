@@ -1,5 +1,5 @@
 diff --git a/js/xpconnect/src/XPCJSContext.cpp b/js/xpconnect/src/XPCJSContext.cpp
-index 6698b86bda..d02e7efbc0 100644
+index 6698b86bda..e59fe18819 100644
 --- a/js/xpconnect/src/XPCJSContext.cpp
 +++ b/js/xpconnect/src/XPCJSContext.cpp
 @@ -52,6 +52,10 @@
@@ -22,7 +22,7 @@ index 6698b86bda..d02e7efbc0 100644
 +  // (64MB for this build). The catch-all kDefaultStackQuota (512KB on wasm32)
 +  // would cap host-boundary JS recursion at under 1% of the real stack, so
 +  // derive the quota from the actual region. GECKO_NATIVE_QUOTAMB overrides.
-+  const size_t kUncappedStackQuota = [] {
++  const size_t kUncappedStackQuota = [kDefaultStackQuota] {
 +    if (const char* env = getenv("GECKO_NATIVE_QUOTAMB"); env && *env) {
 +      return size_t(strtoul(env, nullptr, 10)) * 1024 * 1024;
 +    }
