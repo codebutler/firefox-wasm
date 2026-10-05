@@ -1,10 +1,12 @@
 --- a/gfx/wr/webrender/src/device/gl.rs
 +++ b/gfx/wr/webrender/src/device/gl.rs
-@@ -2425,13 +2425,21 @@
+@@ -2425,13 +2425,23 @@
      where
          S: Into<TextureSlot>,
      {
 +        let slot = slot.into();
++        #[cfg(target_os = "emscripten")]
++        let is_color0 = slot.0 == 0;
          self.bind_texture_impl(
 -            slot.into(),
 +            slot,
@@ -17,7 +19,7 @@
 +        // Color0 bind may have selected a BGRA texture-cache image; reset the
 +        // shader swizzle or content WebGL canvases inherit its red/blue swap.
 +        #[cfg(target_os = "emscripten")]
-+        if slot.0 == 0 && self.bound_program_color0_swizzle_loc >= 0 {
++        if is_color0 && self.bound_program_color0_swizzle_loc >= 0 {
 +            self.gl.uniform_1i(self.bound_program_color0_swizzle_loc, 0);
 +        }
      }

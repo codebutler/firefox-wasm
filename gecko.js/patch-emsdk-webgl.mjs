@@ -25,6 +25,36 @@ for (const [file, field] of [['libwebgl.js', 'stringCache'], ['libwebgl2.js', 's
       'var contextStringiCache = GL.currentContext.stringiCache ||= {};')
       .replaceAll('stringiCache[name]', 'contextStringiCache[name]');
   }
+  if (file === 'libwebgl.js') {
+    // WebGL 2 always enables fixed-index primitive restart, but rejects the
+    // GLES enable enum. Gecko's ES3 initialization explicitly enables it.
+    const passThrough = 'depthFunc enable disable';
+    const query = '    program = GL.programs[program];\n\n    if (pname == 0x8B84) { // GL_INFO_LOG_LENGTH';
+    if (!source.includes(passThrough) || !source.includes(query)) {
+      throw new Error('GLES/WebGL adaptation anchors changed');
+    }
+    source = source.replace(passThrough, 'depthFunc disable');
+    source = source.replace('  glGetString__noleakcheck: true,', `  glEnable: (cap) => {
+    if (cap == 0x8D69 /* GL_PRIMITIVE_RESTART_FIXED_INDEX */ && GL.currentContext.version >= 2) return;
+    GLctx.enable(cap);
+  },
+
+  glGetString__noleakcheck: true,`);
+    // WebGL exposes names individually, not GLES's MAX_LENGTH program query.
+    // Compute it just as Emscripten already does for uniforms/attributes.
+    source = source.replace(query, `    program = GL.programs[program];
+
+    if (pname == 0x8C76 /* GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH */) {
+      if (GL.currentContext.version < 2) { GL.recordError(0x500); return; }
+      var count = GLctx.getProgramParameter(program, 0x8C83 /* GL_TRANSFORM_FEEDBACK_VARYINGS */);
+      var maxLength = 0;
+      for (var i = 0; i < count; ++i) {
+        var varying = GLctx.getTransformFeedbackVarying(program, i);
+        if (varying) maxLength = Math.max(maxLength, varying.name.length + 1);
+      }
+      {{{ makeSetValue('p', '0', 'maxLength', 'i32') }}};
+    } else if (pname == 0x8B84) { // GL_INFO_LOG_LENGTH`);
+  }
   writeFileSync(path, source);
   console.log('Scoped ' + file + ' GL strings to their owning context');
 }
