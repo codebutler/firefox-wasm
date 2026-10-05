@@ -281,10 +281,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
            mozilla::AutoSQLiteLifetime::getInitResult());
     fflush(stdout);
 
-    // Chrome build: register a no-op nsIAppShell under NS_APPSHELL_CID so
-    // nsAppStartup (Services.startup) can construct -- see EmbedAppShell. Must
-    // happen before the app-startup category / front-end run.
-    if (chrome) {
+    // Both windowless content and browser chrome need Services.startup. In
+    // particular, upload-directory lookup opens ContentPrefService2, which asks
+    // nsAppStartup about shutdown before opening its database. Register the
+    // embedding's event-loop shell before profile/startup observers can run.
+    {
       nsCOMPtr<nsIComponentRegistrar> reg;
       NS_GetComponentRegistrar(getter_AddRefs(reg));
       if (reg) {
@@ -311,7 +312,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
       mozilla::StartupTimeline::Record(mozilla::StartupTimeline::MAIN, now);
       printf("xul_init: recorded startup timeline\n");
       fflush(stdout);
+    }
 
+    if (chrome) {
       // Single process: no content process exists, so tabs must be non-remote
       // (a remote <browser> would have a null remoteTab and RemoteWebNavigation
       // throws). MOZ_FORCE_DISABLE_E10S + these prefs keep tab browsers in-process.

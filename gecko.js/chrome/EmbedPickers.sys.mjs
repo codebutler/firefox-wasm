@@ -2,7 +2,7 @@
 // validation, FileList and trusted input/change/cancel events; the host supplies
 // only the UI and the bytes of files the user explicitly selected.
 import { DateTimePickerChild as NativeDateTimePickerChild } from
-  "resource://gre/actors/DateTimePickerChild.sys.mjs";
+  "moz-src:///toolkit/actors/DateTimePickerChild.sys.mjs";
 
 Cu.importGlobalProperties(["File", "atob"]);
 let nextId = 0;
@@ -16,10 +16,10 @@ function request(data, context, state = {}) {
   const pagehide = () => { state.cancelled = true; cancel(id); };
   window?.addEventListener("pagehide", pagehide, { once: true });
   try {
-    const result = Cc["@mozilla.org/variant;1"].createInstance(Ci.nsIWritableVariant);
-    result.setAsAUTF8String("null");
+    const result = Cc["@mozilla.org/supports-string;1"].createInstance(Ci.nsISupportsString);
+    result.data = "null";
     Services.obs.notifyObservers(result, "gecko-embed-picker", JSON.stringify({ ...data, id }));
-    return state.cancelled ? null : JSON.parse(result.getAsAUTF8String());
+    return state.cancelled ? null : JSON.parse(result.data);
   } finally {
     window?.removeEventListener("pagehide", pagehide);
     state.id = null;
@@ -178,6 +178,9 @@ ChromeUtils.registerWindowActor("DateTimePicker", {
   allFrames: true,
 });
 Services.prefs.setBoolPref("dom.forms.datetime.timepicker", true);
+// The HTML popup needs Firefox browser chrome. Use our host-backed native
+// component instead, retaining Gecko's activation and color-input semantics.
+Services.prefs.setBoolPref("dom.forms.html_color_picker.enabled", false);
 
 // In-process windowless content has no browser message manager to deliver
 // trusted chrome events. Supply the same missing path as EmbedSelect.

@@ -2,7 +2,7 @@
 // Split from embed-xul.cpp. See embed-xul.h.
 #include "embed-xul.h"
 #include "nsIPrompt.h"
-#include "nsIVariant.h"
+#include "nsISupportsPrimitives.h"
 #include "mozilla/Services.h"
 #include "nsReadableUtils.h"
 #include "nsIPromptFactory.h"
@@ -275,7 +275,7 @@ NS_GENERIC_FACTORY_CONSTRUCTOR(EmbedPromptFactory)
   {0x6c2e9f10, 0x7a11, 0x4b2c, {0x9d, 0x33, 0x1e, 0x5a, 0x88, 0xc4, 0x01, 0xaa}}
 
 // Privileged picker components share the host roundtrip without masquerading as
-// page prompts. Content cannot access this observer or the response variant.
+// page prompts. Content cannot access this observer or the response string.
 class EmbedPickerObserver final : public nsIObserver {
  public:
   NS_DECL_ISUPPORTS
@@ -288,11 +288,11 @@ class EmbedPickerObserver final : public nsIObserver {
       }, id.get());
       return NS_OK;
     }
-    nsCOMPtr<nsIWritableVariant> result = do_QueryInterface(subject);
+    nsCOMPtr<nsISupportsString> result = do_QueryInterface(subject);
     if (!result) return NS_ERROR_INVALID_ARG;
     PromptReply reply;
     HostPromptJson(NS_ConvertUTF16toUTF8(data), reply, "geckoOnPicker");
-    return result->SetAsAUTF8String(nsDependentCString(
+    return result->SetData(NS_ConvertUTF8toUTF16(
         reply.ok && reply.value ? reply.value : "null"));
   }
  private:

@@ -20,9 +20,7 @@ function bridge() {
     Cu: { importGlobalProperties() {} },
     Ci: { nsIFilePicker: { returnOK: 0, returnCancel: 1, filterAll: 1 } },
     Cr: { NS_ERROR_FAILURE: 1 },
-    Cc: { '@mozilla.org/variant;1': { createInstance() { return {
-      setAsAUTF8String(value) { this.value = value; }, getAsAUTF8String() { return this.value; },
-    }; } } },
+    Cc: { '@mozilla.org/supports-string;1': { createInstance() { return { data: '' }; } } },
     Components: { ID: value => value, manager: { QueryInterface() { return {
       registerFactory(_id, _name, contract, factory) { factories.set(contract, factory); },
     }; } } },
@@ -34,7 +32,7 @@ function bridge() {
         addObserver(fn, name) { observers.set(name, fn); },
         notifyObservers(subject, topic, data) {
           if (topic.endsWith('-cancel')) { cancelled.push(data); return; }
-          calls.push(JSON.parse(data)); during?.(); subject.setAsAUTF8String(JSON.stringify(reply));
+          calls.push(JSON.parse(data)); during?.(); subject.data = JSON.stringify(reply);
         },
       },
     },
