@@ -10,6 +10,7 @@
 // from a Blob URL, so consumers never serve it; gecko.data is inlined too, so the ONLY
 // artifact the consumer serves is the wasm (GeckoOptions.wasm). emscripten 6.0.x no longer emits a separate
 // *.worker.js; pthread workers spawn from the main module via mainScriptUrlOrBlob.
+import { encodePickerReply } from './picker-encoding';
 import geckoSource from '../wasm/gecko.js?source';
 import { ZSTDDecoder } from 'zstddec';
 // gecko.data is baked into this bundle, zstd-compressed (decoded at load with
@@ -608,7 +609,8 @@ export class Gecko {
           Promise.resolve().then(() => this.opts.onPicker!(req, { signal: controller.signal })),
           cancelled,
         ]);
-        return { ok: !controller.signal.aborted && result != null, value: JSON.stringify(result) };
+        if (controller.signal.aborted || result == null) return { ok: false };
+        return { ok: true, value: await encodePickerReply(result, controller.signal) };
       } catch (error) {
         console.error('[gecko-picker]', error);
         return { ok: false };
@@ -633,6 +635,9 @@ export class Gecko {
 
   /** Navigate the embedded engine to a URL (http(s):// fetched over WISP). */
   async load(url: string): Promise<void> {
+    // Native pickers can hold a nested Gecko event loop. Withdraw their host
+    // UI before queuing navigation, so load never waits for a stale selection.
+    for (const controller of this.pickers.values()) controller.abort();
     await this.run({ op: OP_LOAD, url });
     // Arms firstPaint: from here, the next present is one that can carry this
     // document. (Presents that already happened may predate it.)

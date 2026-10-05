@@ -7,7 +7,8 @@ function bridge() {
   const factories = new Map(), actors = new Map(), observers = new Map();
   const calls = [], cancelled = [], sent = [], deferred = [];
   const page = new EventTarget();
-  const context = { canOpenModalPicker: true, currentWindowGlobal: { domWindow: page } };
+  page.File = File;
+  const context = { canOpenModalPicker: true, window: page };
   let reply = null, during;
   class JSWindowActorParent {
     browsingContext = context;

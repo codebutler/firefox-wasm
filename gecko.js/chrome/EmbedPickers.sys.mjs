@@ -12,7 +12,7 @@ function cancel(id) {
 function request(data, context, state = {}) {
   const id = String(++nextId);
   state.id = id;
-  const window = context?.currentWindowGlobal?.domWindow;
+  const window = context?.window;
   const pagehide = () => { state.cancelled = true; cancel(id); };
   window?.addEventListener("pagehide", pagehide, { once: true });
   try {
@@ -50,7 +50,9 @@ class FilePicker {
   selected = [];
   filters = [];
   rawFilters = [];
-  init(context, title, mode) { Object.assign(this, { context, title, mode }); }
+  init(context, title, mode, global) {
+    Object.assign(this, { context, title, mode, window: global || context?.window || globalThis });
+  }
   isModeSupported(mode) { return Promise.resolve(mode === 0 || mode === 3); }
   appendFilters(mask) { if (mask & Ci.nsIFilePicker.filterAll) this.filters.push({ title: "All files", pattern: "*" }); }
   appendFilter(title, pattern) { this.filters.push({ title, pattern }); }
@@ -76,7 +78,7 @@ class FilePicker {
         this.selected = files.map(file => {
           const raw = atob(file.base64);
           const bytes = Uint8Array.from(raw, char => char.charCodeAt(0));
-          return new File([bytes], file.name.replace(/^.*[\\/]/, ""), {
+          return new this.window.File([bytes], file.name.replace(/^.*[\\/]/, ""), {
             type: file.type, lastModified: file.lastModified,
           });
         });

@@ -49,11 +49,11 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply, const cha
     };
     var copy = function(value, offset) {
       if (value == null) return;
-      var bytes = unescape(encodeURIComponent(String(value)));
+      var bytes = value instanceof Uint8Array ? value : new TextEncoder().encode(String(value));
       var ptr = Module['_malloc'](bytes.length + 1);
       if (!ptr) throw new Error('Prompt result allocation failed');
       HEAPU32[(resultPtr + offset) >> 2] = ptr;
-      for (var i = 0; i < bytes.length; ++i) HEAPU8[ptr + i] = bytes.charCodeAt(i);
+      HEAPU8.set(bytes, ptr);
       HEAPU8[ptr + bytes.length] = 0;
     };
     Promise.resolve().then(function() {
