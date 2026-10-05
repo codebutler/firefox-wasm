@@ -178,6 +178,9 @@ ChromeUtils.registerWindowActor("DateTimePicker", {
   allFrames: true,
 });
 Services.prefs.setBoolPref("dom.forms.datetime.timepicker", true);
+// The HTML popup needs Firefox browser chrome. Use our host-backed native
+// component instead, retaining Gecko's activation and color-input semantics.
+Services.prefs.setBoolPref("dom.forms.html_color_picker.enabled", false);
 
 // In-process windowless content has no browser message manager to deliver
 // trusted chrome events. Supply the same missing path as EmbedSelect.
