@@ -8,6 +8,7 @@
 #include "mozilla/GenericFactory.h"
 #include "mozilla/ModuleUtils.h"
 #include "mozilla/SpinEventLoopUntil.h"
+#include <emscripten/threading.h>
 #include <atomic>
 #include <cstring>
 
@@ -22,6 +23,13 @@ struct PromptReply {
 
 static_assert(sizeof(PromptReply) == 20, "Host prompt protocol requires wasm32 layout");
 
+extern "C" EMSCRIPTEN_KEEPALIVE void gecko_prompt_wake() {
+  // SpinEventLoopUntil waits on Gecko's event queue, not on the completion
+  // atomic. A real event must wake an idle page after the host dialog closes.
+  // Capture no stack pointers: completion may already have resumed Gecko.
+  NS_DispatchToMainThread(NS_NewRunnableFunction("embed-prompt-wake", []() {}));
+}
+
 static void HostPromptJson(const nsACString& json, PromptReply& reply) {
   std::atomic<int32_t> done{0};
   // Gecko runs on a pthread; the embedder's callback and dialog UI live on the
@@ -34,6 +42,7 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply) {
     var finish = function() {
       Atomics.store(HEAP32, donePtr >> 2, 1);
       Atomics.notify(HEAP32, donePtr >> 2, 1);
+      Module['_gecko_prompt_wake']();
     };
     var copy = function(value, offset) {
       if (value == null) return;
@@ -60,9 +69,16 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply) {
       finish();
     });
   }, json.BeginReading(), &done, &reply);
-  mozilla::SpinEventLoopUntil("embed-prompt"_ns, [&]() {
+  bool completed = mozilla::SpinEventLoopUntil("embed-prompt"_ns, [&]() {
     return done.load(std::memory_order_acquire) != 0;
   });
+  // A thread shutdown can stop the event loop before the host settles its
+  // promise. Keep the result storage alive until that final write completes.
+  if (!completed) {
+    while (!done.load(std::memory_order_acquire)) {
+      emscripten_futex_wait(&done, 0, 100);
+    }
+  }
 }
 
 static void SetPromptString(char16_t** destination, const char* value) {
