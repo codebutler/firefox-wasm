@@ -89,8 +89,38 @@ mergeInto(LibraryManager.library, {
     else HEAPU8.set(hb.subarray(0, n), mir.ptr);
   },
 
-  wasmhost_instantiate__deps: ['$whSyncMem'],
+  // Host wasm-stack calibration for the JIT recursion guard. Compiled JIT fns
+  // bump gWJJitDepth by a per-frame byte estimate and throw a catchable
+  // over-recursion once past gWJJitDepthLimit -- but the real host wasm stack is
+  // not knowable statically (V8 worker ~1MB here, differs across browsers), and
+  // a too-high constant means deep JIT recursion dies on the host's uncatchable
+  // RangeError instead of throwing (x.com killed the engine this way). This
+  // probes the real limit once per worker realm: a wasm fn with a fat frame
+  // (96 f64 locals ~= 860B, fatter than a thin JIT fn) recurses until the host
+  // RangeErrors; the measured depth times the JIT frame charge (800B floor)
+  // times 0.6 becomes the budget.
+  $wjProbeStack: function () {
+    if (typeof WebAssembly === 'undefined' || !Module._wj_set_depth_limit) return;
+    try {
+      var bin = atob('AGFzbQEAAAABBQFgAAF/AwMCAAAGBgF/AUEACwcJAgFyAAABZAABCrUIAq0IAWB8IwBBAWokAEQAAAAAAAAAACEARAAAAAAAAAAAIQFEAAAAAAAAAAAhAkQAAAAAAAAAACEDRAAAAAAAAAAAIQREAAAAAAAAAAAhBUQAAAAAAAAAACEGRAAAAAAAAAAAIQdEAAAAAAAAAAAhCEQAAAAAAAAAACEJRAAAAAAAAAAAIQpEAAAAAAAAAAAhC0QAAAAAAAAAACEMRAAAAAAAAAAAIQ1EAAAAAAAAAAAhDkQAAAAAAAAAACEPRAAAAAAAAAAAIRBEAAAAAAAAAAAhEUQAAAAAAAAAACESRAAAAAAAAAAAIRNEAAAAAAAAAAAhFEQAAAAAAAAAACEVRAAAAAAAAAAAIRZEAAAAAAAAAAAhF0QAAAAAAAAAACEYRAAAAAAAAAAAIRlEAAAAAAAAAAAhGkQAAAAAAAAAACEbRAAAAAAAAAAAIRxEAAAAAAAAAAAhHUQAAAAAAAAAACEeRAAAAAAAAAAAIR9EAAAAAAAAAAAhIEQAAAAAAAAAACEhRAAAAAAAAAAAISJEAAAAAAAAAAAhI0QAAAAAAAAAACEkRAAAAAAAAAAAISVEAAAAAAAAAAAhJkQAAAAAAAAAACEnRAAAAAAAAAAAIShEAAAAAAAAAAAhKUQAAAAAAAAAACEqRAAAAAAAAAAAIStEAAAAAAAAAAAhLEQAAAAAAAAAACEtRAAAAAAAAAAAIS5EAAAAAAAAAAAhL0QAAAAAAAAAACEwRAAAAAAAAAAAITFEAAAAAAAAAAAhMkQAAAAAAAAAACEzRAAAAAAAAAAAITREAAAAAAAAAAAhNUQAAAAAAAAAACE2RAAAAAAAAAAAITdEAAAAAAAAAAAhOEQAAAAAAAAAACE5RAAAAAAAAAAAITpEAAAAAAAAAAAhO0QAAAAAAAAAACE8RAAAAAAAAAAAIT1EAAAAAAAAAAAhPkQAAAAAAAAAACE/RAAAAAAAAAAAIUBEAAAAAAAAAAAhQUQAAAAAAAAAACFCRAAAAAAAAAAAIUNEAAAAAAAAAAAhREQAAAAAAAAAACFFRAAAAAAAAAAAIUZEAAAAAAAAAAAhR0QAAAAAAAAAACFIRAAAAAAAAAAAIUlEAAAAAAAAAAAhSkQAAAAAAAAAACFLRAAAAAAAAAAAIUxEAAAAAAAAAAAhTUQAAAAAAAAAACFORAAAAAAAAAAAIU9EAAAAAAAAAAAhUEQAAAAAAAAAACFRRAAAAAAAAAAAIVJEAAAAAAAAAAAhU0QAAAAAAAAAACFURAAAAAAAAAAAIVVEAAAAAAAAAAAhVkQAAAAAAAAAACFXRAAAAAAAAAAAIVhEAAAAAAAAAAAhWUQAAAAAAAAAACFaRAAAAAAAAAAAIVtEAAAAAAAAAAAhXEQAAAAAAAAAACFdRAAAAAAAAAAAIV5EAAAAAAAAAAAhXxAACwQAIwAL');
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      var inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+      try { inst.exports.r(); } catch (e) {}
+      var depth = inst.exports.d() | 0;
+      if (depth < 50) return;
+      var limit = Math.floor(depth * 800 * 0.6);
+      limit = Math.max(200000, Math.min(2800000, limit));
+      Module._wj_set_depth_limit(limit);
+    } catch (e) {}
+  },
+
+  wasmhost_instantiate__deps: ['$whSyncMem', '$wjProbeStack'],
   wasmhost_instantiate: function (h, callbackIdsPtr, importCount) {
+    if (!globalThis.__wjStackProbed) {
+      globalThis.__wjStackProbed = 1;
+      wjProbeStack();
+    }
     try {
       var r = globalThis.__whReg && globalThis.__whReg[h];
       if (!r) return -1;
@@ -299,13 +329,18 @@ mergeInto(LibraryManager.library, {
     // indirect table so the engine can call the JIT'd fn via a C function pointer
     // (no JS hop). Returns the slot (a valid fn pointer); 0 if it can't be
     // registered (C++ treats <= 0 as "no direct entry" and falls back to the shim).
-    if (idx === -1) {
-      if (r.directIdx === undefined) {
-        var f0 = r.fns[0];
-        try { r.directIdx = (typeof f0 === 'function') ? addFunction(f0, 'dd') : 0; }
-        catch (e) { r.directIdx = 0; }
+    if (idx < 0) {
+      // idx = -(member+1): register member `mi`'s trampoline export (fns[mi] =
+      // tramp_i: (f64)->f64) into the MAIN indirect table so the engine can call
+      // the JIT'd fn via a C function pointer (no JS hop). idx===-1 = member 0.
+      var mi = -idx - 1;
+      if (!r.directIdxs) r.directIdxs = [];
+      if (r.directIdxs[mi] === undefined) {
+        var f0 = r.fns[mi];
+        try { r.directIdxs[mi] = (typeof f0 === 'function') ? addFunction(f0, 'dd') : 0; }
+        catch (e) { r.directIdxs[mi] = 0; }
       }
-      return r.directIdx;
+      return r.directIdxs[mi];
     }
     var fn = r.fns[idx];
     if (typeof fn !== 'function') return 0;
@@ -426,17 +461,18 @@ mergeInto(LibraryManager.library, {
   // `call_indirect` it (type 0). NOT the (f64)->f64 host trampoline (export "f" =
   // fns[0], used only for direct/shim entry). Falls back to fns[0] for single-export
   // modules.
-  wasmhost_jit_table_set: function (h, idx) {
+  wasmhost_jit_table_set: function (h, idx, member) {
     var tid = globalThis.__whJitTableId;
     if (tid === undefined || tid < 0) return -1;
     var t = globalThis.__whObj[tid];
     var r = globalThis.__whReg && globalThis.__whReg[h];
     if (!t || !r || !r.fns) return -1;
+    var name = member > 0 ? 'm' + member : 'm';
     var fn = null;
     for (var i = 0; i < r.exps.length; i++) {
-      if (r.exps[i].name === 'm') { fn = r.fns[i]; break; }
+      if (r.exps[i].name === name) { fn = r.fns[i]; break; }
     }
-    if (!fn) fn = r.fns[0];
+    if (!fn && !member) fn = r.fns[0];
     if (typeof fn !== 'function') return -1;
     try { t.set(idx, fn); return 0; } catch (e) { return -1; }
   },

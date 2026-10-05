@@ -1,0 +1,34 @@
+# SpiderMonkey -> wasm32-wasi (WASI p1). For PBL + weval experiments.
+# Based on js/src/devtools/automation/variants/wasi-pbl.
+mk_add_options MOZ_OBJDIR=$topsrcdir/../obj-js-wasi
+
+ac_add_options --enable-project=js
+ac_add_options --target=wasm32-unknown-wasi
+ac_add_options --with-sysroot=/tmp/wasi-sdk-20/share/wasi-sysroot
+
+ac_add_options --disable-jit
+ac_add_options --disable-shared-js
+ac_add_options --disable-shared-memory
+
+ac_add_options --enable-portable-baseline-interp
+ac_add_options --enable-portable-baseline-interp-force
+ac_add_options --enable-pbl-weval
+
+ac_add_options --without-intl-api
+ac_add_options --without-system-zlib
+ac_add_options --disable-tests
+ac_add_options --disable-clang-plugin
+ac_add_options --disable-debug-symbols
+ac_add_options --enable-optimize
+
+export CFLAGS="-msimd128 -DXXH_VECTOR=0"
+export CXXFLAGS="-msimd128 -DXXH_VECTOR=0"
+
+CC="/opt/homebrew/opt/llvm/bin/clang"
+CXX="/opt/homebrew/opt/llvm/bin/clang++"
+AR="/tmp/wasi-sdk-20/bin/ar"
+export LDFLAGS="-fuse-ld=/tmp/wasi-sdk-20/bin/wasm-ld"
+HOST_CC=clang
+HOST_CXX=clang++
+
+ac_add_options --enable-gczeal

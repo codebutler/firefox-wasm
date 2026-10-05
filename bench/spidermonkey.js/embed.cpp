@@ -411,6 +411,7 @@ int main(int argc, char** argv) {
   js::DisableExtraThreads();  // this standalone build has no -pthread; run single-threaded
   JSContext* cx = JS_NewContext(JS::DefaultHeapMaxBytes);
   if (!cx) { fprintf(stderr, "[embed] NewContext failed errno=%d\n", errno); return 1; }
+  if (!js::UseInternalJobQueues(cx)) { fprintf(stderr, "[embed] UseInternalJobQueues failed\n"); return 1; }
   if (!JS::InitSelfHostedCode(cx)) { fprintf(stderr, "[embed] InitSelfHostedCode failed\n"); return 1; }
   JS_SetGCParameter(cx, JSGC_MAX_BYTES, 0xffffffff);
   JS_SetNativeStackQuota(cx, 8 * 1024 * 1024);
@@ -480,6 +481,11 @@ int main(int argc, char** argv) {
       }
       if (!ok) { rc = 1; break; }
     }
+    // Drain the promise/microtask queue so .then jobs scheduled by the
+    // scripts actually run (the harness otherwise never services them, and
+    // job dispatch without a queue installed traps in this build).
+    js::RunJobs(cx);
+    if (JS_IsExceptionPending(cx)) ReportError(cx);
     if (gQuitting) rc = gExitCode;
   }
 

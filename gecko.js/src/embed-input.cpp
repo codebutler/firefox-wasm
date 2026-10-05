@@ -403,6 +403,9 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   ev.mDeltaX = dx;
   ev.mDeltaY = dy;
   ev.mDeltaZ = 0.0;
+  // Always pixel mode: the JS side normalizes DOM_DELTA_LINE/PAGE wheel deltas to
+  // CSS pixels before forwarding (js/index.ts wheelPixels), since only a pixel
+  // delta crosses the command struct.
   ev.mDeltaMode = 0;  // WheelEvent.DOM_DELTA_PIXEL
   ev.mLineOrPageDeltaX = dx > 0 ? (int32_t)std::floor(dx) : (int32_t)std::ceil(dx);
   ev.mLineOrPageDeltaY = dy > 0 ? (int32_t)std::floor(dy) : (int32_t)std::ceil(dy);
@@ -431,15 +434,43 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   }
 
   // Non-APZ (software) path: the dispatched wheel event is "consumed" by the event
-  // manager (eConsumeNoDefault) but the scroll isn't applied. If the position didn't
-  // move and content didn't preventDefault (e.g. a custom scroller / map), apply the
-  // scroll to the root scroll frame ourselves. Use Smooth mode so the GPU compositor
-  // animates it over refresh-driver ticks.
+  // manager (eConsumeNoDefault) but the scroll isn't applied for network-loaded
+  // documents (wisp). If the root scroll frame's position didn't move and content
+  // didn't preventDefault (e.g. a custom scroller / map), apply the scroll to the
+  // root scroll frame ourselves.
+  //
+  // ScrollMode::Instant, not Smooth: Smooth animates over refresh-driver ticks on
+  // the compositor, and in headless software rendering nothing drives that
+  // animation, so a Smooth fallback never visibly moves (measured: zero motion on
+  // http(s) documents even with large deltas). Instant applies the scroll now.
   widget->DispatchEvent(&ev);
-  if (sf && sf->GetScrollPosition() == before && !ev.DefaultPrevented()) {
+
+  static int s_scrollDiag = 0;
+  if (s_scrollDiag < 10) {
+    s_scrollDiag++;
+    // Diagnose why the fallback does or doesn't fire for a given document type:
+    // sf missing -> wrong presShell; prevented -> content handled it;
+    // scrolled<=port -> the doc has no vertical overflow (print-like view).
+    // GetScrolledRect() is the scrolled CONTENT rect (what "scrollable rect" means
+    // here); ScrollContainerFrame has no GetScrollableRect -- that name only exists
+    // on APZ's FrameMetrics, which is not what this main-thread path has.
+    printf("do_wheel: sf=%p prevented=%d rootMoved=%d scrolledH=%d portH=%d\n",
+           (void*)sf, ev.DefaultPrevented() ? 1 : 0,
+           !sf || sf->GetScrollPosition() == before
+               ? 0
+               : 1,
+           sf ? sf->GetScrolledRect().Height() : -1,
+           sf ? sf->GetScrollPortRect().Height() : -1);
+    fflush(stdout);
+  }
+  // GetScrollRange().height is the documented "can this be scrolled vertically"
+  // test (nonzero iff scrolled content exceeds the scroll port; it is exactly
+  // max(GetScrolledRect().height - scrollPort.height, 0) in the engine).
+  if (sf && sf->GetScrollPosition() == before && !ev.DefaultPrevented() &&
+      sf->GetScrollRange().height > 0) {
     sf->ScrollToCSSPixels(
         CSSPoint::FromAppUnits(before) + CSSPoint((float)dx, (float)dy),
-        ScrollMode::Smooth);
+        ScrollMode::Instant);
   }
 }
 
