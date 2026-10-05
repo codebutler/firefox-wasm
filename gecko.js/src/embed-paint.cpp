@@ -28,26 +28,31 @@ static int composite_visible_popups(gfxContext* ctx, mozilla::PresShell* ps,
   // nsMenuPopupFrame* (or any entry of `popups`) across a flush -- that was a
   // use-after-free that slowly corrupted memory. Re-query GetVisiblePopups after
   // every flush, and keep the paint pass below flush-free.
+  nsTArray<RefPtr<Document>> popupDocuments;
+  for (auto* pf : popups) {
+    if (pf && !popupDocuments.Contains(pf->PresShell()->GetDocument()))
+      popupDocuments.AppendElement(pf->PresShell()->GetDocument());
+  }
   bool sized = false;
   for (auto* pf : popups) {
     if (!pf) continue;
     LayoutDeviceIntRect b = pf->CalcWidgetBounds();
     if (b.width <= 0 || b.height <= 0) {
       pf->SetSize(nsSize(width * appPerCss, height * appPerCss));
-      ps->FrameNeedsReflow(pf, mozilla::IntrinsicDirty::FrameAncestorsAndDescendants,
+      pf->PresShell()->FrameNeedsReflow(pf, mozilla::IntrinsicDirty::FrameAncestorsAndDescendants,
                            NS_FRAME_IS_DIRTY);
       sized = true;
     }
   }
   if (sized) {
-    if (Document* d = ps->GetDocument())
-      d->FlushPendingNotifications(mozilla::FlushType::Layout);
+    for (const auto& document : popupDocuments)
+      document->FlushPendingNotifications(mozilla::FlushType::Layout);
     popups.Clear();
     pm->GetVisiblePopups(popups);  // the flush may have destroyed frames
     for (auto* pf : popups)
       if (pf) pf->SetPopupPosition(false);
-    if (Document* d = ps->GetDocument())
-      d->FlushPendingNotifications(mozilla::FlushType::Layout);
+    for (const auto& document : popupDocuments)
+      document->FlushPendingNotifications(mozilla::FlushType::Layout);
     popups.Clear();
     pm->GetVisiblePopups(popups);  // re-query once more before painting
   }
@@ -111,26 +116,31 @@ static uint8_t* paint_popup_windows(int width, int height, int32_t* outLen) {
   int32_t appPerCss = AppUnitsPerCSSPixel();
   // Same size/flush dance as composite_visible_popups (do not hold frame
   // pointers across a flush).
+  nsTArray<RefPtr<Document>> popupDocuments;
+  for (auto* pf : popups) {
+    if (pf && !popupDocuments.Contains(pf->PresShell()->GetDocument()))
+      popupDocuments.AppendElement(pf->PresShell()->GetDocument());
+  }
   bool sized = false;
   for (auto* pf : popups) {
     if (!pf) continue;
     LayoutDeviceIntRect b = pf->CalcWidgetBounds();
     if (b.width <= 0 || b.height <= 0) {
       pf->SetSize(nsSize(width * appPerCss, height * appPerCss));
-      ps->FrameNeedsReflow(pf, mozilla::IntrinsicDirty::FrameAncestorsAndDescendants,
+      pf->PresShell()->FrameNeedsReflow(pf, mozilla::IntrinsicDirty::FrameAncestorsAndDescendants,
                            NS_FRAME_IS_DIRTY);
       sized = true;
     }
   }
   if (sized) {
-    if (Document* d = ps->GetDocument())
-      d->FlushPendingNotifications(mozilla::FlushType::Layout);
+    for (const auto& document : popupDocuments)
+      document->FlushPendingNotifications(mozilla::FlushType::Layout);
     popups.Clear();
     pm->GetVisiblePopups(popups);
     for (auto* pf : popups)
       if (pf) pf->SetPopupPosition(false);
-    if (Document* d = ps->GetDocument())
-      d->FlushPendingNotifications(mozilla::FlushType::Layout);
+    for (const auto& document : popupDocuments)
+      document->FlushPendingNotifications(mozilla::FlushType::Layout);
     popups.Clear();
     pm->GetVisiblePopups(popups);
   }

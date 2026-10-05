@@ -108,6 +108,13 @@ if [ -d "$DST/modules" ]; then
     -o -name 'FxAccounts*' -o -name 'Download*' -o -name 'Telemetry*' \) -delete
 fi
 
+# The windowless embedding uses the toolkit select actors, with a minimal
+# privileged document to own their native XUL popup (no Firefox browser UI).
+mkdir -p "$DST/geckoembed"
+cp "$HERE/chrome/select.xhtml" "$DST/geckoembed/select.xhtml"
+cp "$HERE/chrome/EmbedSelect.sys.mjs" "$DST/modules/EmbedSelect.sys.mjs"
+printf '\ncontent geckoembed geckoembed/\n' >> "$DST/chrome.manifest"
+
 # Headless gfxFT2FontList needs >=1 font in <process dir>/fonts or it MOZ_CRASHes
 # ("No font files found"). Seed /gre/fonts with the vendored LiberationSans set.
 FONTSRC="$ROOT/firefox/toolkit/components/pdfjs/content/web/standard_fonts"

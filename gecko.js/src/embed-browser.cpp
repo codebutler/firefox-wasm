@@ -4,6 +4,7 @@
 #include "js/Conversions.h"
 #include "js/Exception.h"
 #include "js/PropertyAndElement.h"
+#include "xpcpublic.h"
 
 // A single windowless browser / chrome AppWindow is created lazily and kept alive
 // across loads + input events so the live document stays interactive.
@@ -149,6 +150,23 @@ void EnsureSize(int width, int height) {
   RefreshScreen(width, height);
 }
 
+// Load embedding chrome in a system global, never in a page's realm. This
+// installs Firefox's select actor before the first content document is created.
+static bool RegisterSelectActor() {
+  mozilla::dom::AutoJSAPI jsapi;
+  if (!jsapi.Init(xpc::PrivilegedJunkScope())) return false;
+  JSContext* cx = jsapi.cx();
+  JS::CompileOptions options(cx);
+  options.setFileAndLine("embed-select-init", 1);
+  constexpr char script[] =
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedSelect.sys.mjs');";
+  JS::SourceText<mozilla::Utf8Unit> source;
+  if (!source.init(cx, script, sizeof(script) - 1, JS::SourceOwnership::Borrowed))
+    return false;
+  JS::Rooted<JS::Value> result(cx);
+  return JS::Evaluate(cx, options, source, &result);
+}
+
 static nsIDocShell* EnsureBrowser(int width, int height) {
   using namespace mozilla;
   if (g_docShell) {
@@ -197,6 +215,12 @@ static nsIDocShell* EnsureBrowser(int width, int height) {
     printf("EnsureBrowser: created top-level chrome window %dx%d\n", width, height);
     fflush(stdout);
     return g_docShell;
+  }
+
+  if (!RegisterSelectActor()) {
+    printf("EnsureBrowser: select actor registration failed\n");
+    fflush(stdout);
+    return nullptr;
   }
 
   // Content-only embedding: a windowless browser is enough to host a page and

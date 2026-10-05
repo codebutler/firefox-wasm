@@ -285,6 +285,20 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
       json.get());
 }
 
+// Popup widgets belong to their own chrome document. Dispatch to that widget
+// (and its PresShell), not the content widget underneath the host popup canvas.
+static nsMenuPopupFrame* PopupAt(const mozilla::LayoutDeviceIntPoint& point) {
+  if (nsXULPopupManager* manager = nsXULPopupManager::GetInstance()) {
+    nsTArray<nsMenuPopupFrame*> popups;
+    manager->GetVisiblePopups(popups);
+    for (auto* popup : popups) {
+      if (popup && popup->GetWidget() && popup->CalcWidgetBounds().Contains(point))
+        return popup;
+    }
+  }
+  return nullptr;
+}
+
 // Synthesize a mouse event (evType: 0 move, 1 down, 2 up) at CSS px (x,y) and
 // dispatch it through the full event path (hit-testing, focus, click synthesis).
 void do_mouse(int evType, int x, int y, int button, int clickCount,
@@ -298,6 +312,11 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   nsIWidget* widget = nsContentUtils::GetWidget(ps, &offset);
   if (!widget || !pc) return;
 
+  LayoutDeviceIntPoint ref =
+      nsContentUtils::ToWidgetPoint(CSSPoint(x, y), offset, pc);
+  const LayoutDeviceIntPoint screenPoint = ref + widget->WidgetToScreenOffset();
+  nsMenuPopupFrame* inputPopup = PopupAt(screenPoint);
+
   // Outside-click rollup: native widgets roll popups up when you click off them
   // (the widget's rollup listener); the headless widget never delivers that, so do
   // it here. On a mousedown outside every open popup, roll them all up and consume
@@ -308,16 +327,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
       nsTArray<nsMenuPopupFrame*> popups;
       pm->GetVisiblePopups(popups);
       if (!popups.IsEmpty()) {
-        bool inside = false;
-        for (auto* pf : popups) {
-          if (!pf) continue;
-          LayoutDeviceIntRect b = pf->CalcWidgetBounds();
-          if (x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height) {
-            inside = true;
-            break;
-          }
-        }
-        if (!inside) {
+        if (!inputPopup) {
           nsIRollupListener::RollupOptions opts;
           opts.mCount = 0;  // close all open popups
           pm->Rollup(opts, nullptr);
@@ -325,11 +335,15 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
         }
       }
     }
-    if (button == 0 && MaybeHostBlankTarget(ps, x, y)) return;
+    if (!inputPopup && button == 0 && MaybeHostBlankTarget(ps, x, y)) return;
   }
 
-  LayoutDeviceIntPoint ref =
-      nsContentUtils::ToWidgetPoint(CSSPoint(x, y), offset, pc);
+  const bool popupInput = inputPopup != nullptr;
+  if (inputPopup) {
+    ps = inputPopup->PresShell();
+    widget = inputPopup->GetWidget();
+    ref = screenPoint - widget->WidgetToScreenOffset();
+  }
   // evType: 0=mousemove 1=mousedown 2=mouseup 3=contextmenu. A synthesized right
   // mousedown/up doesn't generate eContextMenu in this headless build, so the JS
   // side sends an explicit contextmenu event (button 2) to open context menus.
@@ -340,7 +354,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   nsAutoString type;
   type.AssignASCII(typeStr);
 
-  if (evType == 3 && HostWantsContextMenu()) {
+  if (!popupInput && evType == 3 && HostWantsContextMenu()) {
     RunChromeScript(
         "window.__geckoCtxPrev=false;"
         "window.addEventListener('contextmenu',function(e){"
@@ -360,7 +374,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
                                                  options, noCallback);
   (void)rv;
 
-  if (evType == 3) {
+  if (!popupInput && evType == 3) {
     MaybeHostContextMenu(ps, x, y);
   }
 
@@ -368,7 +382,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   // can mirror it (cursor: pointer over links, text over inputs, resize handles,
   // etc.). This is what EventStateManager::UpdateCursor feeds the widget; we read
   // it back from the frame since the windowless widget's SetCursor is a no-op.
-  if (g_cmd) {
+  if (g_cmd && !popupInput) {
     int32_t a = AppUnitsPerCSSPixel();
     nsPoint rootPt(x * a, y * a);
     int kind = (int)StyleCursorKind::Auto;
@@ -394,6 +408,21 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   nsPoint offset;
   nsIWidget* widget = nsContentUtils::GetWidget(ps, &offset);
   if (!widget || !pc) return;
+
+  const LayoutDeviceIntPoint screenPoint =
+      nsContentUtils::ToWidgetPoint(CSSPoint(x, y), offset, pc) +
+      widget->WidgetToScreenOffset();
+  if (nsMenuPopupFrame* popup = PopupAt(screenPoint)) {
+    widget = popup->GetWidget();
+    WidgetWheelEvent event(true, eWheel, widget);
+    event.mModifiers = nsContentUtils::GetWidgetModifiers(modifiers);
+    event.mDeltaX = dx;
+    event.mDeltaY = dy;
+    event.mDeltaMode = 0;
+    event.mRefPoint = screenPoint - widget->WidgetToScreenOffset();
+    widget->DispatchEvent(&event);
+    return;  // a popup wheel must not scroll the underlying content document
+  }
 
   ScrollContainerFrame* sf = ps->GetRootScrollContainerFrame();
   nsPoint before = sf ? sf->GetScrollPosition() : nsPoint();
@@ -512,6 +541,13 @@ void do_key(int evType, const char* keyUtf8, int keyCode, int charCode,
   nsPoint offset;
   nsIWidget* widget = nsContentUtils::GetWidget(ps, &offset);
   if (!widget) return;
+
+  if (nsXULPopupManager* manager = nsXULPopupManager::GetInstance()) {
+    nsTArray<nsMenuPopupFrame*> popups;
+    manager->GetVisiblePopups(popups);
+    if (!popups.IsEmpty() && popups[0] && popups[0]->GetWidget())
+      widget = popups[0]->GetWidget();
+  }
 
   NS_ConvertUTF8toUTF16 key(keyUtf8);
   KeyNameIndex kni = WidgetKeyboardEvent::GetKeyNameIndex(key);
