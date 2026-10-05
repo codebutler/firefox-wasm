@@ -7,7 +7,7 @@ function bridge() {
   const factories = new Map(), actors = new Map(), observers = new Map();
   const calls = [], cancelled = [], sent = [], deferred = [];
   const page = new EventTarget();
-  const context = { currentWindowGlobal: { domWindow: page } };
+  const context = { canOpenModalPicker: true, currentWindowGlobal: { domWindow: page } };
   let reply = null, during;
   class JSWindowActorParent {
     browsingContext = context;
@@ -115,4 +115,12 @@ test('date child uses Gecko user input and forwards raw HTML constraints', () =>
   assert.equal(child.openPickerImpl(input).stepBase, '2026-10-03');
   child.pickerValueChangedImpl({ data: { value: '2026-10-07' } }, input);
   assert.deepEqual(values, ['2026-10-07']);
+});
+
+test('inactive browsing contexts cannot open date pickers', () => {
+  const b = bridge(), parent = new b.Parent();
+  b.context.canOpenModalPicker = false;
+  parent.receiveMessage({ name: 'InputPicker:Open', data: { type: 'date', detail: {} } });
+  assert.equal(b.calls.length, 0);
+  assert.equal(b.sent[0].name, 'InputPicker:Closed');
 });

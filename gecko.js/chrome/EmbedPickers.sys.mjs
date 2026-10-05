@@ -131,6 +131,10 @@ export class DateTimePickerParent extends JSWindowActorParent {
   receiveMessage(message) {
     if (message.name === "InputPicker:Close") { this.cancel(); return; }
     if (message.name !== "InputPicker:Open" || this.state || this.dead) return;
+    if (!this.browsingContext.canOpenModalPicker) {
+      this.sendAsyncMessage("InputPicker:Closed", {});
+      return;
+    }
     const state = this.state = {};
     try {
       const { type, detail } = message.data;
