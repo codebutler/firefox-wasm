@@ -1,5 +1,5 @@
 diff --git a/js/moz.configure b/js/moz.configure
-index 2e86be3977..01df37e853 100644
+index 2e86be3977226285bb05294f7b8a265d5901b0ea..01df37e853d3776016e57b956a5393e8124dbb62 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
 @@ -181,6 +181,23 @@ set_config(
@@ -27,7 +27,7 @@ index 2e86be3977..01df37e853 100644
  option(
      "--enable-aot-ics",
 diff --git a/js/src/jit/BaselineCacheIRCompiler.cpp b/js/src/jit/BaselineCacheIRCompiler.cpp
-index e240a1e195..af81fbb1a9 100644
+index e240a1e19565c7a0e1cc09aeb4d8c73ba89f22ad..af81fbb1a990c28990de4d19cfc8d27fbf5df644 100644
 --- a/js/src/jit/BaselineCacheIRCompiler.cpp
 +++ b/js/src/jit/BaselineCacheIRCompiler.cpp
 @@ -27,6 +27,7 @@
@@ -68,7 +68,7 @@ index e240a1e195..af81fbb1a9 100644
  
    stub->addNewStub(icEntry, newStub);
 diff --git a/js/src/jit/CacheIRCompiler.cpp b/js/src/jit/CacheIRCompiler.cpp
-index 3e38c47435..71c3b532f6 100644
+index 3e38c474351fcc1297b857d654e704ca8c1edbf3..71c3b532f62c58be6df4d3ef41533532e177bef7 100644
 --- a/js/src/jit/CacheIRCompiler.cpp
 +++ b/js/src/jit/CacheIRCompiler.cpp
 @@ -47,6 +47,7 @@
@@ -110,7 +110,7 @@ index 3e38c47435..71c3b532f6 100644
                                        bool makesGCCalls,
                                        uint32_t stubDataOffset,
 diff --git a/js/src/jit/CacheIRCompiler.h b/js/src/jit/CacheIRCompiler.h
-index ed4431f6d8..feedb20d31 100644
+index ed4431f6d8cf1347127108757c55f422de8e3c82..feedb20d31b259571846a2b2a8df923632910fc7 100644
 --- a/js/src/jit/CacheIRCompiler.h
 +++ b/js/src/jit/CacheIRCompiler.h
 @@ -26,6 +26,10 @@ namespace js {
@@ -161,7 +161,7 @@ index ed4431f6d8..feedb20d31 100644
  
  template <typename T>
 diff --git a/js/src/jit/moz.build b/js/src/jit/moz.build
-index 6e7710e6fb..b3ee8e7942 100644
+index 6e7710e6fbb262fd8aca62c55834b72d381283af..b3ee8e7942ac6aea8d3924539a9287e6566a1e86 100644
 --- a/js/src/jit/moz.build
 +++ b/js/src/jit/moz.build
 @@ -314,3 +314,6 @@ if CONFIG["ENABLE_JS_AOT_ICS"]:
@@ -172,7 +172,7 @@ index 6e7710e6fb..b3ee8e7942 100644
 +if CONFIG["ENABLE_JS_PBL_WEVAL"]:
 +    LOCAL_INCLUDES += ["../../../third_party/weval"]
 diff --git a/js/src/moz.build b/js/src/moz.build
-index 3d7702fdad..f9510a29b1 100644
+index 3d7702fdad2a9f844be7b2f98e7227a060e034e0..f9510a29b128bdd797aa5dcbed623c96f62202f8 100644
 --- a/js/src/moz.build
 +++ b/js/src/moz.build
 @@ -373,3 +373,6 @@ if CONFIG["JS_HAS_INTL_API"]:
@@ -183,7 +183,7 @@ index 3d7702fdad..f9510a29b1 100644
 +if CONFIG["ENABLE_JS_PBL_WEVAL"]:
 +    LOCAL_INCLUDES += ["../../third_party/weval"]
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index 25949663d5..15db8f0dc1 100644
+index 25949663d5c11b48a0272b73c92530b9f21a3b6d..15db8f0dc1bb4c710131f610a687eddeaad611ab 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
 @@ -12318,7 +12318,8 @@ ShellContext::~ShellContext() {
@@ -357,22 +357,22 @@ index 25949663d5..15db8f0dc1 100644
 +  }
 +
 +  return AsVariant(result);
-+}
-+
+ }
+ 
 +// N.B.: When Wizer support is enabled, a separate main() is used.
 +#ifndef JS_SHELL_WIZER
 +
 +int main(int argc, char** argv) {
 +  return ShellMain(argc, argv, /* retainContext = */ false).as<int>();
- }
- 
++}
++
 +#endif  // !JS_SHELL_WIZER
 +
  bool InitOptionParser(OptionParser& op) {
    op.setDescription(
        "The SpiderMonkey shell provides a command line interface to the "
 diff --git a/js/src/shell/jsshell.h b/js/src/shell/jsshell.h
-index c664a3f944..1cd185e585 100644
+index c664a3f9440cf4daf7a703cf5082b0bae25cdfa5..1cd185e5857ab5821219932b27bdf4a9fc4e7260 100644
 --- a/js/src/shell/jsshell.h
 +++ b/js/src/shell/jsshell.h
 @@ -8,6 +8,7 @@
@@ -418,7 +418,7 @@ index c664a3f944..1cd185e585 100644
  } /* namespace js */
  
 diff --git a/js/src/shell/moz.build b/js/src/shell/moz.build
-index 93f6373a48..86dc5e7db0 100644
+index 93f6373a48c43fb4c2cf898d5519907e978eff61..86dc5e7db03f8079f4561c96cfe0ee5c5f32392c 100644
 --- a/js/src/shell/moz.build
 +++ b/js/src/shell/moz.build
 @@ -21,6 +21,7 @@ UNIFIED_SOURCES += [
@@ -444,7 +444,7 @@ index 93f6373a48..86dc5e7db0 100644
  # Place a GDB Python auto-load file next to the shell executable, both in
 diff --git a/js/src/shell/wizer.cpp b/js/src/shell/wizer.cpp
 new file mode 100644
-index 0000000000..e13e1a1e20
+index 0000000000000000000000000000000000000000..e13e1a1e20ee2e8071ca3869a6876f66bc467157
 --- /dev/null
 +++ b/js/src/shell/wizer.cpp
 @@ -0,0 +1,143 @@
@@ -592,7 +592,7 @@ index 0000000000..e13e1a1e20
 +
 +#endif  // JS_SHELL_WIZER
 diff --git a/js/src/vm/JSScript.cpp b/js/src/vm/JSScript.cpp
-index 615306104e..19b5a10e85 100644
+index 615306104edde2934c0003ac4bf8bbf8dab9c46b..19b5a10e85fdd2f031988095def37f2634a6a475 100644
 --- a/js/src/vm/JSScript.cpp
 +++ b/js/src/vm/JSScript.cpp
 @@ -74,6 +74,7 @@
@@ -623,7 +623,7 @@ index 615306104e..19b5a10e85 100644
 +void BaseScript::allocWeval() { weval_ = MakeUnique<Weval>(); }
 +#endif
 diff --git a/js/src/vm/JSScript.h b/js/src/vm/JSScript.h
-index f0e53f4465..173cc99c76 100644
+index f0e53f4465cade078031e99d0b55b76493049dc9..173cc99c763725e46ed0333e44637f30e61927bc 100644
 --- a/js/src/vm/JSScript.h
 +++ b/js/src/vm/JSScript.h
 @@ -91,6 +91,8 @@ struct CompilationStencilMerger;
@@ -669,7 +669,7 @@ index f0e53f4465..173cc99c76 100644
  extern void SweepScriptData(JSRuntime* rt);
 diff --git a/js/src/vm/PortableBaselineInterpret-defs.h b/js/src/vm/PortableBaselineInterpret-defs.h
 new file mode 100644
-index 0000000000..69f296b006
+index 0000000000000000000000000000000000000000..69f296b0069fc3768cb4cf205464f7efaa962e91
 --- /dev/null
 +++ b/js/src/vm/PortableBaselineInterpret-defs.h
 @@ -0,0 +1,74 @@
@@ -749,7 +749,7 @@ index 0000000000..69f296b006
 +#endif  /* PortableBaselineInerpret_defs_h */
 diff --git a/js/src/vm/PortableBaselineInterpret-weval-defs.h b/js/src/vm/PortableBaselineInterpret-weval-defs.h
 new file mode 100644
-index 0000000000..38bfbd066f
+index 0000000000000000000000000000000000000000..38bfbd066f1dc1014e53745745cb110d85814c12
 --- /dev/null
 +++ b/js/src/vm/PortableBaselineInterpret-weval-defs.h
 @@ -0,0 +1,180 @@
@@ -934,7 +934,7 @@ index 0000000000..38bfbd066f
 +
 +#endif /* PortableBaselineInerpret_defs_h */
 diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index e33137a4ba..03175ae376 100644
+index 448772946f2fa7305c4c8b0234b53a9a3f551586..0eac2e3a3f15d8f0f53ea03e6540a73fee2f126a 100644
 --- a/js/src/vm/PortableBaselineInterpret.cpp
 +++ b/js/src/vm/PortableBaselineInterpret.cpp
 @@ -69,6 +69,11 @@
@@ -2149,7 +2149,7 @@ index e33137a4ba..03175ae376 100644
    switch (ret) {
      case PBIResult::Ok:
      case PBIResult::UnwindRet:
-@@ -9785,7 +9842,7 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
+@@ -9809,7 +9866,7 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
    gPBLResumeEnclosingEnv = enclosingEnv;
    gPBLResumeKeepEnv = keepFrameEnv;
    gPBLResumeInError = resumeInError;
@@ -2158,7 +2158,7 @@ index e33137a4ba..03175ae376 100644
        cx, state, stack, sp, envChain, &result, pc, isd, nullptr, nullptr,
        nullptr, PBIResult::Ok, osrLocals, nLocals, osrStack, osrStackDepth);
    // Cross-boundary unwind: the resumed code threw and HandleException resolved
-@@ -9903,5 +9960,76 @@ bool PortablebaselineInterpreterStackCheck(JSContext* cx, RunState& state,
+@@ -9927,5 +9984,76 @@ bool PortablebaselineInterpreterStackCheck(JSContext* cx, RunState& state,
    return (top - base) >= needed;
  }
  
@@ -2236,7 +2236,7 @@ index e33137a4ba..03175ae376 100644
  }  // namespace pbl
  }  // namespace js
 diff --git a/js/src/vm/PortableBaselineInterpret.h b/js/src/vm/PortableBaselineInterpret.h
-index 47d1b49b92..3d6d405b0b 100644
+index 47d1b49b92be626798fb04d47fb49d0241b1d6ff..3d6d405b0ba79e11e342502291f5e09ee7e0d112 100644
 --- a/js/src/vm/PortableBaselineInterpret.h
 +++ b/js/src/vm/PortableBaselineInterpret.h
 @@ -327,7 +327,7 @@ enum class PBIResult {
@@ -2266,7 +2266,7 @@ index 47d1b49b92..3d6d405b0b 100644
  
 diff --git a/js/src/vm/Weval.h b/js/src/vm/Weval.h
 new file mode 100644
-index 0000000000..fd805e3f94
+index 0000000000000000000000000000000000000000..fd805e3f943cffa24ef40f7d323f39debb8e997a
 --- /dev/null
 +++ b/js/src/vm/Weval.h
 @@ -0,0 +1,35 @@
@@ -2306,7 +2306,7 @@ index 0000000000..fd805e3f94
 +
 +#endif /* vm_Weval_h */
 diff --git a/js/src/vm/moz.build b/js/src/vm/moz.build
-index 0fd3b857c6..606f9fa3af 100644
+index 0fd3b857c692413f0f1ae04e3c4e0d01f18fbb29..606f9fa3affbc68ecce45ccbc8bfce90a50b6eb3 100644
 --- a/js/src/vm/moz.build
 +++ b/js/src/vm/moz.build
 @@ -159,3 +159,6 @@ if CONFIG["USE_LIBZ_RS"]:
@@ -2317,7 +2317,7 @@ index 0fd3b857c6..606f9fa3af 100644
 +if CONFIG["ENABLE_JS_PBL_WEVAL"]:
 +    LOCAL_INCLUDES += ["../../../third_party/weval"]
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index 3c612d8006..821804d796 100644
+index f64b93aea6585ee21296165ac8e865f2f1d35a25..2e9f90c68ece54c69aada04d2a9bc05d64266824 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
 @@ -84,6 +84,8 @@ extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx);
@@ -2352,7 +2352,7 @@ index 3c612d8006..821804d796 100644
    bool inDispatchBody = false;    // currently emitting a hot dispatch block body
    bool inReloopBody = false;      // currently emitting a relooper (WJEmitStructured) block
                                    // body -- deopt-resume into a reloop'd switch is the
-@@ -1660,6 +1671,9 @@ static bool EmitDeoptResume(Encoder& e, WJBackend& be) {
+@@ -1682,6 +1693,9 @@ static bool EmitDeoptResume(Encoder& e, WJBackend& be) {
          op == uint32_t(MDefinition::Opcode::GuardGlobalGeneration) ||
          op == uint32_t(MDefinition::Opcode::GuardObjectIdentity)) {
        gWJEmitShapeDeopts++;
@@ -2362,7 +2362,7 @@ index 3c612d8006..821804d796 100644
      }
    }
    // Per-deopt-site hit counter (GECKO_WJ_SITEHIST). Emitted HERE -- at the guard,
-@@ -4306,8 +4320,55 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4328,8 +4342,55 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
                    WJOpName(u->input()->op()), StringFromMIRType(u->input()->type()));
          return false;
        }
@@ -2420,7 +2420,7 @@ index 3c612d8006..821804d796 100644
      }
      case MDefinition::Opcode::GuardShape: {
        // Passthrough the object; deopt if obj->shape() != the recorded Shape*.
-@@ -4884,6 +4945,26 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4906,6 +4967,26 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        int32_t ol = be.local(obj), xl = be.local(expected);
        if (ol < 0 || xl < 0) return false;
        if (WJGETENV("GECKO_WJ_GSFPASS")) return GetLocal(e, uint32_t(ol));
@@ -2447,7 +2447,7 @@ index 3c612d8006..821804d796 100644
        if (!GetLocal(e, uint32_t(ol)) || !GetLocal(e, uint32_t(xl)) ||
            !e.writeOp(Op::I32Ne)) {
          return false;
-@@ -10772,7 +10853,10 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10794,7 +10875,10 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        if (nRoots && !emitSPAdjust(int32_t(nRoots))) return false;
  
        uint32_t site = WJAllocCallSite();
@@ -2459,7 +2459,7 @@ index 3c612d8006..821804d796 100644
        // DEBUG (GECKO_WJ_CALLARGDBG=<line>): map call-site serials to their MIR
        // arg sources for one fn -- pairs with the VALIDATEHELPER stale-arg site
        // number to name the exact def feeding a corrupt argument.
-@@ -10871,6 +10955,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10893,6 +10977,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
              !e.writeOp(Op::I32LtU) || !e.writeOp(Op::I32And))
            return false;
          if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
@@ -2481,7 +2481,7 @@ index 3c612d8006..821804d796 100644
          // gWJCurrentEnv = callee->environment(): the callee's prologue saves this
          // into its envLocal so its MFunctionEnvironment is correct (closures).
          {
-@@ -11172,6 +11271,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11194,6 +11293,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
                : ct == MCompare::Compare_BigInt ? TagWord(JSVAL_TYPE_BIGINT)
                                                 : TagWord(JSVAL_TYPE_STRING);
            static int noGuard = WJGETENV("GECKO_WJ_STRCMP2NOGUARD") ? 1 : 0;
@@ -2504,7 +2504,7 @@ index 3c612d8006..821804d796 100644
            if (!noGuard && l->type() == MIRType::Value &&
                !EmitTagGuardLocal(e, be, uint32_t(be.local(l)), wantTag))
              return false;
-@@ -11197,6 +11312,88 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11219,6 +11334,88 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        // types reach here (String/Symbol/BigInt/UInt32 took the !dbl&&!i32 path above).
        bool refCmp = ct == MCompare::Compare_Object || ct == MCompare::Compare_Null ||
                      ct == MCompare::Compare_Undefined;
@@ -2593,7 +2593,7 @@ index 3c612d8006..821804d796 100644
        const uint8_t kI32 = uint8_t(TypeCode::I32), kF64 = uint8_t(TypeCode::F64);
        uint8_t ltc = WJValType(l->type()), rtc = WJValType(r->type());
        bool useF64;
-@@ -13973,7 +14170,7 @@ const char* js::wasm::WJMirOpName(uint32_t op) {
+@@ -14010,7 +14207,7 @@ const char* js::wasm::WJMirOpName(uint32_t op) {
  
  void js::wasm::WJDumpDeoptSiteHist() { WJDumpSiteHist(); }
  
@@ -2602,7 +2602,7 @@ index 3c612d8006..821804d796 100644
    if constexpr (kWJEHABI) {
      // EHABI trampoline: main returns just i64 (or throws a wasm exn). Wrap `call $main`
      // in try(result i64)/catch_all: on catch restore gWJRootSP (wholesale cleanup of all
-@@ -14016,7 +14213,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
+@@ -14053,7 +14250,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
            !e.writeVarU32(3) || !e.writeVarU32(i * 8))
          return false;  // arg i
      }
@@ -2611,7 +2611,7 @@ index 3c612d8006..821804d796 100644
      // catch_all: restore SP, flag=1, push dummy i64 result.
      if (!e.writeOp(Op::CatchAll)) return false;
      if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(spAddr)) ||
-@@ -14060,7 +14257,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
+@@ -14097,7 +14294,7 @@ bool js::wasm::WJEmitTrampoline(Encoder& e) {
        return false;  // arg i
      }
    }
@@ -2620,7 +2620,7 @@ index 3c612d8006..821804d796 100644
    if (!e.writeOp(Op::LocalSet) || !e.writeVarU32(3)) return false;  // result
    if (!e.writeOp(Op::LocalSet) || !e.writeVarU32(2)) return false;  // flag
    // Store the boxed result to gWJScratch[kWJResultOff] for the host entry path.
-@@ -14080,6 +14277,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -14117,6 +14314,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
      JSScript* brs = mir.outerInfo().script();
      js::wasm::gWJBailLine = brs ? brs->lineno() : 0;
      js::wasm::gWJBailReason = "unknown";
@@ -2628,7 +2628,7 @@ index 3c612d8006..821804d796 100644
    }
    // Bisection: GECKO_WJ_BAILLINE=<n[,n...]> bails (stays PBL) any function defined
    // at one of those source lines. Used to find which function's JIT codegen is
-@@ -14359,6 +14557,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -14396,6 +14594,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    gWJHadAlwaysBails = false;  // set true if any block is emitted as alwaysBails deopt
    gWJEmitShapeDeopts = 0;
    gWJEmitTotalDeopts = 0;
@@ -2636,7 +2636,7 @@ index 3c612d8006..821804d796 100644
    WJBackend be;
    be.info = &mir.outerInfo();
    be.snapshot = snapshot;
-@@ -14927,6 +15126,10 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -14964,6 +15163,10 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    // storm-triggered per-function (now crash-free; crypto 1240, deltablue 283).
    be.forceMega = WJGETENV("GECKO_WJ_FORCEMEGA") ||
                   (WJGETENV("GECKO_WJ_MEGAVALVE") && js::wasm::gWJForceMega);
@@ -2648,7 +2648,7 @@ index 3c612d8006..821804d796 100644
    // pointers in locals to "avoid rematerialization" REGRESSES splay ~42% (266 vs 470)
    // -- TurboFan (V8, --no-liftoff) ALREADY CSEs the on-stack re-derivation optimally;
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index b7dbbc5370..b37f6c5f37 100644
+index 0d5cf5a6e2ed9809b47f78d75e016aef5ae4840e..4eeefdcb8efc63059eb88e4e3af3a26ab77f3ae7 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
 @@ -9,6 +9,11 @@
@@ -2678,7 +2678,7 @@ index b7dbbc5370..b37f6c5f37 100644
  void WJDumpDeoptSiteHist();
  
  // GC-constant pool (WASMJIT_REARCH_PLAN.md §4.2). Interns a boxed JS::Value (a
-@@ -286,7 +292,13 @@ extern bool gWJHadAlwaysBails;
+@@ -293,7 +299,13 @@ extern bool gWJHadAlwaysBails;
  // a numeric/type-dominated fn's respec is the beneficial re-typing case (crypto/cdjs).
  extern uint32_t gWJEmitShapeDeopts;
  extern uint32_t gWJEmitTotalDeopts;
@@ -2692,7 +2692,7 @@ index b7dbbc5370..b37f6c5f37 100644
  extern bool gWJForceNumberArith;  // next compile: de-speculate Int32 arith/elem ICs (post-deopt)
  
  // Synchronous main-thread tier-up compile cost (GECKO_WJ_COMPILESTAT).
-@@ -369,6 +381,7 @@ extern uint32_t gWJExitFPLastSite;   // task #60 exitFP setter tracer
+@@ -376,6 +388,7 @@ extern uint32_t gWJExitFPLastSite;   // task #60 exitFP setter tracer
  extern uint32_t gWJExitFPSetCount;
  extern uint32_t gWJLastDeoptOp;         // MIR opcode of the most recent deopt site
  extern const uint32_t gWJOpGuardGlobalGeneration;  // numeric MIR opcode (backend-exported)
@@ -2700,7 +2700,7 @@ index b7dbbc5370..b37f6c5f37 100644
  // Call boundary: callee + argc for wjhelp(WJH_CALL).
  extern uint64_t gWJCallCallee;
  extern uint32_t gWJCallSiteLine[];  // DEBUG: caller script line per call site
-@@ -401,9 +414,37 @@ static constexpr uint32_t kWJCallSites = 16384;
+@@ -408,9 +421,37 @@ static constexpr uint32_t kWJCallSites = 16384;
  static constexpr uint32_t kWJCallWays = 8;
  extern uint32_t gWJCallFn[];      // cached callee obj ptr (0 = empty)
  extern int32_t gWJCallTblIdx[];   // callee's shared-table index
@@ -2739,7 +2739,7 @@ index b7dbbc5370..b37f6c5f37 100644
  // WasmJitRuntime.cpp. Lets the backend inline `new X()` (alloc + ctor call) and
  // skip the WJH_CONSTRUCT boundary for monomorphic construct sites.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index d9508212d5..1f57f24f56 100644
+index 8779d06aaee01d335e034ed44e74809479621162..556f8ba6b8a6929e780dc5dc6f89e6aefdee5bd9 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -18,6 +18,7 @@
@@ -2790,7 +2790,7 @@ index d9508212d5..1f57f24f56 100644
  static uint32_t gWJNextCallSite = 0;
  uint32_t WJAllocCallSite() {
    if (gWJNextCallSite >= kWJCallSites) return 0;  // site 0 is a safe sentinel
-@@ -411,6 +419,8 @@ struct WJEntry {
+@@ -436,6 +444,8 @@ struct WJEntry {
    int handle = -1;
    int tblSlot = -1;  // dense shared-table slot (-1 = not call_indirect-able)
    int directIdx = -1;  // slot in MAIN indirect table for direct PBL->JIT entry
@@ -2799,7 +2799,7 @@ index d9508212d5..1f57f24f56 100644
    uint32_t jitRuns = 0;  // entries that ran fully in JIT (no deopt)
    uint32_t deopts = 0;   // entries that deopted to PBL (resume); RESET on recompile
    uint32_t deoptsTotal = 0;  // lifetime deopts, never reset (matches gWJDeoptByOp scale)
-@@ -422,7 +432,8 @@ struct WJEntry {
+@@ -447,7 +457,8 @@ struct WJEntry {
                              // without this the per-entry deopt->resume->PBL->JIT
                              // nesting exhausted the V8 stack UNCATCHABLY (webtooling).
    bool hasAlwaysBails = false;  // compiled fn has a cold-IC alwaysBails deopt block
@@ -2809,7 +2809,7 @@ index d9508212d5..1f57f24f56 100644
    uint32_t nargs = 0;
    uint32_t nlocals = 0;
    uint32_t observes = 0;
-@@ -443,6 +454,19 @@ struct WJEntry {
+@@ -468,6 +479,19 @@ struct WJEntry {
    // current JIT version (it's net-positive-ish; failing to PBL would cost the JIT<->PBL
    // boundary, measured WORSE than the residual deopts). Only >50% storms fail to PBL.
    bool recompileDone = false;
@@ -2829,7 +2829,7 @@ index d9508212d5..1f57f24f56 100644
    // OSR cheap-resume targets: (resume pcOff -> dispatch block index) for each
    // OSR-able loop head, recorded at compile time (GECKO_WJ_OSR). A single-frame
    // deopt landing at one of these pcs re-enters the JIT there instead of PBL.
-@@ -455,6 +479,10 @@ struct WJEntry {
+@@ -480,6 +504,10 @@ struct WJEntry {
    // this climbs; past kWJDeferStrandLimit we compile SYNCHRONOUSLY so a hot fn is
    // never stranded in PBL forever. Loads drain at a task boundary well before this.
    uint32_t queuedObserves = 0;
@@ -2840,7 +2840,7 @@ index d9508212d5..1f57f24f56 100644
  };
  
  // Per-script compile state. Keyed by JSScript*; entries persist for the process.
-@@ -489,6 +517,137 @@ static WJEntry& EntryFor(JSScript* script) {
+@@ -514,6 +542,137 @@ static WJEntry& EntryFor(JSScript* script) {
    return e;
  }
  
@@ -2978,7 +2978,7 @@ index d9508212d5..1f57f24f56 100644
  // GECKO_WJ_ENTRYDUMP: dump every WJEntry with deopts >= threshold -- script
  // filename:line, deopts, jitRuns, deopt-rate%, recompiles, final state. Tells us
  // which functions storm-in-JIT (Compiled + high deopts) vs failed-to-PBL.
-@@ -609,9 +768,14 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
+@@ -634,9 +793,14 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
      if (w > 0) o += size_t(w);
    };
    app("{\"compiled\":%u,\"failed\":%u,\"cold\":%u,\"jitRuns\":%llu,"
@@ -2995,7 +2995,7 @@ index d9508212d5..1f57f24f56 100644
    bool first = true;
    for (int i = 0; i < 8; i++) {
      if (!top[i].sc || !top[i].deopts) continue;
-@@ -643,12 +807,17 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+@@ -668,12 +832,17 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
        e.handle = -1;
        e.tblSlot = -1;
        e.directIdx = -1;
@@ -3013,7 +3013,7 @@ index d9508212d5..1f57f24f56 100644
    // Stale call-IC entries would dispatch to the abandoned table slots; clearing
    // the callee-ptr side is sufficient (tblIdx is only read on a fn-ptr hit).
    // NOTE: a JIT frame already ON THE STACK when the fuse pops finishes with the
-@@ -858,6 +1027,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -883,6 +1052,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    // must take over the same slot). -1 (first compile) allocates a fresh one.
    int tblSlot = e.tblSlot;
    js::wasm::gWJForceMega = e.forceMega;  // megamorphic recompile (post-storm)
@@ -3022,7 +3022,7 @@ index d9508212d5..1f57f24f56 100644
    gWJPendingOsrTargets.clear();  // backend appends OSR targets during this compile
    // COMPILE-COST instrumentation (GECKO_WJ_COMPILESTAT): synchronous main-thread
    // tier-up compile is on the load critical path -- a real-site load compiles
-@@ -868,8 +1039,11 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -893,8 +1064,11 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
        getenv("GECKO_WJ_COMPILESTAT") ? atoi(getenv("GECKO_WJ_COMPILESTAT")) : 0;
    mozilla::TimeStamp wjCompT0;
    if (compileStat) wjCompT0 = mozilla::TimeStamp::Now();
@@ -3035,7 +3035,7 @@ index d9508212d5..1f57f24f56 100644
    if (compileStat) {
      double ms = (mozilla::TimeStamp::Now() - wjCompT0).ToMilliseconds();
      // Per-compile (bytecode-length, ms) log to test emit super-linearity:
-@@ -975,8 +1149,12 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1000,8 +1174,12 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    e.state = WJEntry::State::Compiled;
    e.handle = handle;
    e.tblSlot = tblSlot;
@@ -3049,7 +3049,7 @@ index d9508212d5..1f57f24f56 100644
    e.osrTargets = gWJPendingOsrTargets;  // OSR loop-head pc->block map for this fn
    if (getenv("GECKO_WJ_COMPILECNT")) {
      static uint64_t cc = 0;
-@@ -990,9 +1168,17 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1015,9 +1193,17 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    // Register the trampoline in the MAIN indirect table for direct (no-JS-hop)
    // PBL->JIT entry via a C function pointer. -1 if registration failed.
    if (!getenv("GECKO_WJ_NODIRECT")) {
@@ -3068,7 +3068,7 @@ index d9508212d5..1f57f24f56 100644
    if (getenv("GECKO_WJ_PBLWHO"))
      fprintf(stderr, "[wb-directidx] %s:%u directIdx=%d\n",
              script->filename() ? script->filename() : "?",
-@@ -1008,35 +1194,39 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1033,35 +1219,39 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
  // compile path instead of re-deferring. Bounded per-call by GECKO_WJ_DRAINBUDGET
  // (0 = all) so a huge backlog doesn't stall one idle slot.
  void js::wasm::WasmJitDrainDeferred() {
@@ -3089,24 +3089,12 @@ index d9508212d5..1f57f24f56 100644
 -    if (e.state == WJEntry::State::Cold) {
 -      WasmJitObserveCall(s);  // qualified already -> compiles inline now
 -      done++;
--    }
--  }
--  // Remove the drained prefix; keep any remainder (budget-limited) for next drain.
--  if (i >= gWJDeferQueue.size()) {
--    gWJDeferQueue.clear();
--  } else {
--    gWJDeferQueue.erase(gWJDeferQueue.begin(), gWJDeferQueue.begin() + i);
--  }
--  gWJDrainingNow = false;
--  if (getenv("GECKO_WJ_DEFERDBG"))
--    fprintf(stderr, "[wj-drain] compiled=%u remaining=%zu\n", done,
--            gWJDeferQueue.size());
 +  if (!gWJDeferQueue.empty() && !gWJDrainingNow) {
 +    static uint32_t budget = 0xffffffffu;
 +    if (budget == 0xffffffffu) {
 +      const char* s = getenv("GECKO_WJ_DRAINBUDGET");
 +      budget = s ? uint32_t(atoi(s)) : 0;  // 0 => drain the whole queue each call
-+    }
+     }
 +    gWJDrainingNow = true;
 +    uint32_t done = 0;
 +    size_t i = 0;
@@ -3130,14 +3118,24 @@ index d9508212d5..1f57f24f56 100644
 +    if (getenv("GECKO_WJ_DEFERDBG"))
 +      fprintf(stderr, "[wj-drain] compiled=%u remaining=%zu\n", done,
 +              gWJDeferQueue.size());
-+  }
+   }
+-  // Remove the drained prefix; keep any remainder (budget-limited) for next drain.
+-  if (i >= gWJDeferQueue.size()) {
+-    gWJDeferQueue.clear();
+-  } else {
+-    gWJDeferQueue.erase(gWJDeferQueue.begin(), gWJDeferQueue.begin() + i);
+-  }
+-  gWJDrainingNow = false;
+-  if (getenv("GECKO_WJ_DEFERDBG"))
+-    fprintf(stderr, "[wj-drain] compiled=%u remaining=%zu\n", done,
+-            gWJDeferQueue.size());
 +  // Idle boundary is also the cohort fusion point: fuse whatever solo compiles
 +  // accumulated, even below the synchronous GECKO_WJ_COHORT batch threshold.
 +  if (JSContext* cx = js::TlsContext.get()) WJDrainCohort(cx);
  }
  
  // Set during the differential verifier's interpreter re-run so nested calls
-@@ -1277,7 +1467,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1302,7 +1492,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
      WJTrampFn fp = reinterpret_cast<WJTrampFn>(uintptr_t(e.directIdx));
      flag = fp(ptr);
    } else {
@@ -3146,7 +3144,7 @@ index d9508212d5..1f57f24f56 100644
    }
    gWJEntryExitFP = wjPrevEntryExitFP;
    gWJEntryAct = wjPrevEntryAct;
-@@ -1371,10 +1561,17 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1396,10 +1586,17 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
      // The count-trigger respec recompile of a SHAPE-deopt-dominated fn re-bakes a stale
      // GC const (acorn tokenizer mis-parse, task #27). Block it for such fns -- the
      // count-trigger is for numeric/type re-typing (crypto/cdjs), where the rate gate
@@ -3166,7 +3164,7 @@ index d9508212d5..1f57f24f56 100644
      // CRITICAL (2026-06-29): the function ALREADY RAN this call (flag==0 -> its
      // result is in gWJScratch[kWJResultSlot], and any side effects -- incl. those
      // completed by the deopt-RESUME -- are done). The valve paths below change e.state
-@@ -1462,15 +1659,24 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1487,15 +1684,24 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
        static int megaRetries = getenv("GECKO_WJ_MEGARETRIES")
                                     ? atoi(getenv("GECKO_WJ_MEGARETRIES"))
                                     : 1;
@@ -3192,7 +3190,7 @@ index d9508212d5..1f57f24f56 100644
          // KEEP e.tblSlot: the recompile reuses it so callers' cached call ICs
          // (funPtr->slot, funPtr unchanged) keep resolving to the new module.
          // Resetting it to -1 allocated a NEW slot, leaving cached ICs pointing at
-@@ -1691,13 +1897,7 @@ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
+@@ -1716,13 +1922,7 @@ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
  // handle + nargs + env) so repeats skip all lookups and call directly. Key (wrapper
  // fn) and env (module scope) are tenured/stable; a moved/evicted key just misses ->
  // re-resolve (sound). [GC sweep TODO: trace gWJCC_env or re-validate.]
@@ -3207,7 +3205,7 @@ index d9508212d5..1f57f24f56 100644
  static bool WJIsForwardingWrapper(JSContext* cx, JSScript* s) {
    if (!s->function() || s->length() > 96) return false;
    if (!gWJFwdCache) gWJFwdCache = new std::unordered_map<JSScript*, char>();
-@@ -2236,6 +2436,51 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2261,6 +2461,51 @@ static double wjhelpImpl(double kindF, double siteF) {
          fprintf(stderr, "[wj-resume-noexc] bad nframes=%u\n", nframes);
        return 1.0;
      }
@@ -3259,7 +3257,7 @@ index d9508212d5..1f57f24f56 100644
      // try/catch: capture + clear the in-error flag now so it can't leak to a later
      // (normal) deopt. Used for the innermost frame below.
      const uint32_t resumeErr = gWJResumeInError;
-@@ -2748,6 +2993,41 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2813,6 +3058,41 @@ static double wjhelpImpl(double kindF, double siteF) {
              if (w == kWJCallWays) w = 0;  // all ways full: evict way 0
              gWJCallFn[base + w] = funPtr;
              gWJCallTblIdx[base + w] = ce.tblSlot;
@@ -3301,7 +3299,7 @@ index d9508212d5..1f57f24f56 100644
            }
            // Resume context is self-contained (emitted code sets it), so just run.
            gWJCurrentEnv = uint32_t(uintptr_t(static_cast<void*>(fun->environment())));
-@@ -2796,7 +3076,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2861,7 +3141,7 @@ static double wjhelpImpl(double kindF, double siteF) {
            if (js::wasm::kWJEHABI)  // EHABI: stage the boxed callee for the trampoline.
              gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*fun).asRawBits();
            double ptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3310,7 +3308,7 @@ index d9508212d5..1f57f24f56 100644
            gWJFastCalls++;
            if (flag == 2.0) {
              // Entry GuardGlobalGeneration mismatch: the callee did NOT run.
-@@ -5043,7 +5323,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5108,7 +5388,8 @@ static double wjhelpImpl(double kindF, double siteF) {
          gWJScratch[js::wasm::kWJThisSlot] = thisv.get().asRawBits();
          gWJCurrentEnv = gWJCC_env[cslot];
          double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3320,7 +3318,7 @@ index d9508212d5..1f57f24f56 100644
          if (iflag == 1.0) return 1.0;
          if (iflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to the slow path
            gWJFastCalls++;
-@@ -5096,6 +5377,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5161,6 +5442,7 @@ static double wjhelpImpl(double kindF, double siteF) {
                if (fillSlot < 0) fillSlot = 0;  // evict slot 0 if full
                gWJCC_key[fillSlot] = ntKey2;
                gWJCC_handle[fillSlot] = iit->second.handle;
@@ -3328,7 +3326,7 @@ index d9508212d5..1f57f24f56 100644
                gWJCC_nargs[fillSlot] = iit->second.nargs;
                gWJCC_env[fillSlot] = gWJCurrentEnv;
                // Capture the `this` shape for the inline-alloc fast path (only for
-@@ -5108,7 +5390,9 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5173,7 +5455,9 @@ static double wjhelpImpl(double kindF, double siteF) {
                if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
                  gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*ifun).asRawBits();
                double iptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3339,7 +3337,7 @@ index d9508212d5..1f57f24f56 100644
                if (iflag == 1.0) return 1.0;  // initialize threw
                if (iflag == 0.0) {  // flag 2.0 -> !done -> VM path runs it
                  gWJFastCalls++;
-@@ -5171,7 +5455,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5236,7 +5520,8 @@ static double wjhelpImpl(double kindF, double siteF) {
            if (js::wasm::kWJEHABI)  // EHABI: stage boxed callee for the trampoline.
              gWJScratch[js::wasm::kWJCalleeSlot] = JS::ObjectValue(*cfun).asRawBits();
            double cptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
@@ -3349,7 +3347,7 @@ index d9508212d5..1f57f24f56 100644
            if (cflag == 1.0) return 1.0;  // threw
            if (cflag == 0.0) {  // flag 2.0 = entry GGG mismatch: fall to slow construct
              // Construct result: the ctor's return if it's an object, else `this`.
-@@ -5654,6 +5939,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -5803,6 +6088,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
    for (JSScript*& s : gWJDeferQueue) {
      js::TraceRoot(trc, &s, "wjdeferq");
    }
@@ -3362,10 +3360,10 @@ index d9508212d5..1f57f24f56 100644
 +  }
    for (uint32_t i = 0; i < gWJConstPoolCount; i++) {
      WJDbgLogRoot(trc, "const", i, &gWJConstPool[i]);
-     JS::TraceRoot(trc, reinterpret_cast<JS::Value*>(&gWJConstPool[i]), "wjconst");
-@@ -5730,6 +6022,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
-         js::TraceRoot(trc, reinterpret_cast<JSObject**>(&gWJCallFn[i]), "wjcallfn");
-       }
+     WJTraceValueRoot(trc, &gWJConstPool[i], "wjconst", i);
+@@ -5864,6 +6156,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+     for (uint32_t i = 0; i < n; i++) {
+       WJTracePtrRoot<JSObject>(trc, &gWJCallFn[i], "wjcallfn");
      }
 +    // Site->caller map (cohort edge attribution): caller scripts must stay live
 +    // and pointer-current or edges attribute to a dead/moved JSScript*.
@@ -3378,10 +3376,10 @@ index d9508212d5..1f57f24f56 100644
    // Per-site ctor inline cache: callee fn, `this` shape, and ctor env are GC ptrs.
    // If any moves and a slot isn't updated, the backend's `callee==gWJCtorCallee`
 diff --git a/js/src/wasm/WasmJitWarp.cpp b/js/src/wasm/WasmJitWarp.cpp
-index cd527a8514..2a5ccc8d30 100644
+index 1d92692df977104412810553f07f6d8467f05274..30fdba2f9af722b62b951f5c151908499b2f1a33 100644
 --- a/js/src/wasm/WasmJitWarp.cpp
 +++ b/js/src/wasm/WasmJitWarp.cpp
-@@ -13,8 +13,10 @@
+@@ -14,8 +14,10 @@
  #include "mozilla/ScopeExit.h"
  #include "mozilla/TimeStamp.h"  // GECKO_WJ_COMPILESTAT split compile timing
  
@@ -3392,7 +3390,7 @@ index cd527a8514..2a5ccc8d30 100644
  
  #include "gc/GC.h"
  #include "jit/BaselineIC.h"
-@@ -41,6 +43,7 @@
+@@ -42,6 +44,7 @@
  #include "jit/InlineScriptTree-inl.h"
  #include "jit/JitScript-inl.h"
  #include "vm/Realm-inl.h"
@@ -3400,7 +3398,7 @@ index cd527a8514..2a5ccc8d30 100644
  
  using namespace js;
  using namespace js::jit;
-@@ -52,7 +55,7 @@ int wasmhost_instantiate(int handle, const int* callbackIds, int importCount);
+@@ -53,7 +56,7 @@ int wasmhost_instantiate(int handle, const int* callbackIds, int importCount);
  int wasmhost_guest_mem_objid();
  int wasmhost_guest_mem_shared();
  int wasmhost_jit_table();
@@ -3409,7 +3407,7 @@ index cd527a8514..2a5ccc8d30 100644
  }
  
  namespace js {
-@@ -82,11 +85,6 @@ static void DumpMIR(JSScript* script, MIRGraph& graph) {
+@@ -83,11 +86,6 @@ static void DumpMIR(JSScript* script, MIRGraph& graph) {
    }
  }
  
@@ -3421,7 +3419,7 @@ index cd527a8514..2a5ccc8d30 100644
  // Dense allocator for shared-table slots. The host's funcref table has a fixed
  // size (kWJTableSize); module handles are a process-global counter that easily
  // exceeds it, so the table slot must NOT be the handle (call_indirect would trap
-@@ -95,236 +93,47 @@ static void DumpMIR(JSScript* script, MIRGraph& graph) {
+@@ -96,255 +94,47 @@ static void DumpMIR(JSScript* script, MIRGraph& graph) {
  static constexpr int kWJTableSize = 4096;
  static int gWJNextTblSlot = 0;
  
@@ -3670,6 +3668,26 @@ index cd527a8514..2a5ccc8d30 100644
  
 -int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
 -                  uint32_t* nlocalsOut, int* tblSlotOut) {
+-  // On-thread synchronous tier-up compilation holds RAW GC pointers to its inputs --
+-  // the CompileInfo JSScript* (rp->block()->info().script()), WarpSnapshot-baked
+-  // shapes/objects as MIR constants, and baked pc/gcthing pointers -- while allocating
+-  // (snapshot/MIR LifoAlloc, encoder buffers, inline template reads). A COMPACTING GC
+-  // firing mid-compile (GECKO_GCZEAL=14, or a real shrinking GC under memory pressure)
+-  // MOVES those tenured cells, leaving the compiler's raw pointers stale -> EmitValue's
+-  // `sc->getShape(pc)` derefs a moved JSScript -> OOB "unreachable" (bench/difftests/
+-  // gcleads/forof-compaction.js: for-of/spread over an array traps under 14,2 while PBL
+-  // is correct; the trigger is the object-literal NewObject in the hot iterator/loop fn,
+-  // NOT a runtime rooting bug). Real Ion compiles OFF-THREAD against a rooted/traced
+-  // WarpSnapshot, so a moving GC never invalidates its inputs; this on-thread path must
+-  // suppress moving GC for the compile's duration. NARROW: covers ONLY compilation --
+-  // runtime execution still sees full gczeal, so runtime rooting hazards stay observable.
+-  // Non-moving GC (gczeal 2, mark-only) and minor GC (7) never tripped this (they don't
+-  // move tenured), consistent with a compaction-relocation root cause.
+-  // GECKO_WJ_NOCOMPILESUPPRESSGC=1 reverts (crash returns -> confirms this is the fix).
+-  static int noCompileSuppressGC =
+-      getenv("GECKO_WJ_NOCOMPILESUPPRESSGC") ? 1 : 0;
+-  mozilla::Maybe<js::gc::AutoSuppressGC> compileSuppressGC;
+-  if (!noCompileSuppressGC) compileSuppressGC.emplace(cx);
 -  bool dump = getenv("GECKO_WJWARP_DUMP");
 -  // Compile-count bisection (tasks #57/#64): GECKO_WJ_COMPILEMAX=N lets only
 -  // the first N functions install (later ones bail to PBL = correct-by-
@@ -3684,16 +3702,15 @@ index cd527a8514..2a5ccc8d30 100644
 -    js::wasm::gWJBailReason = "compilemax";
 -    return -1;
 -  }
--  // Functions with try/catch/finally (try-notes): our JIT propagates a thrown
 +// snapshot+build+optimize one function into a WJMemberBuild (emit runs later
 +// via AssembleAndInstallN). nullptr -> caller keeps the function in PBL.
 +static std::unique_ptr<WJMemberBuild> WJBuildMember(JSContext* cx,
 +                                                  JSScript* script,
 +                                                  bool forceMega, bool dump) {
+   // Functions with try/catch/finally (try-notes): our JIT propagates a thrown
    // exception OUT of a function via a return flag, but has NO in-function CATCH
    // landing pad. So a throw inside a try region unwinds PAST its own catch instead
-   // of landing in it -- e.g. gbemu initLCD's `try { new GameBoyCanvas() } catch`
-@@ -347,7 +156,7 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+@@ -368,7 +158,7 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
        if (tn.kind() == js::TryNoteKind::Catch ||
            tn.kind() == js::TryNoteKind::Finally) {
          js::wasm::gWJBailReason = "trycatch";
@@ -3702,7 +3719,7 @@ index cd527a8514..2a5ccc8d30 100644
        }
      }
    }
-@@ -396,7 +205,7 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+@@ -417,7 +207,7 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
      const char* p = sl;
      while (*p) {
        uint32_t v = uint32_t(atoi(p));
@@ -3711,7 +3728,7 @@ index cd527a8514..2a5ccc8d30 100644
        while (*p && *p != ',') p++;
        if (*p == ',') p++;
      }
-@@ -404,10 +213,10 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+@@ -425,10 +215,10 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
    RootedScript scriptRoot(cx, script);
  
    if (!script->hasJitScript()) {
@@ -3724,7 +3741,7 @@ index cd527a8514..2a5ccc8d30 100644
    }
  
    // Drive trial inlining RIGHT BEFORE building the snapshot, so WarpBuilder
-@@ -440,35 +249,34 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+@@ -461,35 +251,34 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
      }
    }
  
@@ -3773,7 +3790,7 @@ index cd527a8514..2a5ccc8d30 100644
      if (compileStatP)
        js::wasm::gWJSnapshotMs += (mozilla::TimeStamp::Now() - t0).ToMilliseconds();
    }
-@@ -476,9 +284,9 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+@@ -497,9 +286,9 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
      gc::AutoSuppressGC suppressGC(cx);
      mozilla::TimeStamp t0;
      if (compileStatP) t0 = mozilla::TimeStamp::Now();
@@ -3786,7 +3803,7 @@ index cd527a8514..2a5ccc8d30 100644
      if (compileStatP)
        js::wasm::gWJBuildMs += (mozilla::TimeStamp::Now() - t0).ToMilliseconds();
    }
-@@ -491,34 +299,391 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
+@@ -512,34 +301,411 @@ int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
      // instructions, so emit + host-compile (which scale with graph/output size) grow
      // MORE than OptimizeMIR shrinks (per-compile 1.96ms -> 2.27ms). The optimizer
      // pays for itself by shrinking the graph. So run the full Normal pipeline.
@@ -3802,8 +3819,12 @@ index cd527a8514..2a5ccc8d30 100644
 -    DumpMIR(script, graph);
 +            uint32_t(script->lineno()), unsigned(mb->graph.numBlocks()));
 +    DumpMIR(script, mb->graph);
-+  }
-+
+   }
+ 
+-  uint32_t nargs = script->function() ? script->function()->nargs() : 0;
+-  // NB: *tblSlotOut is IN/OUT -- a >=0 value on entry is a preferred slot to REUSE
+-  // (deopt-storm recompile keeps the same slot so cached call ICs stay valid).
+-  int handle = AssembleAndInstall(mirGen, graph, nargs, snapshot, tblSlotOut, dump);
 +  mb->script = script;
 +  mb->nargs = script->function() ? script->function()->nargs() : 0;
 +  mb->nlocals = info->nlocals();
@@ -4005,12 +4026,8 @@ index cd527a8514..2a5ccc8d30 100644
 +      fprintf(stderr, "[wb-compile] wrote %s (%zu bytes)\n", path,
 +              size_t(out.length()));
 +    }
-   }
- 
--  uint32_t nargs = script->function() ? script->function()->nargs() : 0;
--  // NB: *tblSlotOut is IN/OUT -- a >=0 value on entry is a preferred slot to REUSE
--  // (deopt-storm recompile keeps the same slot so cached call ICs stay valid).
--  int handle = AssembleAndInstall(mirGen, graph, nargs, snapshot, tblSlotOut, dump);
++  }
++
 +  static int compileStat = getenv("GECKO_WJ_COMPILESTAT") ? 1 : 0;
 +  mozilla::TimeStamp hostT0;
 +  if (compileStat) hostT0 = mozilla::TimeStamp::Now();
@@ -4100,6 +4117,26 @@ index cd527a8514..2a5ccc8d30 100644
 +int WJWarpCompile(JSContext* cx, JSScript* script, uint32_t* nargsOut,
 +                  uint32_t* nlocalsOut, int* tblSlotOut,
 +                  std::vector<uint8_t>* bodyOut) {
++  // On-thread synchronous tier-up compilation holds RAW GC pointers to its inputs --
++  // the CompileInfo JSScript* (rp->block()->info().script()), WarpSnapshot-baked
++  // shapes/objects as MIR constants, and baked pc/gcthing pointers -- while allocating
++  // (snapshot/MIR LifoAlloc, encoder buffers, inline template reads). A COMPACTING GC
++  // firing mid-compile (GECKO_GCZEAL=14, or a real shrinking GC under memory pressure)
++  // MOVES those tenured cells, leaving the compiler's raw pointers stale -> EmitValue's
++  // `sc->getShape(pc)` derefs a moved JSScript -> OOB "unreachable" (bench/difftests/
++  // gcleads/forof-compaction.js: for-of/spread over an array traps under 14,2 while PBL
++  // is correct; the trigger is the object-literal NewObject in the hot iterator/loop fn,
++  // NOT a runtime rooting bug). Real Ion compiles OFF-THREAD against a rooted/traced
++  // WarpSnapshot, so a moving GC never invalidates its inputs; this on-thread path must
++  // suppress moving GC for the compile's duration. NARROW: covers ONLY compilation --
++  // runtime execution still sees full gczeal, so runtime rooting hazards stay observable.
++  // Non-moving GC (gczeal 2, mark-only) and minor GC (7) never tripped this (they don't
++  // move tenured), consistent with a compaction-relocation root cause.
++  // GECKO_WJ_NOCOMPILESUPPRESSGC=1 reverts (crash returns -> confirms this is the fix).
++  static int noCompileSuppressGC =
++      getenv("GECKO_WJ_NOCOMPILESUPPRESSGC") ? 1 : 0;
++  mozilla::Maybe<js::gc::AutoSuppressGC> compileSuppressGC;
++  if (!noCompileSuppressGC) compileSuppressGC.emplace(cx);
 +  bool dump = getenv("GECKO_WJWARP_DUMP");
 +  // Compile-count bisection (tasks #57/#64): GECKO_WJ_COMPILEMAX=N lets only
 +  // the first N functions install (later ones bail to PBL = correct-by-
@@ -4189,7 +4226,7 @@ index cd527a8514..2a5ccc8d30 100644
  }
  
 diff --git a/mozglue/misc/PerfStats.h b/mozglue/misc/PerfStats.h
-index 8c4000fd97..a3924beafc 100644
+index 8c4000fd97ef6f11cc6b800eb3203d696d1b4bf3..a3924beafcdafd48a8422b7d018e6c97fb76695a 100644
 --- a/mozglue/misc/PerfStats.h
 +++ b/mozglue/misc/PerfStats.h
 @@ -222,7 +222,7 @@ class PerfStats {
@@ -4202,7 +4239,7 @@ index 8c4000fd97..a3924beafc 100644
      while (!aTarget.compare_exchange_weak(expected, expected + aValue,
                                            std::memory_order_relaxed,
 diff --git a/mozglue/misc/SSE.h b/mozglue/misc/SSE.h
-index f2a65c4a3f..835b4dc639 100644
+index f2a65c4a3fcdb74a724c291ffc663ce9079b1a1e..835b4dc639ecbd5f34d825f4713bf6d9e6ef57c9 100644
 --- a/mozglue/misc/SSE.h
 +++ b/mozglue/misc/SSE.h
 @@ -208,7 +208,7 @@
@@ -4215,7 +4252,7 @@ index f2a65c4a3f..835b4dc639 100644
  // Emscripten/WebAssembly: SSE intrinsics are provided by emscripten's shim headers
  // (emmintrin.h, tmmintrin.h, ...) and lowered to wasm 128-bit SIMD. The engine is
 diff --git a/mozglue/static/lz4/xxhash.h b/mozglue/static/lz4/xxhash.h
-index 78fc2e8dbf..36d9dd9319 100644
+index 78fc2e8dbf6db809650fbb59762c5566a71677ca..36d9dd93193439f3fe375d3af876af783ae8f1d9 100644
 --- a/mozglue/static/lz4/xxhash.h
 +++ b/mozglue/static/lz4/xxhash.h
 @@ -3847,7 +3847,7 @@ XXH_PUBLIC_API XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const XXH64_can
@@ -4238,7 +4275,7 @@ index 78fc2e8dbf..36d9dd9319 100644
      || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) \
 diff --git a/third_party/weval/weval.h b/third_party/weval/weval.h
 new file mode 100644
-index 0000000000..8ac5248972
+index 0000000000000000000000000000000000000000..8ac5248972df7ebce3a9263aa3881a2aa88b330d
 --- /dev/null
 +++ b/third_party/weval/weval.h
 @@ -0,0 +1,490 @@
@@ -4734,7 +4771,7 @@ index 0000000000..8ac5248972
 +#endif  // __cplusplus
 diff --git a/third_party/wizer/wizer.h b/third_party/wizer/wizer.h
 new file mode 100644
-index 0000000000..e374a5c960
+index 0000000000000000000000000000000000000000..e374a5c96062caa9733d5a4a584b74e715d3842d
 --- /dev/null
 +++ b/third_party/wizer/wizer.h
 @@ -0,0 +1,128 @@

@@ -113,6 +113,7 @@ fi
 mkdir -p "$DST/geckoembed"
 cp "$HERE/chrome/select.xhtml" "$DST/geckoembed/select.xhtml"
 cp "$HERE/chrome/EmbedSelect.sys.mjs" "$DST/modules/EmbedSelect.sys.mjs"
+cp "$HERE/chrome/EmbedTheme.sys.mjs" "$DST/modules/EmbedTheme.sys.mjs"
 printf '\ncontent geckoembed geckoembed/\n' >> "$DST/chrome.manifest"
 
 # Headless gfxFT2FontList needs >=1 font in <process dir>/fonts or it MOZ_CRASHes

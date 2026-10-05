@@ -1,5 +1,34 @@
 # patches/ — engine-side patches for the JS→WASM JIT
 
+## Puter engine synchronization (2026-10-05)
+
+The engine pin is `HeyPuter/firefox@f08e4aa189eb02015568aea1085dab77a187c330`,
+four commits after `2e1e835a5da5907e5ceef19aade58a7493f1e34d`. This follows
+Puter's engine `main`; Puter's wrapper still selects the older pin. The wrapper
+already contains `HeyPuter/firefox-wasm@bc69aaa5e2c5388bcf93a43b975b490bb940f4c0`.
+This is a Puter update, not a rebase onto a new Mozilla release.
+
+The existing pthread configuration remains enabled. Puter's single-thread
+scheduler is conditional on building without Emscripten pthreads. Its JIT GC
+fixes also affect the threaded build, so the community patches were replayed
+against the new pin with these resolutions:
+
+- 0002 keeps Puter's compile-time GC suppression around the complete
+  `WJWarpCompile` operation, including member construction and emission, after
+  the community patch splits those into helper functions.
+- 0003 retains Puter's guarded root tracing and the community call cache's
+  `JSScript` type (the old cache stored a `JSObject`).
+- 0005 and 0007 retain host-calibrated recursion budgets and suspend-watermark
+  fallback to the portable interpreter, superseding Puter's fixed budget and
+  flag-2 fallback. The existing host calibration export remains compatible.
+- 0008 uses the rooted runtime callee for shared-family scripts and Puter's
+  traced script pool for ordinary/inlined scripts. Both paths survive script
+  relocation instead of emitting a stale compile-time pointer.
+
+All 13 patches apply in order and reverse back to the pristine selected source
+files. The WebGL patches and native stack quota patch apply unchanged. A full
+Linux build and Surf runtime validation are required for each new artifact.
+
 The JS→WASM JIT itself lives in the pinned Gecko engine fork
 (`HeyPuter/firefox`, fetched by `make firefox` into `firefox/`, which is
 git-ignored). Any JIT work therefore lands in `firefox/js/src/wasm/WasmJit*.{h,cpp}`

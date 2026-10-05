@@ -1,8 +1,8 @@
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index 22f0f23611..39a281ea1e 100644
+index 10641ba5b05229e626f3c8db084e08f813643344..3ac813e98c5ee786845a04df1ccbf32856cfbbeb 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -11995,10 +11995,10 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -12017,10 +12017,10 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
                !e.writeOp(Op::I64Const) || !e.writeVarS64(0) || !e.writeOp(Op::Return))
              return false;
            if (!e.writeOp(Op::End)) return false;
@@ -16,7 +16,7 @@ index 22f0f23611..39a281ea1e 100644
              return false;
            if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
            // result = ctorRet.isObject() ? ctorRet : box(this)
-@@ -12395,11 +12395,11 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -12417,11 +12417,11 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            if (!e.writeOp(Op::LocalSet) || !e.writeVarU32(be.callFlagLocal))
              return false;  // pop flag (old ABI)
          }
@@ -32,7 +32,7 @@ index 22f0f23611..39a281ea1e 100644
            return false;
          if (!e.writeOp(Op::BrIf) || !e.writeVarU32(doneDepth))
            return false;  // -> $done
-@@ -14396,18 +14396,18 @@ static bool EmitDepthPop(Encoder& e, WJBackend& be) {
+@@ -14418,18 +14418,18 @@ static bool EmitDepthPop(Encoder& e, WJBackend& be) {
           e.writeVarU32(2) && e.writeVarU32(0);
  }
  
@@ -62,7 +62,7 @@ index 22f0f23611..39a281ea1e 100644
    static int enabled =
        WJGETENV("GECKO_WJ_NOSTACKGUARD") ? 0 : 1;
    if (!enabled || !be.hasCalls) return true;
-@@ -14423,8 +14423,9 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+@@ -14445,8 +14445,9 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
    // to ~60% of the measured wasm-stack capacity at first instantiate -- the old
    // 2.5MB constant exceeded V8's real ~1MB wasm stack, so deep JIT recursion
    // crashed the pthread with an uncatchable RangeError instead of throwing.
@@ -74,7 +74,7 @@ index 22f0f23611..39a281ea1e 100644
    // Floor: real V8 wasm frames cost ~700B+ even for tiny fns (operand-stack
    // slots aren't in the estimate), so the estimate alone under-charges and the
    // guard fires too late. 800 also caps levels outright: limit/800.
-@@ -14452,7 +14453,7 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+@@ -14474,7 +14475,7 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
    if (!GetLocal(e, be.savedDepthLocal) || !e.writeOp(Op::I32Const) ||
        !e.writeVarS32(fb) || !e.writeOp(Op::I32Add))
      return false;
@@ -83,24 +83,30 @@ index 22f0f23611..39a281ea1e 100644
      if (!e.writeOp(Op::I32Const) || !e.writeVarS32(envLimit)) return false;
    } else {
      if (!e.writeOp(Op::I32Const) ||
-@@ -14463,10 +14464,12 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+@@ -14485,17 +14486,11 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
    }
    if (!e.writeOp(Op::I32GtS)) return false;
    if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
--  // THROW is the DEFAULT (GECKO_WJ_NODEPTHTHROW reverts to the flag-2 valve): a throw
--  // unwinds V8's wasm stack cleanly; the valve regrows it (PBL re-enters the JIT) and
--  // still crashes at deep recursion.
--  static int depthThrow = WJGETENV("GECKO_WJ_NODEPTHTHROW") ? 0 : 1;
+-  // The flag-2 DEOPT-TO-PBL VALVE is the DEFAULT (GECKO_WJ_DEPTHTHROW opts into throw).
+-  // With DEPTHLIMIT tuned BELOW V8's wasm-stack crash, the valve fires in time and
+-  // SELF-LIMITS: each re-entry's prologue immediately re-deopts (gWJJitDepth still >
+-  // limit), so the deep tail runs interpreted in PBL on the 64MB linear stack under
+-  // the engine's REAL recursion quota -> reaches ~the SpiderMonkey default recursion
+-  // depth and throws a CATCHABLE "too much recursion" beyond it (== PBL), NOT the
+-  // uncatchable V8 RangeError. (The prior default was THROW, which fired far below the
+-  // real limit for big-frame fns and, at the old too-high 2.5M limit, let V8 crash
+-  // uncatchably for small-frame fns -- the "recursion InternalError on real sites" bug.
+-  // Validated: depth/sum reach ~PBL depth, big-frame matches PBL exactly, sum(15000/
+-  // 50000) throw catchably, shallow recursion (fib) is unaffected full-speed JIT.)
 +  // SUSPEND is the DEFAULT (GECKO_WJ_DEPTHTHROW selects the throw): return flag
 +  // 3.0 + set the suspend watermark so the caller delegates the call to PBL and
 +  // every JS->WJ edge refuses while the delegating frame is live. A finite deep
 +  // recursion (React's fiber DFS, x.com sentry-filter) completes on PBL's heap
 +  // shadow stack instead of aborting on an InternalError.
-+  static int depthThrow = WJGETENV("GECKO_WJ_DEPTHTHROW") ? 1 : 0;
+   static int depthThrow = WJGETENV("GECKO_WJ_DEPTHTHROW") ? 1 : 0;
    if (depthThrow) {
      // THROW MODE: raise the catchable over-recursion exception and propagate out.
-     // A throw UNWINDS V8's wasm execution stack cleanly (each frame returns the
-@@ -14477,11 +14480,11 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+@@ -14507,11 +14502,11 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
      // then return the throw flag [1.0,0] (or EHABI wasm-exn). Pick a limit BELOW the
      // crash but ABOVE any benchmark's real recursion so the guard only fires for
      // genuinely-too-deep recursion. GECKO_WJ_DEPTHTHROW enables (default = valve).
@@ -113,7 +119,7 @@ index 22f0f23611..39a281ea1e 100644
      if (!e.writeOp(Op::F64Const) || !e.writeFixedF64(double(WJH_OVERRECURSED)) ||
          !e.writeOp(Op::F64Const) || !e.writeFixedF64(0.0) ||
          !e.writeOp(Op::Call) || !e.writeVarU32(0) || !e.writeOp(Op::Drop))
-@@ -14494,20 +14497,42 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+@@ -14524,20 +14519,42 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
          return false;
      }
    } else {
@@ -166,7 +172,7 @@ index 22f0f23611..39a281ea1e 100644
          !e.writeOp(Op::I64Const) ||
          !e.writeVarS64(int64_t(JS::UndefinedValue().asRawBits())) ||
          !e.writeOp(Op::Return))
-@@ -14841,20 +14866,6 @@ static bool EmitBlockBody(Encoder& e, WJBackend& be, MBasicBlock* b) {
+@@ -14871,20 +14888,6 @@ static bool EmitBlockBody(Encoder& e, WJBackend& be, MBasicBlock* b) {
      if (it != be.blockExitRp.end()) lastRp = it->second;
    }
    be.curRp = lastRp;  // valid even for an empty block (terminator uses it)
@@ -187,7 +193,7 @@ index 22f0f23611..39a281ea1e 100644
    for (MInstructionIterator it = b->begin(); it != b->end(); it++) {
      MInstruction* ins = *it;
      if (ins->isControlInstruction()) continue;
-@@ -16588,6 +16599,12 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -16618,6 +16621,12 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
        return false;
      if (!e.writeOp(Op::End)) return false;
    }
@@ -201,10 +207,10 @@ index 22f0f23611..39a281ea1e 100644
    // GC-root shadow stack at the current gWJRootSP, remember the slot index in
    // envRootIdx, and bump gWJRootSP. The slot is traced on EVERY GC (minor+major)
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index ed5a1a9237..ea2be6d5ba 100644
+index 61e7c0473b6015bf32e9be8e634239bdff477a4e..1bed4b18b38f2c59c7b472bf08a4c9e0bcece297 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -548,6 +548,12 @@ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit
+@@ -555,6 +555,12 @@ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit
  // wj_set_depth_limit), since the capacity varies across browsers. Compiled code
  // loads it on entry, so calibration applies to modules compiled before it too.
  extern int32_t gWJJitDepthLimit;
@@ -218,10 +224,10 @@ index ed5a1a9237..ea2be6d5ba 100644
  // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
  // call marshalling). Sized for nargs<=64 with slack.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index e65c54579d..4de9eb71e4 100644
+index 66144f61a52e4b5da3fad4f99913724fc7862d74..41a0b4510e88ae35abeadffbccae4338c39ea759 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
-@@ -853,6 +853,9 @@ int js::wasm::WasmJitPreCall(JSScript* script) {
+@@ -878,6 +878,9 @@ int js::wasm::WasmJitPreCall(JSScript* script) {
    static int sEnabled = -1;
    if (sEnabled < 0) sEnabled = getenv("GECKO_NOWASMJIT") ? 0 : 1;
    if (!sEnabled) return 0;
@@ -231,7 +237,7 @@ index e65c54579d..4de9eb71e4 100644
    static uint32_t sMaxLen2 = 0;
    if (!sMaxLen2) {
      const char* s = getenv("GECKO_WJ_MAXLEN");
-@@ -875,6 +878,9 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -900,6 +903,9 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    static int sEnabled = -1;
    if (sEnabled < 0) sEnabled = getenv("GECKO_NOWASMJIT") ? 0 : 1;
    if (!sEnabled) return false;
@@ -241,7 +247,7 @@ index e65c54579d..4de9eb71e4 100644
    // Max compilable bytecode length. Big functions (uBlock's parseNetPattern/validateNet/
    // analyze_re ~4.4-6KB) were never attempted at the old hard 4096. Configurable so we can
    // compile them. GECKO_WJ_MAXLEN overrides.
-@@ -1460,6 +1466,14 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1485,6 +1491,14 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
                               JSObject* envChain, uint64_t* retBits) {
    if (gWJVerifyReentry) return 0;  // verifier re-run: force PBL
    if (!gEntries) return 0;
@@ -256,7 +262,7 @@ index e65c54579d..4de9eb71e4 100644
    // Last-lookup cache: hot functions are entered repeatedly with the same script,
    // so skip the unordered_map find (per-PBL->JIT-entry cost on entry-heavy benches
    // like splay). Map element addresses are stable across rehashes, so caching the
-@@ -1688,22 +1702,30 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1713,22 +1727,30 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
    gWJExecDepth--;
    // Convention: 0.0 = result ready in gWJScratch (normal completion OR sound
    // resume); 1.0 = an exception is pending (a call/resume threw) -> propagate;
@@ -298,7 +304,7 @@ index e65c54579d..4de9eb71e4 100644
      }
      return 0;
    }
-@@ -2688,6 +2710,15 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2713,6 +2735,15 @@ static double wjhelpImpl(double kindF, double siteF) {
      gWJTraceBuf[gWJTraceCount++ & (kWJTraceN - 1)] = uint32_t(int64_t(siteF));
      return 0.0;
    }
@@ -314,7 +320,7 @@ index e65c54579d..4de9eb71e4 100644
    if (kind == 252) {  // ARGC0DBG trap: a usesArgc fn entered with a ZERO argc snapshot.
      static uint64_t n = 0;
      if (n++ < 12) {
-@@ -3040,7 +3071,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3065,7 +3096,8 @@ static double wjhelpImpl(double kindF, double siteF) {
          }
        }
        if (osrEnabled && nframes == 1 && gWJResumeValsOff[0] == 0 &&
@@ -324,7 +330,7 @@ index e65c54579d..4de9eb71e4 100644
          JSScript* dscript =
              reinterpret_cast<JSScript*>(uintptr_t(gWJResumeScriptPtr[0]));
          if (dscript) {
-@@ -3090,7 +3122,9 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3115,7 +3147,9 @@ static double wjhelpImpl(double kindF, double siteF) {
                }
                // fp wrote the fn's return into gWJScratch[kWJResultSlot] on normal
                // completion (flag 0.0) or signalled a pending exception (1.0).
@@ -335,7 +341,7 @@ index e65c54579d..4de9eb71e4 100644
              }
            }
          }
-@@ -3537,6 +3571,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3602,6 +3636,7 @@ static double wjhelpImpl(double kindF, double siteF) {
          // them, so EVERY call slow-pathed. nargs <= kWJMaxArgs always holds for a
          // register-ABI-compiled callee.
          if (it != gEntries->end() &&
@@ -343,7 +349,7 @@ index e65c54579d..4de9eb71e4 100644
              it->second.state == WJEntry::State::Compiled &&
              it->second.nargs <= js::wasm::kWJMaxArgs &&
              it->second.handle >= 0) {  // invalid handle (post-valve reset / failed
-@@ -3674,14 +3709,19 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3739,14 +3774,19 @@ static double wjhelpImpl(double kindF, double siteF) {
            double ptr = double(uintptr_t(static_cast<void*>(gWJScratch)));
            double flag = wasmhost_call(ce.handle, ce.memberIdx, &ptr, 1);
            gWJFastCalls++;
@@ -371,7 +377,7 @@ index e65c54579d..4de9eb71e4 100644
            } else {
              return flag;  // 0 = result in gWJScratch[result]; 1 = threw
            }
-@@ -6254,14 +6294,16 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -6319,14 +6359,16 @@ static double wjhelpImpl(double kindF, double siteF) {
        for (int k = 0; k < kWJCtorCacheN; k++) {
          if (gWJCC_key[k] == ntKey) { cslot = k; break; }
        }
@@ -390,7 +396,7 @@ index e65c54579d..4de9eb71e4 100644
            gWJFastCalls++;
            gWJScratch[js::wasm::kWJResultSlot] = thisv.get().asRawBits();
            for (uint32_t i = 0; i < argc; i++) gWJScratch[i] = 0;
-@@ -6297,6 +6339,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -6362,6 +6404,7 @@ static double wjhelpImpl(double kindF, double siteF) {
                iit = gEntries->find(iscript);
              }
              if (iit != gEntries->end() &&
@@ -398,7 +404,7 @@ index e65c54579d..4de9eb71e4 100644
                  iit->second.state == WJEntry::State::Compiled &&
                  argc >= iit->second.nargs && iit->second.handle >= 0) {
                gWJCurrentEnv = uint32_t(
-@@ -6383,6 +6426,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -6448,6 +6491,7 @@ static double wjhelpImpl(double kindF, double siteF) {
          js::wasm::WasmJitObserveCall(ccs);
          auto cit = gEntries->find(ccs);
          if (cit != gEntries->end() &&
@@ -406,7 +412,7 @@ index e65c54579d..4de9eb71e4 100644
              cit->second.state == WJEntry::State::Compiled &&
              argc >= cit->second.nargs && cit->second.handle >= 0) {
            gWJCurrentEnv =
-@@ -6841,6 +6885,10 @@ int32_t gWJJitDepth = 0;
+@@ -6906,6 +6950,10 @@ int32_t gWJJitDepth = 0;
  // capacity via wj_set_depth_limit (first wasmhost_instantiate on the thread).
  // GECKO_WJ_DEPTHLIMIT overrides outright (EmitDepthCheck bakes it as a const).
  int32_t gWJJitDepthLimit = 480000;

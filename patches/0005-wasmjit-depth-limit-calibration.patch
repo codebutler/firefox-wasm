@@ -1,13 +1,20 @@
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index ca09e8a7f5..22f0f23611 100644
+index d03642b17e1105b6b101048813fb5e7f764cbb9a..10641ba5b05229e626f3c8db084e08f813643344 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -14417,9 +14417,19 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+@@ -14439,16 +14439,19 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
    // big-frame fn (few levels to overflow) from a small one. The limit is in BYTES
    // ~= V8's wasm execution-stack size minus a safety margin (GECKO_WJ_DEPTHLIMIT
    // overrides, in bytes).
+-  // DEPTHLIMIT (bytes) must fire the guard BEFORE the HOST wasm-call-stack overflows
+-  // (uncatchable RangeError). This is HOST-DEPENDENT: node's V8 wasm stack crashes at
+-  // ~1.2-1.5M gWJJitDepth, but a BROWSER's V8 wasm stack is far smaller (~300-640K
+-  // measured -> 700K crashed real sites). 150000 is conservative for a small browser
+-  // stack while still reaching the engine's real recursion quota via the PBL tail (the
+-  // deep tail runs in PBL -- see the WasmJitRunCall deep-recursion gate). MUST match the
+-  // gate's default in WasmJitRuntime.cpp. GECKO_WJ_DEPTHLIMIT overrides (bytes).
 -  static int limit = WJGETENV("GECKO_WJ_DEPTHLIMIT")
--                         ? atoi(WJGETENV("GECKO_WJ_DEPTHLIMIT")) : 2500000;
+-                         ? atoi(WJGETENV("GECKO_WJ_DEPTHLIMIT")) : 150000;
 +  // GECKO_WJ_DEPTHLIMIT bakes a const override (also disables calibration).
 +  // Otherwise the emitted code LOADS gWJJitDepthLimit: the default (480000)
 +  // bounds any fn to ~600 frames, and the host probe recalibrates the global
@@ -24,7 +31,7 @@ index ca09e8a7f5..22f0f23611 100644
    int32_t dAddr = int32_t(uintptr_t(static_cast<void*>(&gWJJitDepth)));
    // savedDepthLocal = gWJJitDepth
    if (!e.writeOp(Op::I32Const) || !e.writeVarS32(dAddr) || !e.writeOp(Op::I32Load) ||
-@@ -14440,9 +14450,18 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+@@ -14469,9 +14472,18 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
    // so PBL calls back into the JIT each level and V8's wasm stack keeps growing ->
    // still crashes. Throwing unwinds the whole recursion catchably (== PBL behavior).
    if (!GetLocal(e, be.savedDepthLocal) || !e.writeOp(Op::I32Const) ||
@@ -43,13 +50,13 @@ index ca09e8a7f5..22f0f23611 100644
 +  }
 +  if (!e.writeOp(Op::I32GtS)) return false;
    if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
-   // THROW is the DEFAULT (GECKO_WJ_NODEPTHTHROW reverts to the flag-2 valve): a throw
-   // unwinds V8's wasm stack cleanly; the valve regrows it (PBL re-enters the JIT) and
+   // The flag-2 DEOPT-TO-PBL VALVE is the DEFAULT (GECKO_WJ_DEPTHTHROW opts into throw).
+   // With DEPTHLIMIT tuned BELOW V8's wasm-stack crash, the valve fires in time and
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index c29dd4fdaf..ed5a1a9237 100644
+index 4af33c69bb3226d313faff0ae1ef7f4175a89277..61e7c0473b6015bf32e9be8e634239bdff477a4e 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -543,6 +543,11 @@ static constexpr uint32_t kWJCallRootsSize = 1048576;
+@@ -550,6 +550,11 @@ static constexpr uint32_t kWJCallRootsSize = 1048576;
  extern uint64_t gWJCallRoots[];
  extern uint32_t gWJRootSP;
  extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit)
@@ -62,10 +69,10 @@ index c29dd4fdaf..ed5a1a9237 100644
  // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
  // call marshalling). Sized for nargs<=64 with slack.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 4ced897627..e65c54579d 100644
+index 76c361de540cf39279bf30fbaaceb2a836491944..66144f61a52e4b5da3fad4f99913724fc7862d74 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
-@@ -6835,9 +6835,19 @@ uint32_t gWJRootSP = 0;
+@@ -6900,9 +6900,19 @@ uint32_t gWJRootSP = 0;
  // frames DO trip the real quota -> catchable "too much recursion"). Self-correcting:
  // each frame RESTORES it to the entry value at exit, so cold/leaked paths re-balance.
  int32_t gWJJitDepth = 0;

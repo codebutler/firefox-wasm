@@ -5,6 +5,7 @@ import {
   SelectParent as DesktopSelectParent,
   SelectParentHelper,
 } from "resource://gre/actors/SelectParent.sys.mjs";
+import { registerChromeDocument } from "resource://gre/modules/EmbedTheme.sys.mjs";
 
 const trace = (...values) => {
   if (Services.env.get("GECKO_SELECT_DEBUG")) console.info("[embed-select]", ...values);
@@ -30,6 +31,7 @@ function ensurePopupWindow() {
       if (document.documentURI !== "chrome://geckoembed/content/select.xhtml") return;
       target.removeEventListener("load", loaded, true);
       popupWindow = document.defaultView;
+      registerChromeDocument(document);
       const base = shell.QueryInterface(Ci.nsIBaseWindow);
       base.setPositionAndSize(0, 0, popupWindow.screen.width, popupWindow.screen.height, Ci.nsIBaseWindow.eRepaint);
       base.visibility = true;
