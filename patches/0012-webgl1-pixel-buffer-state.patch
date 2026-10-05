@@ -1,0 +1,17 @@
+--- a/dom/canvas/WebGLContext.cpp
++++ b/dom/canvas/WebGLContext.cpp
+@@ -2098,6 +2098,14 @@
+ 
+ void DoBindBuffer(gl::GLContext& gl, const GLenum target,
+                   const WebGLBuffer* const buffer) {
++  // Texture upload/readback scopes also restore a null pixel-buffer binding
++  // for WebGL 1. GLES 2 has no PBO state: even binding zero is INVALID_ENUM.
++  if (!gl.HasPBOState() &&
++      (target == LOCAL_GL_PIXEL_PACK_BUFFER ||
++       target == LOCAL_GL_PIXEL_UNPACK_BUFFER)) {
++    MOZ_ASSERT(!buffer);
++    return;
++  }
+   gl.fBindBuffer(target, buffer ? buffer->mGLName : 0);
+ }
+ 

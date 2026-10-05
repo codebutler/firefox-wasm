@@ -207,6 +207,11 @@ static nsIDocShell* EnsureBrowser(int width, int height) {
     return nullptr;
   }
   g_wb->GetDocShell(getter_AddRefs(g_docShell));
+  // Windowless browsers have no front-end to initialize session history. Do
+  // this before the first content load so Back/Forward own real entries.
+  if (g_docShell) {
+    g_docShell->GetBrowsingContext()->InitSessionHistory();
+  }
   // Give the docshell a real size + make it visible, so its PresShell has a
   // non-empty viewport and actually reflows/paints.
   nsCOMPtr<nsIBaseWindow> baseWin = do_QueryInterface(g_docShell);
