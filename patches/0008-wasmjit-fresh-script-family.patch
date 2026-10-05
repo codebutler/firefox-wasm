@@ -1,5 +1,5 @@
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
-index c89a896645..d50bbc3db8 100644
+index c89a8966455d1dfc40bf88bf08aa5c19b32d9ec6..d50bbc3db8f8b75562053fbf2ed4cd01653bb872 100644
 --- a/js/src/vm/Interpreter.cpp
 +++ b/js/src/vm/Interpreter.cpp
 @@ -409,6 +409,7 @@ static void AssertExceptionResult(JSContext* cx) {
@@ -35,7 +35,7 @@ index c89a896645..d50bbc3db8 100644
            uint64_t wbits;
            js::wasm::gWJCallCallee = ObjectValue(*maybeFun).asRawBits();
 diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index 03175ae376..086b4e3648 100644
+index 0eac2e3a3f15d8f0f53ea03e6540a73fee2f126a..13e7823d35db3c70fa3c0a9f44a86e1f08ce19e5 100644
 --- a/js/src/vm/PortableBaselineInterpret.cpp
 +++ b/js/src/vm/PortableBaselineInterpret.cpp
 @@ -83,6 +83,9 @@ namespace wasm {
@@ -94,7 +94,7 @@ index 03175ae376..086b4e3648 100644
                bool wjRouted = false;
                if (wjpc == 1) {
 diff --git a/js/src/wasm/WasmJit.h b/js/src/wasm/WasmJit.h
-index 930fd98c77..1c10d73235 100644
+index 930fd98c77b0e80c7b64097069c453fbf05aa942..1c10d73235084fba206bdfe55d4974f3afc5aa65 100644
 --- a/js/src/wasm/WasmJit.h
 +++ b/js/src/wasm/WasmJit.h
 @@ -35,6 +35,13 @@ namespace wasm {
@@ -112,7 +112,7 @@ index 930fd98c77..1c10d73235 100644
  // deferred their (synchronous) compile off the critical path. Call at an idle / task
  // boundary (browser: between event-loop tasks; node: between top-level runs). No-op
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index 39a281ea1e..7d679568a9 100644
+index 3ac813e98c5ee786845a04df1ccbf32856cfbbeb..ce6cf25c544584afa2ee2eeeaba4752760398ee9 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
 @@ -402,6 +402,9 @@ struct WJBackend {
@@ -125,7 +125,7 @@ index 39a281ea1e..7d679568a9 100644
    bool depthChecked = false;      // did the entry block emit the recursion save/check? (gates the restore)
    bool hasCalls = false;          // graph contains a call (can recurse) -> needs the recursion guard; leaves skip it
    uint32_t frameBytesEst = 128;   // estimated V8 wasm frame size (bytes) for the recursion BYTE-guard: (params+valuelocals+dedicated)*8 + overhead. Approximates real stack usage so the guard fires by BYTES (like a real SP check), not by a flat frame count that ignores frame size.
-@@ -1330,6 +1333,12 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+@@ -1339,6 +1342,12 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
    }
    uint32_t valsIdx = 0;  // running index into gWJResumeVals across all frames
    for (uint32_t f = 0; f < nframes; f++) {
@@ -138,12 +138,24 @@ index 39a281ea1e..7d679568a9 100644
      MResumePoint* rp = frames[f];
      const CompileInfo& info = rp->block()->info();
      uint32_t nargs = info.nargs();
-@@ -1466,9 +1475,31 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+@@ -1475,21 +1484,44 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
      if (!storeI32(uintptr_t(&gWJResumePc[f]), int32_t(pcOff))) return false;
      if (!storeI32(uintptr_t(&gWJResumeStackDepth[f]), int32_t(outDepth)))
        return false;
--    if (!storeI32(uintptr_t(&gWJResumeScriptPtr[f]),
--                  int32_t(uintptr_t(info.script()))))
+-    // Spill the resumed frame's JSScript. BAKING info.script() as an I32Const is STALE
+-    // under a compacting GC (the script moves, the immutable wasm constant can't be
+-    // rewritten -> resume reads a moved-away script -> script->function() garbage -> OOB;
+-    // crypto/pako deopt-resume-under-compaction). Instead intern it into the traced+
+-    // relocated gWJScriptPool and LOAD the slot at runtime so the CURRENT (relocated)
+-    // script is spilled. GECKO_WJ_NOSCRIPTPOOL reverts to baking.
+-    static int noScriptPool = WJGETENV("GECKO_WJ_NOSCRIPTPOOL") ? 1 : 0;
+-    uintptr_t scrSlot =
+-        noScriptPool ? 0 : js::wasm::WJInternScript(uintptr_t(info.script()));
+-    if (scrSlot) {
+-      if (!storeI32FromSlot(uintptr_t(&gWJResumeScriptPtr[f]), scrSlot)) return false;
+-    } else {
+-      if (!storeI32(uintptr_t(&gWJResumeScriptPtr[f]),
+-                    int32_t(uintptr_t(info.script()))))
 +    if (be.sharedFamily && f == nframes - 1) {
 +      // Shared artifact: the running JSScript is not a compile-time constant
 +      // (any same-source family member may run this code). Load it from the
@@ -164,15 +176,28 @@ index 39a281ea1e..7d679568a9 100644
 +          !e.writeVarU32(JSFunction::offsetOfJitInfoOrScript()) ||
 +          !e.writeOp(Op::I32Store) || !e.writeVarU32(2) ||
 +          !e.writeVarU32(0))
-+        return false;
-+    } else if (!storeI32(uintptr_t(&gWJResumeScriptPtr[f]),
-+                         int32_t(uintptr_t(info.script())))) {
-       return false;
-+    }
+         return false;
++    } else {
++      // Spill the resumed frame's JSScript. BAKING info.script() as an I32Const is STALE
++      // under a compacting GC (the script moves, the immutable wasm constant can't be
++      // rewritten -> resume reads a moved-away script -> script->function() garbage -> OOB;
++      // crypto/pako deopt-resume-under-compaction). Instead intern it into the traced+
++      // relocated gWJScriptPool and LOAD the slot at runtime so the CURRENT (relocated)
++      // script is spilled. GECKO_WJ_NOSCRIPTPOOL reverts to baking.
++      static int noScriptPool = WJGETENV("GECKO_WJ_NOSCRIPTPOOL") ? 1 : 0;
++      uintptr_t scrSlot =
++          noScriptPool ? 0 : js::wasm::WJInternScript(uintptr_t(info.script()));
++      if (scrSlot) {
++        if (!storeI32FromSlot(uintptr_t(&gWJResumeScriptPtr[f]), scrSlot)) return false;
++      } else {
++        if (!storeI32(uintptr_t(&gWJResumeScriptPtr[f]),
++                      int32_t(uintptr_t(info.script()))))
++          return false;
++      }
+     }
      if (!storeI32(uintptr_t(&gWJResumeNArgs[f]), int32_t(nargs))) return false;
      if (!storeI32(uintptr_t(&gWJResumeNLocals[f]), int32_t(nlocals))) return false;
-     if (!storeI32(uintptr_t(&gWJResumeValsOff[f]), int32_t(frameValsOff)))
-@@ -16242,6 +16273,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -16264,6 +16296,7 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
    WJBackend be;
    be.info = &mir.outerInfo();
    be.snapshot = snapshot;
@@ -180,7 +205,7 @@ index 39a281ea1e..7d679568a9 100644
    // Params: 0 = scratch-base (f64); EHABI also 1 = callee (i64); then this (i64) and
    // args (i64). Old ABI: 0=sb, 1=this, 2..=args. (kWJThisParam/kWJArg0Param encode this.)
    be.paramCount = (kWJEHABI ? 3 : 2) + kWJMaxArgs;
-@@ -16438,6 +16470,17 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -16460,6 +16493,17 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
        be.assign(ins);
      }
    }
@@ -199,10 +224,10 @@ index 39a281ea1e..7d679568a9 100644
    // alwaysBails-as-deopt: Warp marks a block alwaysBails when it ends in a cold
    // IC (never-profiled) whose transpile yields buildBailoutForColdIC. Ion handles
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index ea2be6d5ba..0002ca8df2 100644
+index 1bed4b18b38f2c59c7b472bf08a4c9e0bcece297..cc503a794c5af492218d1f00caa10a5d958b2446 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -304,6 +304,10 @@ extern bool gWJForceMega;  // next compile: megamorphic property reads (post-sto
+@@ -311,6 +311,10 @@ extern bool gWJForceMega;  // next compile: megamorphic property reads (post-sto
  extern bool gWJForceGenericCmp;  // next compile: de-spec numeric compares (post-storm)
  extern bool gWJForceGenericCall;  // next compile: de-spec fn-identity call guards (post-storm)
  extern bool gWJForceNumberArith;  // next compile: de-speculate Int32 arith/elem ICs (post-deopt)
@@ -214,7 +239,7 @@ index ea2be6d5ba..0002ca8df2 100644
  // Synchronous main-thread tier-up compile cost (GECKO_WJ_COMPILESTAT).
  extern uint64_t gWJCompileAttempts;  // total WJWarpCompile calls
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 4de9eb71e4..c22f034d47 100644
+index 41a0b4510e88ae35abeadffbccae4338c39ea759..b8f5e013c0e3e7ccb300186f3411addac5c363b7 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -43,6 +43,7 @@
@@ -233,7 +258,7 @@ index 4de9eb71e4..c22f034d47 100644
  uint64_t gWJCompileAttempts = 0;
  uint64_t gWJCompileOK = 0;
  double gWJCompileMs = 0.0;
-@@ -427,6 +429,7 @@ uintptr_t js::wasm::WJInternShape(uintptr_t shapeBits) {
+@@ -452,6 +454,7 @@ uintptr_t js::wasm::WJInternScript(uintptr_t scriptBits) {
  
  namespace {
  
@@ -241,7 +266,7 @@ index 4de9eb71e4..c22f034d47 100644
  struct WJEntry {
    enum class State : uint8_t { Cold, Compiled, Failed };
    State state = State::Cold;
-@@ -497,8 +500,143 @@ struct WJEntry {
+@@ -522,8 +525,143 @@ struct WJEntry {
    // Cohort fusion (GECKO_WJ_COHORT) reassembles these into a shared module --
    // pure byte copy, no Warp re-run, no script dereference at drain time.
    std::vector<uint8_t> jitBody;
@@ -385,7 +410,7 @@ index 4de9eb71e4..c22f034d47 100644
  // Per-script compile state. Keyed by JSScript*; entries persist for the process.
  static std::unordered_map<JSScript*, WJEntry>* gEntries = nullptr;
  
-@@ -706,6 +844,62 @@ static uint32_t WarmupDelay() {
+@@ -731,6 +869,62 @@ static uint32_t WarmupDelay() {
  
  }  // namespace
  
@@ -448,7 +473,7 @@ index 4de9eb71e4..c22f034d47 100644
  bool js::wasm::WasmJitInWasm() { return js::wasm::gWJExecDepth > 0; }
  
  // __wjStats() backend: aggregate the ALWAYS-ON JIT counters into a JSON string
-@@ -816,6 +1010,7 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+@@ -841,6 +1035,7 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
    if (gEntries) {
      for (auto& kv : *gEntries) {
        WJEntry& e = kv.second;
@@ -456,7 +481,7 @@ index 4de9eb71e4..c22f034d47 100644
        if (e.state != WJEntry::State::Compiled) continue;
        e.state = WJEntry::State::Cold;
        e.handle = -1;
-@@ -830,6 +1025,26 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
+@@ -855,6 +1050,26 @@ void js::wasm::WasmJitInvalidateAll(const char* reason) {
        n++;
      }
    }
@@ -483,7 +508,7 @@ index 4de9eb71e4..c22f034d47 100644
    gWJCohortPending.clear();
    gWJCallEdges.clear();
    // Stale call-IC entries would dispatch to the abandoned table slots; clearing
-@@ -909,8 +1124,54 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -934,8 +1149,54 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    }
  
    WJEntry& e = EntryFor(script);
@@ -538,7 +563,7 @@ index 4de9eb71e4..c22f034d47 100644
  
    // Size-scaled warmup: the per-function wasm COMPILE cost scales with bytecode
    // length (big parser/framework fns cost 10-25ms to compile; tiny hot loops <1ms).
-@@ -943,7 +1204,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -968,7 +1229,8 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    ++e.observes;
    // Post-storm: stay in PBL until the IC warms polymorphic (overrides the warm-
    // path bypass below, which would otherwise recompile early + monomorphic).
@@ -548,7 +573,7 @@ index 4de9eb71e4..c22f034d47 100644
    uint32_t warm =
        script->hasJitScript() ? script->jitScript()->warmUpCount() : 0;
    static uint32_t kLoopWarm = 0;
-@@ -974,7 +1236,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -999,7 +1261,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    // ARE net-positive to compile there. Size+call-count CANNOT distinguish gbemu's
    // net-negative tiny handlers (net-negative because reached via MEGAMORPHIC fn-ptr
    // dispatch) from richards' net-positive tiny methods. See gbemu memory.
@@ -557,7 +582,7 @@ index 4de9eb71e4..c22f034d47 100644
  
    // NOCOMPILE-lineno-range bisection (GECKO_WJ_NOCOMPILERANGE=lo,hi): refuse to
    // compile any function whose script lineno is in [lo,hi] -> it runs in PURE PBL
-@@ -1023,7 +1285,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1048,7 +1310,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
        getenv("GECKO_WJ_DEFERSTRAND") ? uint32_t(atoi(getenv("GECKO_WJ_DEFERSTRAND")))
                                       : 4096;
    if (deferCompile && !gWJDrainingNow && e.fails == 0 &&
@@ -566,7 +591,7 @@ index 4de9eb71e4..c22f034d47 100644
      // Enqueue on first qualification; on EVERY later observe stay in PBL (return
      // false) until the drain compiles it -- otherwise the 2nd observe would fall
      // through to the inline compile and defeat the deferral.
-@@ -1054,6 +1316,12 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1079,6 +1341,12 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    js::wasm::gWJForceGenericCmp = e.forceGenericCmp;  // generic compares (post-storm)
    js::wasm::gWJForceGenericCall = e.forceGenericCall;  // generic call guards (post-storm)
    gWJPendingOsrTargets.clear();  // backend appends OSR targets during this compile
@@ -579,7 +604,7 @@ index 4de9eb71e4..c22f034d47 100644
    // COMPILE-COST instrumentation (GECKO_WJ_COMPILESTAT): synchronous main-thread
    // tier-up compile is on the load critical path -- a real-site load compiles
    // MANY briefly-run functions and NEVER amortizes the compile (unlike octane's
-@@ -1068,6 +1336,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1093,6 +1361,7 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
    js::wasm::gWJForceMega = false;
    js::wasm::gWJForceGenericCmp = false;
    js::wasm::gWJForceGenericCall = false;
@@ -587,7 +612,7 @@ index 4de9eb71e4..c22f034d47 100644
    if (compileStat) {
      double ms = (mozilla::TimeStamp::Now() - wjCompT0).ToMilliseconds();
      // Per-compile (bytecode-length, ms) log to test emit super-linearity:
-@@ -1164,6 +1433,11 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1189,6 +1458,11 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
      } else {
        e.nextTry = e.observes + (WarmupDelay() << e.fails);
      }
@@ -599,7 +624,7 @@ index 4de9eb71e4..c22f034d47 100644
      return false;
    }
    if (getenv("GECKO_WJ_PBLWHO"))
-@@ -1195,11 +1469,31 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -1220,11 +1494,31 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
      e.directIdx = int(wasmhost_call(handle, -(e.memberIdx + 1), nullptr, 0));
      if (e.directIdx <= 0) e.directIdx = -1;
    }
@@ -632,7 +657,7 @@ index 4de9eb71e4..c22f034d47 100644
      gWJCohortPending.push_back(script);
      if (int(gWJCohortPending.size()) >= cohortMax) WJDrainCohort(cx);
    }
-@@ -1336,6 +1630,17 @@ static bool WJStormDecision(WJEntry& e, JSScript* script) {
+@@ -1361,6 +1655,17 @@ static bool WJStormDecision(WJEntry& e, JSScript* script) {
          !noDeoptValve && !e.recompileDone)) {
      return false;
    }
@@ -650,7 +675,7 @@ index 4de9eb71e4..c22f034d47 100644
    // A storming fn with an alwaysBails block deopts from that COLD-IC block;
    // recompiling reproduces it identically (verified: deltablue 741's recompiled
    // MIR is byte-identical), so recompiling is pointless AND the recompile churn
-@@ -6932,6 +7237,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7081,6 +7386,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
    for (JSScript*& s : gWJDeferQueue) {
      js::TraceRoot(trc, &s, "wjdeferq");
    }

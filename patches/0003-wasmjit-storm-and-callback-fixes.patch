@@ -1,5 +1,5 @@
 diff --git a/js/src/vm/Caches.h b/js/src/vm/Caches.h
-index 88012d36c0..6f86e1bb18 100644
+index 88012d36c0571e04fb6453844ce7c8bc40aa0044..6f86e1bb18ce42dec6625b84a534a6a0b7a07997 100644
 --- a/js/src/vm/Caches.h
 +++ b/js/src/vm/Caches.h
 @@ -183,7 +183,7 @@ class MegamorphicCache {
@@ -12,7 +12,7 @@ index 88012d36c0..6f86e1bb18 100644
    static constexpr uint8_t ShapeHashShift2 =
        ShapeHashShift1 + mozilla::FloorLog2(NumEntries);
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
-index d3ec33f213..c89a896645 100644
+index d3ec33f213572d332eb7a808c969d0a3036c6883..c89a8966455d1dfc40bf88bf08aa5c19b32d9ec6 100644
 --- a/js/src/vm/Interpreter.cpp
 +++ b/js/src/vm/Interpreter.cpp
 @@ -470,6 +470,81 @@ bool js::RunScript(JSContext* cx, RunState& state) {
@@ -98,10 +98,10 @@ index d3ec33f213..c89a896645 100644
    switch (status) {
      case jit::EnterJitStatus::Error:
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index 821804d796..8ca8e62e88 100644
+index 2e9f90c68ece54c69aada04d2a9bc05d64266824..a6cdc16e55f48f4863f5fe6cd2ee5060ff50b468 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -4172,6 +4172,971 @@ static bool EmitOperandAsF64(Encoder& e, WJBackend& be, MDefinition* d) {
+@@ -4194,6 +4194,971 @@ static bool EmitOperandAsF64(Encoder& e, WJBackend& be, MDefinition* d) {
    return r == uint8_t(TypeCode::I32) ? e.writeOp(Op::F64ConvertI32S) : true;
  }
  
@@ -1073,7 +1073,7 @@ index 821804d796..8ca8e62e88 100644
  static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
    WJSetBailOp(ins);  // attribute an internal bail to this op (+ precise op line)
    switch (ins->op()) {
-@@ -4368,6 +5333,26 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -4390,6 +5355,26 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          }
          if (onlyGenericCmps) fallible = false;
        }
@@ -1100,7 +1100,7 @@ index 821804d796..8ca8e62e88 100644
        return EmitUnboxLocal(e, be, uint32_t(inLocal), u->type(), fallible);
      }
      case MDefinition::Opcode::GuardShape: {
-@@ -7943,9 +8928,16 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -7965,9 +8950,16 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            }
          }
        }
@@ -1118,7 +1118,7 @@ index 821804d796..8ca8e62e88 100644
      }
      case MDefinition::Opcode::GetNameCache: {
        // Global/lexical name lookup. envObj = operand 0; the name is the GETNAME/
-@@ -8659,48 +9651,93 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -8681,48 +9673,93 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            // above). Covers earley's millions of cons/symbol `eq?` identity compares
            // (8.9M WJH_COMPARE) with no C++ hop. Loose ==/relational keep the helper.
            // GECKO_WJ_NOSPECEQ reverts.
@@ -1154,9 +1154,10 @@ index 821804d796..8ca8e62e88 100644
 -                !I32C(int32_t(TagWord(JSVAL_TYPE_BIGINT))) || !e.writeOp(Op::I32Eq) ||
 -                !e.writeOp(Op::I32Or))
 +                !e.writeOp(Op::I32Eq))
-+              return false;
-+            if (!e.writeOp(Op::If) || !e.writeFixedU8(uint8_t(TypeCode::I32)))
-+              return false;
+               return false;
+             if (!e.writeOp(Op::If) || !e.writeFixedU8(uint8_t(TypeCode::I32)))
+               return false;
+-            if (!cmpHelper()) return false;  // String/BigInt value-eq
 +            if (noStrEqA3) {
 +              if (!cmpHelper(jsop)) return false;
 +            } else {
@@ -1179,10 +1180,9 @@ index 821804d796..8ca8e62e88 100644
 +            if (!pushTag(l0) ||
 +                !I32C(int32_t(TagWord(JSVAL_TYPE_BIGINT))) ||
 +                !e.writeOp(Op::I32Eq))
-               return false;
-             if (!e.writeOp(Op::If) || !e.writeFixedU8(uint8_t(TypeCode::I32)))
-               return false;
--            if (!cmpHelper()) return false;  // String/BigInt value-eq
++              return false;
++            if (!e.writeOp(Op::If) || !e.writeFixedU8(uint8_t(TypeCode::I32)))
++              return false;
 +            if (!cmpHelper(jsop)) return false;  // BigInt value-eq
              if (!e.writeOp(Op::Else)) return false;
              // identity: full boxed-bits equal/not-equal.
@@ -1226,7 +1226,7 @@ index 821804d796..8ca8e62e88 100644
            return e.writeOp(Op::End);
          }
          if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
-@@ -8954,7 +9991,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -8976,7 +10013,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        if (!EmitStageScratch(e, be, m->object(), 0)) return false;
        uint64_t nameBits = js::IdToValue(m->name()).asRawBits();
        if (!EmitStageConstBoxed(e, be, nameBits, 1)) return false;
@@ -1235,7 +1235,7 @@ index 821804d796..8ca8e62e88 100644
      }
      case MDefinition::Opcode::MegamorphicLoadSlotByValue: {
        // obj[key] megamorphic. GetElementOperation handles by-value lookups and
-@@ -8962,11 +9999,6 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -8984,11 +10021,6 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        // so routing to WJH_GETPROP is sound. op0 = object, op1 = idVal (Value).
        if (WJGETENV("GECKO_WJ_NO_MLSBV")) return false;
        MMegamorphicLoadSlotByValue* mbvM = ins->toMegamorphicLoadSlotByValue();
@@ -1247,7 +1247,7 @@ index 821804d796..8ca8e62e88 100644
        // BY-VALUE MEGA PROBE (GECKO_WJ_MEGABYVAL, opt-in, READ-ONLY): obj[atomKey]
        // hits the per-runtime js::MegamorphicCache inline (shape+key hash -> own-data
        // slot, no C++ hop) -- the real-SPA dynamic-key GETPROP ceiling (discord
-@@ -8978,118 +10010,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -9000,118 +10032,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        // + engaging (obj[k] GETPROP 5.8M->2.4M) + octane-NEUTRAL (best-of-8 earley 1.03/
        // crypto 0.985 = noise; full suite ~1.0). Read-only = safe. GECKO_WJ_NOMEGABYVAL reverts.
        static int mbv = WJGETENV("GECKO_WJ_NOMEGABYVAL") ? 0 : 1;
@@ -1369,7 +1369,7 @@ index 821804d796..8ca8e62e88 100644
      }
      case MDefinition::Opcode::MegamorphicHasProp: {
        // `key in obj` (site=0) / own-property check (site=1). op0 = object, op1 = idVal.
-@@ -9290,6 +10216,107 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -9312,6 +10238,107 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        bool lamInlined = ins->block()->info().script() != be.info->script();
        if (lamInlined && WJGETENV("GECKO_WJ_NOINLINELAMBDA")) return false;
        MLambda* l = ins->toLambda();
@@ -1477,7 +1477,7 @@ index 821804d796..8ca8e62e88 100644
        if (!EmitStageScratch(e, be, l->environmentChain(), 0)) return false;
        if (!EmitStageScratch(e, be, l->getOperand(1), 1)) return false;  // template fn
        if (!EmitHelperCallResult(e, be, ins, WJH_LAMBDA, 0)) return false;
-@@ -9306,14 +10333,137 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -9328,14 +10355,137 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        static int noTypeofInline = WJGETENV("GECKO_WJ_NOTYPEOFINLINE") ? 1 : 0;
        JSValueType vt = JSVAL_TYPE_OBJECT;
        bool isNum = false, inlineable = true;
@@ -1617,7 +1617,7 @@ index 821804d796..8ca8e62e88 100644
        }
        if (!noTypeofInline && inlineable) {
          if (!GetOp(e, be, t->input())) return false;
-@@ -9361,6 +10511,80 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -9383,6 +10533,80 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
                 e.writeOp(Op::I32Const) && e.writeVarS32(v) &&
                 e.writeOp(Op::I32Store) && e.writeVarU32(2) && e.writeVarU32(0);
        };
@@ -1698,7 +1698,7 @@ index 821804d796..8ca8e62e88 100644
        if (!stG(&gWJNewShapeSlot, int32_t(shapeAddr)) ||
            !stG(&gWJNewHeap, int32_t(uint32_t(n->initialHeap()))))
          return false;
-@@ -10916,6 +12140,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10938,6 +12162,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        // next way, then to the slow wjhelp hop }. Way 0 first => monomorphic
        // calls cost one compare; polymorphic dispatch (task.run) stays in wasm.
        if (!e.writeOp(Op::Block) || !e.writeFixedU8(0x40)) return false;  // void
@@ -1706,7 +1706,7 @@ index 821804d796..8ca8e62e88 100644
        static int forceSlowCallEnv = WJGETENV("GECKO_WJ_FORCESLOWCALL") ? 1 : 0;
        // Inlining-containing functions route calls through the slow (clean-boundary)
        // path: the fast call_indirect corrupts on a deopt nested under an inlined
-@@ -10939,6 +12164,38 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10961,6 +12186,38 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            (be.hasInlinedFrames && !noInlineSlowCall &&
             !(narrowSlow && !be.hasCatchTrynote));
        static uint32_t maxWays = WJGETENV("GECKO_WJ_MONOCALL") ? 1 : kWJCallWays;
@@ -1745,7 +1745,7 @@ index 821804d796..8ca8e62e88 100644
        for (uint32_t w = 0; w < maxWays && !forceSlowCall; w++) {
          uintptr_t fnW =
              uintptr_t(static_cast<void*>(&gWJCallFn[site * kWJCallWays + w]));
-@@ -10947,7 +12204,8 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10969,7 +12226,8 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(fnW)) ||
              !e.writeOp(Op::I32Load) || !e.writeVarU32(2) || !e.writeVarU32(0))
            return false;
@@ -1755,7 +1755,7 @@ index 821804d796..8ca8e62e88 100644
          if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(tblW)) ||
              !e.writeOp(Op::I32Load) || !e.writeVarU32(2) || !e.writeVarU32(0))
            return false;
-@@ -11006,8 +12264,15 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11028,8 +12286,15 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
              return false;
          }
          for (uint32_t a = 0; a <= kWJMaxArgs; a++) {  // this + kWJMaxArgs args
@@ -1772,7 +1772,7 @@ index 821804d796..8ca8e62e88 100644
          }
          if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(tblW)) ||
              !e.writeOp(Op::I32Load) || !e.writeVarU32(2) || !e.writeVarU32(0))
-@@ -11027,9 +12292,146 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11049,9 +12314,146 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          if (!GetLocal(e, be.callFlagLocal) || !e.writeOp(Op::F64Const) ||
              !e.writeFixedF64(2.0) || !e.writeOp(Op::F64Ne))
            return false;
@@ -1920,7 +1920,7 @@ index 821804d796..8ca8e62e88 100644
        {  // SLOW: store this+args to scratch (the callee's trampoline / JS::Call
          // reads them), set callee+argc, wjhelp(WJH_CALL, site).
          for (uint32_t a = 0; a < argc; a++) {
-@@ -11058,6 +12460,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11080,6 +12482,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(calleeAddr))) return false;
          if (!EmitSpillValue(e, be, call->getCallee())) return false;
          if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(0)) return false;
@@ -1942,7 +1942,7 @@ index 821804d796..8ca8e62e88 100644
          if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(argcAddr)) ||
              !e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(argc)) ||
              !e.writeOp(Op::I32Store) || !e.writeVarU32(2) || !e.writeVarU32(0)) {
-@@ -11180,6 +12597,80 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11202,6 +12619,80 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        // Int32/Boolean/Object(+Null/Undefined ptr) all compare as i32 here.
        bool i32 = ct == MCompare::Compare_Int32 || ct == MCompare::Compare_Object ||
                   ct == MCompare::Compare_Null || ct == MCompare::Compare_Undefined;
@@ -2023,7 +2023,7 @@ index 821804d796..8ca8e62e88 100644
        if (!dbl && !i32) {
          // String/Symbol/BigInt compare. Route through the WJH_COMPARE VM helper --
          // the SAME proven-sound path the untyped Boolean MBinaryCache compare uses
-@@ -11224,6 +12715,33 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11246,6 +12737,33 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          // COUNT is high but the C++ hop is not the time bottleneck -- V8 compiles the call
          // well; per-call/boxing overhead dominates). gbemu was marginally WORSE (extra
          // branches before the inevitable helper). See [[pdfjs-laggard-fromcharcode]].
@@ -2057,7 +2057,7 @@ index 821804d796..8ca8e62e88 100644
          constexpr int strCmp2 = 1;  // two-way string-compare path is permanent
          // Bisection: STRCMP2SKIP=N excludes the fn at lineno N; STRCMP2ONLY=N routes
          // ONLY that fn. Lets us env-bisect which now-fully-compiled pdfjs fn carries
-@@ -11276,9 +12794,51 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11298,9 +12816,51 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            // INPUTS (raw boxed Values) and skip refinement guards. The helper
            // does the full compare for any type pair (lodash compareAscending:
            // Compare_String-specialized operands storming on numbers).
@@ -2111,7 +2111,7 @@ index 821804d796..8ca8e62e88 100644
              if (be.local(gl) >= 0 && be.local(gr) >= 0) {
                return EmitStageScratch(e, be, gl, 0) &&
                       EmitStageScratch(e, be, gr, 1) &&
-@@ -11293,6 +12853,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11315,6 +12875,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            if (!noGuard && r->type() == MIRType::Value &&
                !EmitTagGuardLocal(e, be, uint32_t(be.local(r)), wantTag))
              return false;
@@ -2124,7 +2124,7 @@ index 821804d796..8ca8e62e88 100644
            return EmitStageScratch(e, be, l, 0) && EmitStageScratch(e, be, r, 1) &&
                   EmitHelperCallResult(e, be, ins, WJH_COMPARE, uint32_t(c->jsop())) &&
                   EmitHelperResultAsType(e, be, MIRType::Boolean);
-@@ -11320,78 +12886,11 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11342,78 +12908,11 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
        // relational). Reads the unbox's INPUT so the (now unguarded) unbox's f64
        // local stays dead. Same soundness as the STRCMP2/(A3) helper routes.
        if (be.forceGenericCmp && (dbl || i32) && !refCmp) {
@@ -2207,7 +2207,7 @@ index 821804d796..8ca8e62e88 100644
          }
        }
        const uint8_t kI32 = uint8_t(TypeCode::I32), kF64 = uint8_t(TypeCode::F64);
-@@ -11946,7 +13445,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -11968,7 +13467,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
            if (!EmitStageScratch(e, be, WJGuardObject(gs), 0)) return EffectKind::Fail;
            if (!EmitStageConstBoxed(e, be, keyVal, 1)) return EffectKind::Fail;
            if (!EmitStageScratch(e, be, s->value(), 2)) return EffectKind::Fail;
@@ -2216,7 +2216,7 @@ index 821804d796..8ca8e62e88 100644
              return EffectKind::Fail;
            return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
          }
-@@ -12114,7 +13613,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -12136,7 +13635,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
              if (!EmitStageScratch(e, be, WJGuardObject(gs), 0)) return EffectKind::Fail;
              if (!EmitStageConstBoxed(e, be, keyVal, 1)) return EffectKind::Fail;
              if (!EmitStageScratch(e, be, s->value(), 2)) return EffectKind::Fail;
@@ -2225,7 +2225,7 @@ index 821804d796..8ca8e62e88 100644
                return EffectKind::Fail;
              return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
            }
-@@ -12391,7 +13890,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -12413,7 +13912,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
          if (!EmitStageScratch(e, be, s->object(), 0)) return EffectKind::Fail;
          if (!EmitStageScratch(e, be, s->index(), 1)) return EffectKind::Fail;
          if (!EmitStageScratch(e, be, s->value(), 2)) return EffectKind::Fail;
@@ -2234,7 +2234,7 @@ index 821804d796..8ca8e62e88 100644
            return EffectKind::Fail;
          if (!e.writeOp(Op::Drop)) return EffectKind::Fail;
        }
-@@ -12583,7 +14082,8 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -12605,7 +14104,8 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
        if (!EmitStageScratch(e, be, m->object(), 0)) return EffectKind::Fail;
        if (!EmitStageConstBoxed(e, be, nameBits, 1)) return EffectKind::Fail;
        if (!EmitStageScratch(e, be, m->rhs(), 2)) return EffectKind::Fail;
@@ -2244,7 +2244,7 @@ index 821804d796..8ca8e62e88 100644
          return EffectKind::Fail;
        return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
      }
-@@ -12592,10 +14092,27 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -12614,10 +14114,27 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
        // accessors correctly (superset of the Ion fast path). op0=obj,1=index,2=value.
        if (WJGETENV("GECKO_WJ_NO_MSE")) return EffectKind::Fail;
        MMegamorphicSetElement* m = ins->toMegamorphicSetElement();
@@ -2273,7 +2273,7 @@ index 821804d796..8ca8e62e88 100644
          return EffectKind::Fail;
        return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
      }
-@@ -12683,7 +14200,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -12705,7 +14222,7 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
        if (!EmitStageScratch(e, be, s->idval(), 1)) return EffectKind::Fail;
        if (!EmitStageScratch(e, be, s->value(), 2)) return EffectKind::Fail;
        uint32_t hsite = (s->strict() ? 1u : 0u) | (isInit ? 2u : 0u) |
@@ -2283,10 +2283,10 @@ index 821804d796..8ca8e62e88 100644
          return EffectKind::Fail;
        return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index b37f6c5f37..0a31b2f64b 100644
+index 4eeefdcb8efc63059eb88e4e3af3a26ab77f3ae7..27715a7cde668efade56b03ca774e33f0de4910e 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -401,18 +401,21 @@ extern int64_t gWJHelpI64;
+@@ -408,18 +408,21 @@ extern int64_t gWJHelpI64;
  extern uint64_t gWJElemHits;  // DEBUG: inline typed-array element-store IC hits
  
  // Monomorphic call-site IC for direct wasm->wasm calls. Per call site: the cached
@@ -2317,7 +2317,7 @@ index b37f6c5f37..0a31b2f64b 100644
  extern int32_t gWJCallTblIdx[];   // callee's shared-table index
  // Call-edge attribution for the cohort tier (GECKO_WJ_COHORT): the script that
  // OWNS the module containing each call site (set at compile; outermost script).
-@@ -421,6 +424,16 @@ extern JSScript* gWJCallSiteScript[];
+@@ -428,6 +431,16 @@ extern JSScript* gWJCallSiteScript[];
  // GECKO_WJ_CALLHIST (emitted i32++ on each way hit) -- zero hot-path cost when
  // off; without it only IC-FILL edges are observable.
  extern uint64_t gWJCallHits[];
@@ -2335,7 +2335,7 @@ index b37f6c5f37..0a31b2f64b 100644
  uint32_t WJAllocCallSite();
  
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 1f57f24f56..56026f63ae 100644
+index 556f8ba6b8a6929e780dc5dc6f89e6aefdee5bd9..d02cda7009d622dd0a0458f7f8027cbb27fe3a76 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -40,10 +40,13 @@
@@ -2369,7 +2369,7 @@ index 1f57f24f56..56026f63ae 100644
  static uint32_t gWJNextCallSite = 0;
  uint32_t WJAllocCallSite() {
    if (gWJNextCallSite >= kWJCallSites) return 0;  // site 0 is a safe sentinel
-@@ -846,7 +859,9 @@ int js::wasm::WasmJitPreCall(JSScript* script) {
+@@ -871,7 +884,9 @@ int js::wasm::WasmJitPreCall(JSScript* script) {
      if (!sMaxLen2) sMaxLen2 = 4096;
    }
    if (!script->function() || script->isModule() ||
@@ -2380,7 +2380,7 @@ index 1f57f24f56..56026f63ae 100644
      return 0;
    }
    WJEntry& e = EntryFor(script);
-@@ -868,7 +883,9 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+@@ -893,7 +908,9 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
      sMaxLen = s ? uint32_t(atoi(s)) : 4096;
      if (!sMaxLen) sMaxLen = 4096;
    }
@@ -2391,7 +2391,7 @@ index 1f57f24f56..56026f63ae 100644
      static int pblWho = getenv("GECKO_WJ_PBLWHO") ? 1 : 0;
      if (pblWho && script->function() && !script->isModule() &&
          script->length() > 4096) {
-@@ -1241,6 +1258,202 @@ static int valveReturnEarly(uint64_t* retBits) {
+@@ -1266,6 +1283,202 @@ static int valveReturnEarly(uint64_t* retBits) {
    return 1;
  }
  
@@ -2594,7 +2594,7 @@ index 1f57f24f56..56026f63ae 100644
  int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
                               const JS::Value* argv, uint32_t argc,
                               JSObject* envChain, uint64_t* retBits) {
-@@ -1517,8 +1730,24 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1542,8 +1755,24 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
    // keeping it in JIT (the goal: almost never engage PBL). Cap recompiles; only
    // after repeated failure fall back to PBL (last resort).
    if (gWJDidResume) {
@@ -2621,7 +2621,7 @@ index 1f57f24f56..56026f63ae 100644
      // GuardGlobalGeneration storm control (see gggDeopts in WJEntry).
      if (gWJLastDeoptOp == js::wasm::gWJOpGuardGlobalGeneration) {
        e.gggDeopts++;
-@@ -1533,45 +1762,6 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1558,45 +1787,6 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
          return valveReturnEarly(retBits);
        }
      }
@@ -2667,7 +2667,7 @@ index 1f57f24f56..56026f63ae 100644
      // CRITICAL (2026-06-29): the function ALREADY RAN this call (flag==0 -> its
      // result is in gWJScratch[kWJResultSlot], and any side effects -- incl. those
      // completed by the deopt-RESUME -- are done). The valve paths below change e.state
-@@ -1586,116 +1776,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -1611,116 +1801,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
        *retBits = gWJScratch[js::wasm::kWJResultSlot];
        return 1;
      };
@@ -2785,7 +2785,7 @@ index 1f57f24f56..56026f63ae 100644
        return valveReturn();
      }
    } else {
-@@ -2178,6 +2259,30 @@ static double WJNativeCall(JSContext* cx, JSFunction* fun, JSNative native,
+@@ -2203,6 +2284,30 @@ static double WJNativeCall(JSContext* cx, JSFunction* fun, JSNative native,
    fun = &vp[0].toObject().as<JSFunction>();  // re-derive: the hook may GC->move
    js::AutoRealm ar(cx, fun);
    gWJNativeCalls++;
@@ -2816,7 +2816,7 @@ index 1f57f24f56..56026f63ae 100644
    if (!native(cx, argc, vp)) {
      return 1.0;
    }
-@@ -2185,6 +2290,282 @@ static double WJNativeCall(JSContext* cx, JSFunction* fun, JSNative native,
+@@ -2210,6 +2315,282 @@ static double WJNativeCall(JSContext* cx, JSFunction* fun, JSNative native,
    return 0.0;
  }
  
@@ -3099,7 +3099,7 @@ index 1f57f24f56..56026f63ae 100644
  extern "C" EMSCRIPTEN_KEEPALIVE double wjhelp(double kindF, double siteF) {
    gWJLastHelpKind = uint32_t(kindF);
    gWJLastHelpSite = uint32_t(siteF);
-@@ -2388,7 +2769,10 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2413,7 +2794,10 @@ static double wjhelpImpl(double kindF, double siteF) {
      static int entryDump = getenv("GECKO_WJ_ENTRYDUMP") ? 1 : 0;
      static int deoptHist = getenv("GECKO_WJ_DEOPTHIST") ? 1 : 0;
      static int deoptHistN = getenv("GECKO_WJ_DEOPTHISTN") ? 1 : 0;
@@ -3111,7 +3111,7 @@ index 1f57f24f56..56026f63ae 100644
      static int stormFirst = getenv("GECKO_WJ_STORMFIRST") ? 1 : 0;
      if(dbgJit){static uint64_t c=0; if((++c%5000)==0) fprintf(stderr,"[wb-resume-count] %llu\n",(unsigned long long)c);}
      if(siteHist){static uint64_t c=0; uint64_t thr=getenv("GECKO_WJ_SITEHISTN")?atoi(getenv("GECKO_WJ_SITEHISTN")):200000; if((++c%thr)==0) js::wasm::WJDumpDeoptSiteHist();}
-@@ -2408,22 +2792,25 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2433,22 +2817,25 @@ static double wjhelpImpl(double kindF, double siteF) {
      if (stormLine) {
        static uint64_t sc = 0;
        ++sc;
@@ -3141,7 +3141,7 @@ index 1f57f24f56..56026f63ae 100644
          }
        }
      }
-@@ -2449,13 +2836,23 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2474,13 +2861,23 @@ static double wjhelpImpl(double kindF, double siteF) {
      static int noGsfValve = getenv("GECKO_WJ_NOGSFVALVE") ? 1 : 0;
      static int gsfGate = getenv("GECKO_WJ_GSFGATE")
                               ? atoi(getenv("GECKO_WJ_GSFGATE"))
@@ -3166,7 +3166,7 @@ index 1f57f24f56..56026f63ae 100644
          if (dit != gEntries->end() &&
              dit->second.state == WJEntry::State::Compiled) {
            WJEntry& de = dit->second;
-@@ -2463,6 +2860,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2488,6 +2885,7 @@ static double wjhelpImpl(double kindF, double siteF) {
            if (de.gsfDeopts >= uint32_t(gsfGate)) {
              if (de.genericCallDone) {
                de.state = WJEntry::State::Failed;
@@ -3174,7 +3174,7 @@ index 1f57f24f56..56026f63ae 100644
              } else {
                de.genericCallDone = true;
                de.forceGenericCall = true;
-@@ -2476,6 +2874,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2501,6 +2899,7 @@ static double wjhelpImpl(double kindF, double siteF) {
                de.jitRuns = 0;
                de.observes = 0;
                de.nextTry = 0;
@@ -3182,7 +3182,7 @@ index 1f57f24f56..56026f63ae 100644
              }
            }
          }
-@@ -2914,6 +3313,94 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -2979,6 +3378,94 @@ static double wjhelpImpl(double kindF, double siteF) {
      RootedValue callee(cx, JS::Value::fromRawBits(gWJCallCallee));
      uint32_t argc = gWJCallArgc;
  
@@ -3277,7 +3277,7 @@ index 1f57f24f56..56026f63ae 100644
      // GECKO_WJ_MAGICPROBE=1: report a MAGIC-tagged Value leaking out of JIT'd
      // code as a call argument or `this` (e.g. an ELEMENTS_HOLE flowing into
      // set.add -> the webtooling MOZ_RELEASE_ASSERT(whyMagic()==why) trap).
-@@ -2947,9 +3434,13 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3012,9 +3499,13 @@ static double wjhelpImpl(double kindF, double siteF) {
      // GECKO_WJ_FORCESLOW (debug) skips this so callees re-enter via JS::Call ->
      // WasmJitRunCall, where the differential verifier can check them.
      static int forceSlow = getenv("GECKO_WJ_FORCESLOW") ? 1 : 0;
@@ -3291,7 +3291,7 @@ index 1f57f24f56..56026f63ae 100644
        if (fun->isInterpreted() && fun->hasBytecode()) {
          JSScript* cs = fun->nonLazyScript();
          // Drive compilation of JIT-only callees: a function called ONLY from
-@@ -2983,8 +3474,33 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3048,8 +3539,33 @@ static double wjhelpImpl(double kindF, double siteF) {
            // Only if the callee has a real table slot; else stays on the slow path.
            static int noICFill = getenv("GECKO_WJ_NOICFILL") ? 1 : 0;
            if (noICFill) { /* force all calls through this C++ path (debug) */ }
@@ -3327,7 +3327,7 @@ index 1f57f24f56..56026f63ae 100644
              uint32_t base = site * kWJCallWays;
              uint32_t w = 0;
              for (; w < kWJCallWays; w++) {
-@@ -3028,6 +3544,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3093,6 +3609,8 @@ static double wjhelpImpl(double kindF, double siteF) {
                  }
                }
              }
@@ -3336,7 +3336,7 @@ index 1f57f24f56..56026f63ae 100644
            }
            // Resume context is self-contained (emitted code sets it), so just run.
            gWJCurrentEnv = uint32_t(uintptr_t(static_cast<void*>(fun->environment())));
-@@ -3089,6 +3607,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3154,6 +3672,8 @@ static double wjhelpImpl(double kindF, double siteF) {
            } else {
              return flag;  // 0 = result in gWJScratch[result]; 1 = threw
            }
@@ -3345,7 +3345,7 @@ index 1f57f24f56..56026f63ae 100644
          }
          // FELL THROUGH to JS::Call though callee is interpreted-with-bytecode:
          // diagnose WHY (state/handle/tblSlot/nargs-vs-argc). [CTFDBG]
-@@ -3131,11 +3651,21 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3196,11 +3716,21 @@ static double wjhelpImpl(double kindF, double siteF) {
          callee.toObject().is<JSFunction>()) {
        JSFunction* nfun = &callee.toObject().as<JSFunction>();
        if (nfun->isNativeFun()) {
@@ -3368,7 +3368,7 @@ index 1f57f24f56..56026f63ae 100644
              reinterpret_cast<const JS::Value*>(&gWJScratch[0]), thisv);
        }
      }
-@@ -3276,6 +3806,10 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3341,6 +3871,10 @@ static double wjhelpImpl(double kindF, double siteF) {
      }
      JSFunction* nfun = &svp[0].toObject().as<JSFunction>();
      JS::HandleValue thisv = JS::HandleValue::fromMarkedLocation(&svp[1]);
@@ -3379,7 +3379,7 @@ index 1f57f24f56..56026f63ae 100644
      return WJNativeCall(cx, nfun, native, argc, &svp[2], thisv);
    }
  
-@@ -3383,8 +3917,175 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3448,8 +3982,175 @@ static double wjhelpImpl(double kindF, double siteF) {
    if (kind == js::wasm::WJH_GETPROP || kind == js::wasm::WJH_GETELEM) {
      RootedValue lref(cx, JS::Value::fromRawBits(gWJScratch[0]));
      RootedValue rref(cx, JS::Value::fromRawBits(gWJScratch[1]));
@@ -3555,7 +3555,7 @@ index 1f57f24f56..56026f63ae 100644
      gWJScratch[js::wasm::kWJResultSlot] = res.asRawBits();
      return 0.0;
    }
-@@ -3458,7 +4159,87 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3523,7 +4224,87 @@ static double wjhelpImpl(double kindF, double siteF) {
      JSOp op = JSOp(int(siteF));
      RootedValue lhs(cx, JS::Value::fromRawBits(gWJScratch[0]));
      RootedValue rhs(cx, JS::Value::fromRawBits(gWJScratch[1]));
@@ -3643,7 +3643,7 @@ index 1f57f24f56..56026f63ae 100644
      switch (op) {
        case JSOp::Eq: ok = js::LooselyEqual(cx, lhs, rhs, &b); break;
        case JSOp::Ne: ok = js::LooselyEqual(cx, lhs, rhs, &b); b = !b; break;
-@@ -4998,6 +5779,36 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5063,6 +5844,36 @@ static double wjhelpImpl(double kindF, double siteF) {
      // with the op's attrs) -- an OOB typed-array define THROWS where a set
      // silently skips (jit-test typedarray/define-property-oob).
      uint32_t hsite = uint32_t(siteF);
@@ -3680,7 +3680,7 @@ index 1f57f24f56..56026f63ae 100644
      if (hsite & 2) {
        RootedId id(cx);
        if (!js::ToPropertyKey(cx, idx, &id)) return 1.0;
-@@ -5007,7 +5818,15 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5072,7 +5883,15 @@ static double wjhelpImpl(double kindF, double siteF) {
        return 0.0;
      }
      bool strict = (hsite & 1) != 0;
@@ -3697,7 +3697,7 @@ index 1f57f24f56..56026f63ae 100644
      gWJScratch[js::wasm::kWJResultSlot] = val.asRawBits();
      return 0.0;
    }
-@@ -6005,21 +6824,22 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -6141,20 +6960,21 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
        }
      }
    }
@@ -3725,9 +3725,8 @@ index 1f57f24f56..56026f63ae 100644
    {
      uint32_t n = js::wasm::gWJNextCallSite * js::wasm::kWJCallWays;
      for (uint32_t i = 0; i < n; i++) {
-       if (gWJCallFn[i]) {
--        js::TraceRoot(trc, reinterpret_cast<JSObject**>(&gWJCallFn[i]), "wjcallfn");
-+        js::TraceRoot(trc, reinterpret_cast<JSScript**>(&gWJCallFn[i]), "wjcallfn");
-       }
+-      WJTracePtrRoot<JSObject>(trc, &gWJCallFn[i], "wjcallfn");
++      WJTracePtrRoot<JSScript>(trc, &gWJCallFn[i], "wjcallfn");
      }
      // Site->caller map (cohort edge attribution): caller scripts must stay live
+     // and pointer-current or edges attribute to a dead/moved JSScript*.
