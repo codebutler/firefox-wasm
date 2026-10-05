@@ -1,0 +1,21 @@
+gecko.js/chrome/EmbedPickers.sys.mjs
+  s_6e03fa3fb4523e::t_20fe14e831033a 134-137
+gecko.js/pickers.test.mjs
+  s_6e03fa3fb4523e::t_4739a794762363 10,119-126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "236d2019746522ee219a2f6349ce8df394372144",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
