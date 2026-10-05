@@ -1,0 +1,39 @@
+gecko.js/chrome/EmbedPickers.sys.mjs
+  s_6e03fa3fb4523e::t_8bb77bcf502b78 1-189
+gecko.js/fonts.json
+  s_6e03fa3fb4523e::t_ceb963665e39e2 1-185
+gecko.js/js/index.ts
+  s_6e03fa3fb4523e::t_1947f58dc63315 172-173,306-307,597-619,720-721
+gecko.js/src/embed-browser.cpp
+  s_6e03fa3fb4523e::t_b9c2facb5f7a8a 163-164
+gecko.js/src/embed-chrome.cpp
+  s_6e03fa3fb4523e::t_1bf97a8ae1fae9 5-6,35,44,60,74,277-302,304-309
+gecko.js/stage-fonts.py
+  s_a6fa0e0a38c9d4::t_61d896578dd8df 1-34
+gecko.js/stage-gre-min.sh
+  s_a6fa0e0a38c9d4::t_3d807fa328ed0e 117,130-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4f43c1e4e17bad3db55312066f4eff073bf4ccb7",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_a6fa0e0a38c9d4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1098d-5b59-79b0-ba55-f8788f3beffc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
