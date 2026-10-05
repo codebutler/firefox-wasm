@@ -1,0 +1,25 @@
+gecko.js/js/index.ts
+  s_6e03fa3fb4523e::t_968bcca7245bcc 447,455-456
+gecko.js/src/embed-browser.cpp
+  s_6e03fa3fb4523e::t_dee8f488354718 69,98,103
+gecko.js/src/embed-input.cpp
+  s_6e03fa3fb4523e::t_3ed91a4fa81f47 9,48,66,270
+gecko.js/src/embed-paint.cpp
+  s_6e03fa3fb4523e::t_7aa34cde5a41d7 79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "af239317de04defdfc643ab8c110f46aa76f5e3e",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
