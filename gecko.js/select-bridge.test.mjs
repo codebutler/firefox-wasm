@@ -14,6 +14,7 @@ function bridge() {
   window.document.getElementById = () => popup;
   const helper = { _actor: null, hide() { popup.hidden = true; } };
   class DesktopSelectParent {
+    browsingContext = { canOpenModalPicker: true };
     receiveMessage(message) { received.push(message.name); helper._actor = this; }
     sendAsyncMessage(name) { sent.push(name); }
     get _menulist() { return this._document.getElementById('ContentSelectDropdown'); }
@@ -24,12 +25,16 @@ function bridge() {
     Ci: { nsIBaseWindow: { eRepaint: 1 } },
     ChromeUtils: { unregisterWindowActor() {}, registerWindowActor(name, actor) { actors.push({ name, actor }); } },
     Services: {
+      env: { get() { return ""; } },
+      obs: { addObserver() {} },
       appShell: { createWindowlessBrowser() { return {
         docShell: {
-          chromeEventHandler: {
+          browsingContext: {},
+          chromeEventHandler: null,
+          domWindow: { windowRoot: {
             addEventListener(name, callback) { onLoaded = callback; },
             removeEventListener() {},
-          },
+          } },
           QueryInterface() { return base; },
         },
         loadURI() {}, close() { closed = true; },
@@ -44,6 +49,7 @@ function bridge() {
   vm.runInContext(source, context);
   return {
     Parent: context.SelectParent, received, sent, actors, popup, base,
+    forward: context.forwardWindowlessSelectEvent,
     loaded() { onLoaded({ target: { documentURI: 'chrome://geckoembed/content/select.xhtml', defaultView: window } }); },
     get closed() { return closed; },
   };
@@ -63,6 +69,24 @@ test('select messages stay ordered while the chrome popup document loads', async
   assert.equal(b.base.visibility, true);
   assert.equal(b.actors[0].name, 'Select');
   assert.equal(b.actors[0].actor.child.esModuleURI, 'resource://gre/actors/SelectChild.sys.mjs');
+});
+
+test('windowless events reach the native child actor only for trusted unembedded content', () => {
+  const b = bridge(), delivered = [];
+  const browsingContext = { isContent: true, top: { embedderElement: null } };
+  const window = { browsingContext, windowGlobalChild: { getActor(name) {
+    assert.equal(name, 'Select');
+    return { handleEvent(event) { delivered.push(event.type); } };
+  } } };
+  const event = { type: 'mozshowdropdown', isTrusted: true, target: { ownerDocument: { defaultView: window } } };
+  b.forward(event);
+  b.forward({ ...event, isTrusted: false });
+  browsingContext.top.embedderElement = {};
+  b.forward(event);
+  browsingContext.top.embedderElement = null;
+  browsingContext.isContent = false;
+  b.forward(event);
+  assert.deepEqual(delivered, ['mozshowdropdown']);
 });
 
 test('navigation while chrome loads cannot reopen a destroyed select actor', async () => {

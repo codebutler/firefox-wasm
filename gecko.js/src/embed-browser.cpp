@@ -5,6 +5,7 @@
 #include "js/Exception.h"
 #include "js/PropertyAndElement.h"
 #include "xpcpublic.h"
+#include "mozilla/dom/CanonicalBrowsingContext.h"
 
 // A single windowless browser / chrome AppWindow is created lazily and kept alive
 // across loads + input events so the live document stays interactive.
@@ -235,6 +236,11 @@ static nsIDocShell* EnsureBrowser(int width, int height) {
   // this before the first content load so Back/Forward own real entries.
   if (g_docShell) {
     g_docShell->GetBrowsingContext()->InitSessionHistory();
+    // There is no tab browser to mark this standalone content context active.
+    // Visibility alone doesn't do that: documents stay hidden and native
+    // picker eligibility rejects their selects until activeness is set.
+    g_docShell->GetBrowsingContext()->Canonical()->SetIsActive(
+        true, mozilla::IgnoreErrors());
   }
   // Give the docshell a real size + make it visible, so its PresShell has a
   // non-empty viewport and actually reflows/paints.
