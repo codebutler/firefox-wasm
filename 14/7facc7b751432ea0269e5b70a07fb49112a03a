@@ -1,0 +1,33 @@
+.github/workflows/build-release.yml
+  s_6e03fa3fb4523e::t_7041c1a1285989 264
+gecko.js/chrome/EmbedSelect.sys.mjs
+  s_6e03fa3fb4523e::t_6c88a99aeff7f9 1-95
+gecko.js/chrome/select.xhtml
+  s_6e03fa3fb4523e::t_a4d5e794a83b7e 1-10
+gecko.js/select-bridge.test.mjs
+  s_6e03fa3fb4523e::t_99387d916e8e17 1-87
+gecko.js/src/embed-browser.cpp
+  s_6e03fa3fb4523e::t_7f0ea3c76e985c 7,153-169,220-225
+gecko.js/src/embed-input.cpp
+  s_6e03fa3fb4523e::t_488a1ad9238ad0 288-301,315-319,330,338,341-346,357,377,385,412-426,545-551
+gecko.js/src/embed-paint.cpp
+  s_6e03fa3fb4523e::t_0df88e91b8a004 31-35,42,48-49,54-55,119-123,130,136-137,142-143
+gecko.js/stage-gre-min.sh
+  s_6e03fa3fb4523e::t_d7b2cdaad2d5c1 111-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "147facc7b751432ea0269e5b70a07fb49112a03a",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
