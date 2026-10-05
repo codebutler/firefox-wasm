@@ -2,6 +2,8 @@
 // Split from embed-xul.cpp. See embed-xul.h.
 #include "embed-xul.h"
 #include "nsIPrompt.h"
+#include "nsIVariant.h"
+#include "mozilla/Services.h"
 #include "nsReadableUtils.h"
 #include "nsIPromptFactory.h"
 #include "nsIComponentRegistrar.h"
@@ -30,7 +32,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void gecko_prompt_wake() {
   NS_DispatchToMainThread(NS_NewRunnableFunction("embed-prompt-wake", []() {}));
 }
 
-static void HostPromptJson(const nsACString& json, PromptReply& reply) {
+static void HostPromptJson(const nsACString& json, PromptReply& reply, const char* callback = "geckoOnPrompt") {
   std::atomic<int32_t> done{0};
   // Gecko runs on a pthread; the embedder's callback and dialog UI live on the
   // browser main thread. Return from the proxy immediately, then spin Gecko's
@@ -39,6 +41,7 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply) {
     var request = UTF8ToString($0);
     var donePtr = $1;
     var resultPtr = $2;
+    var callback = UTF8ToString($3);
     var finish = function() {
       Atomics.store(HEAP32, donePtr >> 2, 1);
       Atomics.notify(HEAP32, donePtr >> 2, 1);
@@ -46,15 +49,15 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply) {
     };
     var copy = function(value, offset) {
       if (value == null) return;
-      var bytes = unescape(encodeURIComponent(String(value)));
+      var bytes = value instanceof Uint8Array ? value : new TextEncoder().encode(String(value));
       var ptr = Module['_malloc'](bytes.length + 1);
       if (!ptr) throw new Error('Prompt result allocation failed');
       HEAPU32[(resultPtr + offset) >> 2] = ptr;
-      for (var i = 0; i < bytes.length; ++i) HEAPU8[ptr + i] = bytes.charCodeAt(i);
+      HEAPU8.set(bytes, ptr);
       HEAPU8[ptr + bytes.length] = 0;
     };
     Promise.resolve().then(function() {
-      var fn = Module['geckoOnPrompt'];
+      var fn = Module[callback];
       return typeof fn === 'function' ? fn(JSON.parse(request)) : {ok: false};
     }).then(function(r) {
       r = r || {};
@@ -68,7 +71,7 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply) {
       HEAP32[resultPtr >> 2] = 0;
       finish();
     });
-  }, json.BeginReading(), &done, &reply);
+  }, json.BeginReading(), &done, &reply, callback);
   bool completed = mozilla::SpinEventLoopUntil("embed-prompt"_ns, [&]() {
     return done.load(std::memory_order_acquire) != 0;
   });
@@ -271,7 +274,39 @@ NS_GENERIC_FACTORY_CONSTRUCTOR(EmbedPromptFactory)
 #define EMBED_PROMPT_CID \
   {0x6c2e9f10, 0x7a11, 0x4b2c, {0x9d, 0x33, 0x1e, 0x5a, 0x88, 0xc4, 0x01, 0xaa}}
 
+// Privileged picker components share the host roundtrip without masquerading as
+// page prompts. Content cannot access this observer or the response variant.
+class EmbedPickerObserver final : public nsIObserver {
+ public:
+  NS_DECL_ISUPPORTS
+  NS_IMETHOD Observe(nsISupports* subject, const char* topic,
+                     const char16_t* data) override {
+    if (!strcmp(topic, "gecko-embed-picker-cancel")) {
+      NS_ConvertUTF16toUTF8 id(data);
+      MAIN_THREAD_EM_ASM({
+        if (Module['geckoCancelPicker']) Module['geckoCancelPicker'](UTF8ToString($0));
+      }, id.get());
+      return NS_OK;
+    }
+    nsCOMPtr<nsIWritableVariant> result = do_QueryInterface(subject);
+    if (!result) return NS_ERROR_INVALID_ARG;
+    PromptReply reply;
+    HostPromptJson(NS_ConvertUTF16toUTF8(data), reply, "geckoOnPicker");
+    return result->SetAsAUTF8String(nsDependentCString(
+        reply.ok && reply.value ? reply.value : "null"));
+  }
+ private:
+  ~EmbedPickerObserver() = default;
+};
+NS_IMPL_ISUPPORTS(EmbedPickerObserver, nsIObserver)
+
 void RegisterEmbedChrome() {
+  nsCOMPtr<nsIObserverService> observers = mozilla::services::GetObserverService();
+  if (observers) {
+    RefPtr<EmbedPickerObserver> picker = new EmbedPickerObserver();
+    observers->AddObserver(picker, "gecko-embed-picker", false);
+    observers->AddObserver(picker, "gecko-embed-picker-cancel", false);
+  }
   nsCOMPtr<nsIComponentRegistrar> reg;
   NS_GetComponentRegistrar(getter_AddRefs(reg));
   if (!reg) return;

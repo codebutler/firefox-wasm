@@ -160,7 +160,8 @@ static bool RegisterSelectActor() {
   JS::CompileOptions options(cx);
   options.setFileAndLine("embed-select-init", 1);
   constexpr char script[] =
-      "ChromeUtils.importESModule('resource://gre/modules/EmbedSelect.sys.mjs');";
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedSelect.sys.mjs');"
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedPickers.sys.mjs');";
   JS::SourceText<mozilla::Utf8Unit> source;
   if (!source.init(cx, script, sizeof(script) - 1, JS::SourceOwnership::Borrowed))
     return false;

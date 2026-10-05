@@ -10,6 +10,7 @@
 // from a Blob URL, so consumers never serve it; gecko.data is inlined too, so the ONLY
 // artifact the consumer serves is the wasm (GeckoOptions.wasm). emscripten 6.0.x no longer emits a separate
 // *.worker.js; pthread workers spawn from the main module via mainScriptUrlOrBlob.
+import { encodePickerReply } from './picker-encoding';
 import geckoSource from '../wasm/gecko.js?source';
 import { ZSTDDecoder } from 'zstddec';
 // gecko.data is baked into this bundle, zstd-compressed (decoded at load with
@@ -169,6 +170,8 @@ export interface GeckoOptions {
    * Optional: nsIPrompt (alert/confirm/prompt). Must return a Promise
    * `{ ok, value?, button? }`. Unset → Alert is a no-op / Confirm returns true.
    */
+  /** Native file/color/date picker. null cancels; signal aborts on navigation or destruction. */
+  onPicker?: (req: Record<string, unknown>, options: { signal: AbortSignal }) => Promise<unknown>;
   onPrompt?: (req: Record<string, unknown>) => Promise<{
     ok: boolean; value?: string; button?: number; user?: string; pass?: string;
   }>;
@@ -301,6 +304,8 @@ export class Gecko {
   private cmd = 0;
   private queue: Cmd[] = [];
   private running = false;
+  private pickers = new Map<string, AbortController>();
+  private destroyed = false;
   private painting = false;
   private enc = new TextEncoder();
   private dec = new TextDecoder();
@@ -590,6 +595,30 @@ export class Gecko {
       };
     }
 
+    moduleOpts.geckoCancelPicker = (id: string) => this.pickers.get(id)?.abort();
+    moduleOpts.geckoOnPicker = async (req: Record<string, unknown>) => {
+      if (this.destroyed || !this.opts.onPicker) return { ok: false };
+      const id = String(req.id);
+      const controller = new AbortController();
+      this.pickers.set(id, controller);
+      try {
+        const cancelled = new Promise<null>(resolve => {
+          controller.signal.addEventListener('abort', () => resolve(null), { once: true });
+        });
+        const result = await Promise.race([
+          Promise.resolve().then(() => this.opts.onPicker!(req, { signal: controller.signal })),
+          cancelled,
+        ]);
+        if (controller.signal.aborted || result == null) return { ok: false };
+        return { ok: true, value: await encodePickerReply(result, controller.signal) };
+      } catch (error) {
+        console.error('[gecko-picker]', error);
+        return { ok: false };
+      } finally {
+        controller.abort();
+        this.pickers.delete(id);
+      }
+    };
     this.mod = await createGecko(moduleOpts);
     await ready;
     this.cmd = this.mod._xul_cmd_ptr();
@@ -606,6 +635,9 @@ export class Gecko {
 
   /** Navigate the embedded engine to a URL (http(s):// fetched over WISP). */
   async load(url: string): Promise<void> {
+    // Native pickers can hold a nested Gecko event loop. Withdraw their host
+    // UI before queuing navigation, so load never waits for a stale selection.
+    for (const controller of this.pickers.values()) controller.abort();
     await this.run({ op: OP_LOAD, url });
     // Arms firstPaint: from here, the next present is one that can carry this
     // document. (Presents that already happened may predate it.)
@@ -690,6 +722,8 @@ export class Gecko {
 
   /** Stop loops, detach input handlers. (The wasm module is not torn down.) */
   destroy(): void {
+    this.destroyed = true;
+    for (const controller of this.pickers.values()) controller.abort();
     this.running = false;
     for (const d of this.detach) d();
     this.detach = [];

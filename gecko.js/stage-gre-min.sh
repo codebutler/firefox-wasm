@@ -114,6 +114,7 @@ mkdir -p "$DST/geckoembed"
 cp "$HERE/chrome/select.xhtml" "$DST/geckoembed/select.xhtml"
 cp "$HERE/chrome/EmbedSelect.sys.mjs" "$DST/modules/EmbedSelect.sys.mjs"
 cp "$HERE/chrome/EmbedTheme.sys.mjs" "$DST/modules/EmbedTheme.sys.mjs"
+cp "$HERE/chrome/EmbedPickers.sys.mjs" "$DST/modules/EmbedPickers.sys.mjs"
 printf '\ncontent geckoembed geckoembed/\n' >> "$DST/chrome.manifest"
 
 # Headless gfxFT2FontList needs >=1 font in <process dir>/fonts or it MOZ_CRASHes
@@ -126,25 +127,9 @@ if [ -z "$(ls -A "$DST/fonts" 2>/dev/null)" ]; then
   exit 1
 fi
 
-# CJK: the minimal GRE ships only the Latin LiberationSans set, but real sites
-# specify system JP fonts (Hiragino Sans / Noto Sans JP) which gfxFT2FontList
-# falls back to for Japanese ranges -- with none available, Japanese text renders
-# as missing glyphs. Bake Noto Sans JP into /gre/fonts (the headless font list
-# scans that dir). Downloaded at build time so the repo stays light; pinned to a
-# noto-cjk commit so the build is reproducible.
-#
-# SubsetOTF/JP (not the full CJK OTF set): ~2.6x smaller (33MB -> 9.2MB of fonts)
-# and its family name is exactly "Noto Sans JP" -- matches what site CSS asks
-# for (e.g. `--font-sans: ... "Noto Sans JP"`), so name matching succeeds in
-# addition to the per-glyph fallback scan.
-CJK_NOTO_SHA="165c01b46ea5"
-CJK_NOTO_BASE="https://raw.githubusercontent.com/googlefonts/noto-cjk/${CJK_NOTO_SHA}/Sans/SubsetOTF/JP"
-for f in NotoSansJP-Regular.otf NotoSansJP-Bold.otf; do
-  if [ ! -s "$DST/fonts/$f" ]; then
-    curl -fsSL --retry 3 -o "$DST/fonts/$f" "$CJK_NOTO_BASE/$f" \
-      && echo "staged CJK font: $f ($(du -h "$DST/fonts/$f" | cut -f1))" \
-      || echo "!! CJK font download failed ($f) -- Japanese will render as missing glyphs" >&2
-  fi
-done
+# Offline fallback fonts: full CJK, complex scripts, symbols and color emoji.
+# Missing or corrupted downloads fail the build; fonts and licenses are pinned
+# by both source commit and SHA-256 in fonts.json.
+python3 "$HERE/stage-fonts.py" "$DST/fonts"
 
 echo "staged minimal GRE -> $DST ($(du -sh "$DST" | cut -f1)); greprefs.js: $([ -e "$DST/greprefs.js" ] && echo yes || echo NO)"
