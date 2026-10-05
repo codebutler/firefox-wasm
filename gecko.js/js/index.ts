@@ -444,7 +444,7 @@ export class Gecko {
       // emscripten's dispatch does a bare `Module[d.handler](...)`, no null check.
       geckoOnPresent: (n: number) => this.onPresent(n),
       // Called from RenderLoadListener::OnLocationChange (embed-browser.cpp) on
-      // the main thread via EM_ASM. Optional — older discs never fire it.
+      // the browser main thread via MAIN_THREAD_EM_ASM. Optional on older discs.
       geckoOnLocationChange: (url: string) => {
         try {
           this.opts.onLocationChange?.(url);
@@ -452,8 +452,8 @@ export class Gecko {
           /* embedder bugs must not tear the engine */
         }
       },
-      // Always a function so C++ HostWantsContextMenu / EM_ASM on the
-      // Gecko pthread sees it on Module (same as geckoOnLocationChange).
+      // C++ probes and invokes this on the browser main thread. Module
+      // callbacks are not copied into Gecko's pthread runtime.
       geckoOnContextMenu: (info: GeckoContextMenuInfo) => {
         try {
           this.opts.onContextMenu?.(info);

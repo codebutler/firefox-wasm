@@ -6,7 +6,7 @@
 #include "nsIRollupListener.h"
 
 static bool HostWantsNewWindow() {
-  return EM_ASM_INT({
+  return MAIN_THREAD_EM_ASM_INT({
            return (typeof Module !== 'undefined' &&
                    typeof Module['geckoOnNewWindow'] === 'function')
                       ? 1
@@ -45,7 +45,7 @@ static bool MaybeHostBlankTarget(mozilla::PresShell* ps, int x, int y) {
       }
     }
     if (spec.IsEmpty()) continue;
-    EM_ASM(
+    MAIN_THREAD_EM_ASM(
         {
           if (typeof Module !== 'undefined' &&
               typeof Module['geckoOnNewWindow'] === 'function') {
@@ -63,7 +63,7 @@ static bool MaybeHostBlankTarget(mozilla::PresShell* ps, int x, int y) {
 }
 
 static bool HostWantsContextMenu() {
-  return EM_ASM_INT({
+  return MAIN_THREAD_EM_ASM_INT({
            return (typeof Module !== 'undefined' &&
                    typeof Module['geckoOnContextMenu'] === 'function')
                       ? 1
@@ -267,7 +267,7 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
   printf("xul: ctxmenu json=%s\n", json.get());
   fflush(stdout);
 
-  EM_ASM(
+  MAIN_THREAD_EM_ASM(
       {
         var s = UTF8ToString($0);
         console.log('[embed] ctxmenu ' + s);

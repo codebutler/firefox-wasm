@@ -66,7 +66,7 @@ NS_IMETHODIMP RenderLoadListener::OnLocationChange(nsIWebProgress* aWebProgress,
   }
   nsAutoCString spec;
   if (NS_FAILED(aURI->GetSpec(spec)) || spec.IsEmpty()) return NS_OK;
-  EM_ASM(
+  MAIN_THREAD_EM_ASM(
       {
         if (typeof Module !== 'undefined' &&
             typeof Module['geckoOnLocationChange'] === 'function') {
@@ -95,12 +95,12 @@ static void RefreshScreen(int width, int height) {
   // Host may publish the desktop/viewport size on Module.geckoScreen so
   // GetConstraintRect can place popups that hang off the content window
   // (overflow right/bottom). Fall back to the window size.
-  int sw = EM_ASM_INT({
+  int sw = MAIN_THREAD_EM_ASM_INT({
     return (typeof Module !== 'undefined' && Module['geckoScreen'])
                ? (Module['geckoScreen'].sw | 0)
                : 0;
   });
-  int sh = EM_ASM_INT({
+  int sh = MAIN_THREAD_EM_ASM_INT({
     return (typeof Module !== 'undefined' && Module['geckoScreen'])
                ? (Module['geckoScreen'].sh | 0)
                : 0;

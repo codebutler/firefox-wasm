@@ -76,7 +76,7 @@ static int composite_visible_popups(gfxContext* ctx, mozilla::PresShell* ps,
 }
 
 static bool HostWantsPopups() {
-  return EM_ASM_INT({
+  return MAIN_THREAD_EM_ASM_INT({
            return (typeof Module !== 'undefined' &&
                    typeof Module['geckoOnPopups'] === 'function')
                       ? 1
