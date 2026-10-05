@@ -76,3 +76,27 @@ make libxul        # from the repo root: builds the engine then the bundle
 # or, with the engine already built (obj-full-emscripten/dist/bin/libxul.so):
 pnpm --filter gecko.js build
 ```
+
+### Native input pickers
+
+`onPicker(request, { signal })` supplies embedding UI for Gecko's native file,
+color and date/time inputs. Resolve `null` to cancel. Honor the signal so
+navigation and `destroy()` close pending dialogs. Requests contain an opaque
+`id` and one of:
+
+- `{ kind: "file", title, multiple, filters: [{title, pattern}], filterIndex,
+  accept, okLabel }`: return `{ files: [{ name, type, lastModified, base64 }] }`.
+  Only send explicitly selected file contents, never host filesystem paths.
+  Open and multiple-open modes are supported; folder/save modes are not.
+- `{ kind: "color", title, value, colors }`: return `{ value: "#rrggbb" }`.
+- `{ kind: "date", type, value, min, max, step, stepBase }`: return `{ value }`
+  using HTML's date/time/datetime-local serialization. Empty string clears it.
+
+The embedding uses native picker interfaces and Mozilla's date editor actor,
+so content retains native values, validation and trusted form events. The host
+must enforce the requested constraints in its picker UI.
+
+Offline fallback fonts are listed in `fonts.json` with source revisions,
+SHA-256 digests and license files. `stage-fonts.py` fails a build if any font is
+missing or corrupted. The bundle includes full CJK, Arabic, Hebrew, Indic and
+Southeast Asian scripts, Georgian, Armenian, Ethiopic, math/symbols and emoji.

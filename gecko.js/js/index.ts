@@ -169,6 +169,8 @@ export interface GeckoOptions {
    * Optional: nsIPrompt (alert/confirm/prompt). Must return a Promise
    * `{ ok, value?, button? }`. Unset → Alert is a no-op / Confirm returns true.
    */
+  /** Native file/color/date picker. null cancels; signal aborts on navigation or destruction. */
+  onPicker?: (req: Record<string, unknown>, options: { signal: AbortSignal }) => Promise<unknown>;
   onPrompt?: (req: Record<string, unknown>) => Promise<{
     ok: boolean; value?: string; button?: number; user?: string; pass?: string;
   }>;
@@ -301,6 +303,8 @@ export class Gecko {
   private cmd = 0;
   private queue: Cmd[] = [];
   private running = false;
+  private pickers = new Map<string, AbortController>();
+  private destroyed = false;
   private painting = false;
   private enc = new TextEncoder();
   private dec = new TextDecoder();
@@ -590,6 +594,29 @@ export class Gecko {
       };
     }
 
+    moduleOpts.geckoCancelPicker = (id: string) => this.pickers.get(id)?.abort();
+    moduleOpts.geckoOnPicker = async (req: Record<string, unknown>) => {
+      if (this.destroyed || !this.opts.onPicker) return { ok: false };
+      const id = String(req.id);
+      const controller = new AbortController();
+      this.pickers.set(id, controller);
+      try {
+        const cancelled = new Promise<null>(resolve => {
+          controller.signal.addEventListener('abort', () => resolve(null), { once: true });
+        });
+        const result = await Promise.race([
+          Promise.resolve().then(() => this.opts.onPicker!(req, { signal: controller.signal })),
+          cancelled,
+        ]);
+        return { ok: !controller.signal.aborted && result != null, value: JSON.stringify(result) };
+      } catch (error) {
+        console.error('[gecko-picker]', error);
+        return { ok: false };
+      } finally {
+        controller.abort();
+        this.pickers.delete(id);
+      }
+    };
     this.mod = await createGecko(moduleOpts);
     await ready;
     this.cmd = this.mod._xul_cmd_ptr();
@@ -690,6 +717,8 @@ export class Gecko {
 
   /** Stop loops, detach input handlers. (The wasm module is not torn down.) */
   destroy(): void {
+    this.destroyed = true;
+    for (const controller of this.pickers.values()) controller.abort();
     this.running = false;
     for (const d of this.detach) d();
     this.detach = [];
