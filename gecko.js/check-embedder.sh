@@ -43,7 +43,7 @@ CXXFLAGS=(
 )
 
 rc=0
-for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror; do
+for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror embed-chrome; do
   f="$HERE/src/$src.cpp"
   printf '>> %s\n' "$src.cpp"
   if ! "$EMXX" "${CXXFLAGS[@]}" "$f"; then rc=1; fi

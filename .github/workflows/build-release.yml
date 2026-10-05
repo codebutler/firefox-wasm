@@ -336,7 +336,11 @@ jobs:
       # (its `test -e $(LIBXUL)` guard) and only does pnpm + build-lib.sh (emcc link,
       # optional wasm-opt) + rspack.
       - name: "Build the gecko.js package (emcc link + wasm-opt + rspack)"
-        run: make libxul RELEASE=1
+        run: |
+          make emsdk
+          node gecko.js/check-webgl-contexts.mjs
+          RELEASE=1 bash gecko.js/check-embedder.sh
+          make libxul RELEASE=1
 
       - name: Show link errors on failure
         if: failure()
