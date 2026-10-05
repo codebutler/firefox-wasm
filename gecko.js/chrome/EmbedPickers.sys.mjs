@@ -177,13 +177,15 @@ Services.prefs.setBoolPref("dom.forms.datetime.timepicker", true);
 // trusted chrome events. Supply the same missing path as EmbedSelect.
 const events = { UAWidgetSetupOrChange: "UAWidgets", UAWidgetTeardown: "UAWidgets",
   MozOpenDateTimePicker: "DateTimePicker", MozCloseDateTimePicker: "DateTimePicker" };
+function forwardWindowlessPickerEvent(event) {
+  const window = event.target.ownerDocument?.defaultView;
+  const context = window?.browsingContext;
+  if (!event.isTrusted || !context?.isContent || context.top.embedderElement) return;
+  window.windowGlobalChild.getActor(events[event.type]).handleEvent(event);
+}
 Services.obs.addObserver(window => {
-  for (const [type, actor] of Object.entries(events)) {
-    window.windowRoot.addEventListener(type, event => {
-      const targetWindow = event.target.ownerDocument?.defaultView;
-      const context = targetWindow?.browsingContext;
-      if (!event.isTrusted || !context?.isContent || context.top.embedderElement) return;
-      targetWindow.windowGlobalChild.getActor(actor).handleEvent(event);
-    });
+  for (const type of Object.keys(events)) {
+    // Stable listener identity: WindowRoot can survive document navigation.
+    window.windowRoot.addEventListener(type, forwardWindowlessPickerEvent);
   }
 }, "content-document-global-created");
