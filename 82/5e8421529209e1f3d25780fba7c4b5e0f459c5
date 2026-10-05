@@ -1,0 +1,21 @@
+gecko.js/src/embed-browser.cpp
+  s_6e03fa3fb4523e::t_a8850f4c6e4246 210-214
+patches/0012-webgl1-pixel-buffer-state.patch
+  s_6e03fa3fb4523e::t_8e03043d6a2890 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "825e8421529209e1f3d25780fba7c4b5e0f459c5",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
