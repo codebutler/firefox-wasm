@@ -1,0 +1,27 @@
+gecko.js/chrome/EmbedPickers.sys.mjs
+  s_6e03fa3fb4523e::t_40b44324177261 15,53-55,81
+gecko.js/js/index.ts
+  s_6e03fa3fb4523e::t_3a3cea5ae5c476 13,612-613,638-640
+gecko.js/js/picker-encoding.ts
+  s_6e03fa3fb4523e::t_a6d613b638c3ad 1-36
+gecko.js/pickers.test.mjs
+  s_6e03fa3fb4523e::t_c984bfd566cb69 10-11
+gecko.js/src/embed-chrome.cpp
+  s_6e03fa3fb4523e::t_778580bd29b0e1 52,56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ac9818a00c1e7c31e14c328748ca42cf9c0ca167",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
