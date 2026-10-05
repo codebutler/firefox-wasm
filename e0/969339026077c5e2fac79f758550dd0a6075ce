@@ -1,0 +1,25 @@
+.github/workflows/build-release.yml
+  s_6e03fa3fb4523e::t_84181c6b5c4c7b 264,348
+gecko.js/check-wisp-sockets.sh
+  s_6e03fa3fb4523e::t_c73aaaf42be663 1-12
+gecko.js/wisp-socket.pre.js
+  s_6e03fa3fb4523e::t_c952ee4a2d4aac 1-6
+gecko.js/wisp-socket.test.cpp
+  s_6e03fa3fb4523e::t_9c806b2f273da5 1-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e0969339026077c5e2fac79f758550dd0a6075ce",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
