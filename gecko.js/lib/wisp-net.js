@@ -111,6 +111,11 @@ mergeInto(LibraryManager.library, {
     },
     doConnectCustom: function (id, host, port, factory) {
       var streams = WISP.ensureCustomStreams();
+      // A transport may report connection/data synchronously from its factory.
+      // Register ownership first; terminal callbacks remove it and must not be
+      // undone when the factory returns its handle.
+      var pending = { send: function () {}, close: function () {} };
+      streams.set(id, pending);
       try {
         var handle = factory(host, port & 0xffff, {
           onData: function (chunk) { WISP._deliverCustom(id, chunk); },
@@ -130,11 +135,14 @@ mergeInto(LibraryManager.library, {
           },
         });
         if (!handle || typeof handle.send !== 'function' || typeof handle.close !== 'function') {
+          streams.delete(id);
           try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {}
           return;
         }
-        streams.set(id, handle);
+        if (streams.get(id) === pending) streams.set(id, handle);
+        else { try { handle.close(); } catch (e) {} }
       } catch (e) {
+        streams.delete(id);
         err('[wisp] Module.tcpTransport connect failed: ' + e);
         try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e2) {}
       }
@@ -220,7 +228,7 @@ mergeInto(LibraryManager.library, {
   // --- C++ -> JS hooks (proxied to R, where the WebSocket lives) -------------
   wisp_open__proxy: 'sync',
   wisp_open__deps: ['$WISP'],
-  wisp_open: function (id) { WISP.ensureConn(); },
+  wisp_open: function (id) { if (!WISP.customFactory()) WISP.ensureConn(); },
 
   wisp_connect__proxy: 'sync',
   wisp_connect__deps: ['$WISP'],

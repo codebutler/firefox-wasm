@@ -260,6 +260,9 @@ jobs:
       # em_config is committed and portable (reads $EMSDK; binaryen defaults to the
       # emsdk's bundled $EMSDK/upstream), so no shim or config generation is needed.
 
+      - name: Check embedding transport behavior
+        run: node --test gecko.js/wisp-net.test.mjs
+
       - name: Clone the pinned Gecko engine fork (depth 1)
         run: make firefox
 
