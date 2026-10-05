@@ -1,0 +1,37 @@
+.github/workflows/build-release.yml
+  s_6e03fa3fb4523e::t_258c6e67f3c64c 264
+Makefile
+  s_6e03fa3fb4523e::t_2ddb0b5df8c20f 36
+gecko.js/emsdk-patches/wisp_address.h
+  s_6e03fa3fb4523e::t_9f65f997bb2d93 1-69
+gecko.js/emsdk-patches/wisp_socket.h
+  s_6e03fa3fb4523e::t_ab2e9d22992caa 52,60-61,65,127,130,141-142,150,152,224,289-292,309,312-313,380,383,387
+gecko.js/lib/wisp-net.js
+  s_6e03fa3fb4523e::t_7b940eff0bf9cf 150-153,232-233
+gecko.js/patch-emsdk-wasmfs.mjs
+  s_6e03fa3fb4523e::t_5aa47cc9c6af0f 53-55
+gecko.js/src/embed-init.cpp
+  s_6e03fa3fb4523e::t_70f81191d18551 501-502
+gecko.js/wisp-address.test.cpp
+  s_6e03fa3fb4523e::t_33598ad6b9d406 1-66
+gecko.js/wisp-address.test.mjs
+  s_6e03fa3fb4523e::t_0a2ad0788a7711 1-20
+gecko.js/wisp-net.test.mjs
+  s_6e03fa3fb4523e::t_d16600e3b09958 6,23-24,33-38,51,65,75,83,95-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c1ce7fa79374b3f40c73e8d45ca95faf25710ea1",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
