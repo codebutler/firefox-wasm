@@ -17,6 +17,11 @@ import { ZSTDDecoder } from 'zstddec';
 // whether the wasm is compressed (RELEASE builds) and its uncompressed size.
 import geckoDataZst from '../wasm/gecko.data.zst?inline';
 import assets from '../wasm/gecko-assets.json';
+// WISP client: the engine's WasmFS socket backend (emsdk-patches/wisp_socket.h)
+// bridges to wisp-js's ClientConnection, which owns the WISP protocol (framing,
+// v1/v2 negotiation, per-stream flow control, extensions). It's injected into the
+// engine Module below (Module.WispClientConnection) and driven by lib/wisp-net.js.
+import { client as wispClient } from '@mercuryworkshop/wisp-js/client';
 
 // ---- public API -----------------------------------------------------------
 
@@ -207,6 +212,20 @@ const OP_LOAD = 0, OP_MOUSE = 1, OP_KEY = 2, OP_WHEEL = 3, OP_PAINT = 4, OP_EVAL
 const OP_CLIP_SET = 9, OP_ROLLUP = 10;
 const MOD_ALT = 0x1, MOD_CTRL = 0x2, MOD_SHIFT = 0x4, MOD_META = 0x8;
 
+// Wheel deltas arrive in one of three units (WheelEvent.deltaMode): PIXEL (0),
+// LINE (1) or PAGE (2). The engine protocol only carries CSS pixels (embed-input
+// sets mDeltaMode = DOM_DELTA_PIXEL unconditionally), and a mouse wheel usually
+// reports DOM_DELTA_LINE with deltaY = +-3 -- forwarding that raw makes one notch
+// scroll 3px. Convert to pixels here. LINE_PX approximates the ~100px a notch is
+// expected to scroll (3 lines * 33px); PAGE uses the viewport height.
+const WHEEL_LINE_PX = 33;
+function wheelPixels(e: WheelEvent, viewport: number): { dx: number; dy: number } {
+  const k = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? WHEEL_LINE_PX
+    : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? viewport
+    : 1;
+  return { dx: e.deltaX * k, dy: e.deltaY * k };
+}
+
 // StyleCursorKind index -> CSS cursor keyword (ServoStyleConsts.h order).
 const CURSORS = ['none', 'default', 'pointer', 'context-menu', 'help', 'progress',
   'wait', 'cell', 'crosshair', 'text', 'vertical-text', 'alias', 'copy', 'move',
@@ -244,15 +263,21 @@ const geckoBlobUrl = () => (_geckoUrl ??= toBlobUrl(geckoSource));
 let _engine: Promise<GeckoFactory> | undefined;
 function loadEngine(): Promise<GeckoFactory> {
   return (_engine ??= new Promise<GeckoFactory>((resolve, reject) => {
-    const have = (globalThis as Record<string, unknown>).createGecko as GeckoFactory | undefined;
-    if (have) return resolve(have);
+    // A page may import a new disc while the previous bundle is still cached.
+    // Its JS factory must stay paired with its own wasm and pthread source.
+    // Keep the classic glue's semantics, but scope its variables to this load.
+    const key = '__geckoFactory_' + crypto.randomUUID().replaceAll('-', '');
+    const globals = globalThis as Record<string, unknown>;
+    const url = toBlobUrl(`(function(){\n${geckoSource}\n;globalThis[${JSON.stringify(key)}] = createGecko;\n})();`);
     const s = document.createElement('script');
-    s.src = geckoBlobUrl(); s.async = true;
+    const cleanup = () => { delete globals[key]; s.remove(); URL.revokeObjectURL(url); };
+    s.src = url; s.async = true;
     s.onload = () => {
-      const f = (globalThis as Record<string, unknown>).createGecko as GeckoFactory | undefined;
+      const f = globals[key] as GeckoFactory | undefined;
+      cleanup();
       f ? resolve(f) : reject(new Error('gecko.js: engine evaluated but createGecko is missing'));
     };
-    s.onerror = () => reject(new Error('gecko.js: failed to evaluate the bundled engine'));
+    s.onerror = () => { cleanup(); reject(new Error('gecko.js: failed to evaluate the bundled engine')); };
     document.head.appendChild(s);
   }));
 }
@@ -425,7 +450,7 @@ export class Gecko {
       // emscripten's dispatch does a bare `Module[d.handler](...)`, no null check.
       geckoOnPresent: (n: number) => this.onPresent(n),
       // Called from RenderLoadListener::OnLocationChange (embed-browser.cpp) on
-      // the main thread via EM_ASM. Optional — older discs never fire it.
+      // the browser main thread via MAIN_THREAD_EM_ASM. Optional on older discs.
       geckoOnLocationChange: (url: string) => {
         try {
           this.opts.onLocationChange?.(url);
@@ -433,8 +458,8 @@ export class Gecko {
           /* embedder bugs must not tear the engine */
         }
       },
-      // Always a function so C++ HostWantsContextMenu / EM_ASM on the
-      // Gecko pthread sees it on Module (same as geckoOnLocationChange).
+      // C++ probes and invokes this on the browser main thread. Module
+      // callbacks are not copied into Gecko's pthread runtime.
       geckoOnContextMenu: (info: GeckoContextMenuInfo) => {
         try {
           this.opts.onContextMenu?.(info);
@@ -465,11 +490,12 @@ export class Gecko {
         const hostMatchMedia = (globalThis as { matchMedia?: (q: string) => { matches: boolean } }).matchMedia;
         m.ENV['GECKO_DARK'] = hostMatchMedia && hostMatchMedia('(prefers-color-scheme: dark)').matches ? '1' : '0';
         for (const [k, v] of Object.entries(this.opts.env ?? {})) m.ENV[k] = v;
-        // The WISP transport (build/wisp-net.js, a --js-library) reads the
-        // endpoint from Module.wispUrl and lazily opens the single WebSocket on
-        // the runtime main thread when the first socket connects. When
-        // tcpTransport is set, sockets route through that factory instead and
-        // the WebSocket is never opened (wispUrl is unused).
+        // The WISP transport (lib/wisp-net.js, a --js-library) reads the endpoint
+        // from Module.wispUrl and drives the wisp-js ClientConnection injected here
+        // as Module.WispClientConnection; it lazily opens the single connection on
+        // the runtime main thread when the first socket connects.
+        (m as unknown as { WispClientConnection: unknown }).WispClientConnection = wispClient.ClientConnection;
+        // tcpTransport takes precedence; no WISP connection is opened when supplied.
         if (this.opts.wispUrl) (m as unknown as { wispUrl: string }).wispUrl = this.opts.wispUrl;
         if (this.opts.tcpTransport) {
           (m as unknown as { tcpTransport: TcpTransportFactory }).tcpTransport =
@@ -1006,7 +1032,12 @@ export class Gecko {
     // mousedown/up alone doesn't generate eContextMenu in the headless build, so
     // without this no context menu ever opens (embed-xul.cpp do_mouse).
     on('contextmenu', (e) => { e.preventDefault(); const p = this.xy(e); this.lastPtr = p; this.run({ op: OP_MOUSE, evType: 3, x: p.x, y: p.y, button: 2, buttons: e.buttons, modifiers: this.mods(e) }); });
-    on('wheel', (e) => { const p = this.xy(e); this.run({ op: OP_WHEEL, x: p.x, y: p.y, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: this.mods(e) }); e.preventDefault(); });
+    on('wheel', (e) => {
+      const p = this.xy(e);
+      const { dx, dy } = wheelPixels(e, this.H);
+      this.run({ op: OP_WHEEL, x: p.x, y: p.y, deltaX: dx, deltaY: dy, modifiers: this.mods(e) });
+      e.preventDefault();
+    });
     // Printable keys carry their char code (matches the original embed-xul loader).
     // The engine doesn't insert text for Ctrl/Meta combos anyway (the editor's
     // IsInputtingText() is false when a command modifier is held), and sending the

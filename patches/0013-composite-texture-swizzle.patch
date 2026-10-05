@@ -1,0 +1,13 @@
+--- a/gfx/wr/webrender/res/composite.glsl
++++ b/gfx/wr/webrender/res/composite.glsl
+@@ -214,7 +214,9 @@
+ #else
+     vec2 uv = clamp(vUv, vUVBounds.xy, vUVBounds.zw);
+ #endif
+-    vec4 texel = TEX_SAMPLE(sColor0, uv);
++    // The wasm port emulates texture swizzling in shaders. Composited canvas
++    // tiles need the same BGRA conversion as the image/quad sampling paths.
++    vec4 texel = swizzleColor0(TEX_SAMPLE(sColor0, uv));
+ #ifdef WR_FEATURE_FAST_PATH
+     vec4 color = texel;
+ #else

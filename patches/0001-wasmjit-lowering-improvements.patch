@@ -1,0 +1,1646 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index d903469112..3c612d8006 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -247,6 +247,9 @@ static bool WJTypeMaybeGC(jit::MIRType t) {
+ }
+ 
+ struct WJBackend {
++  WJBackend() {
++    for (uint32_t i = 0; i < kWJMaxArgs; i++) argCopyLocal[i] = -1;
++  }
+   std::vector<int32_t> localOf;  // def id -> wasm local index (-1 = none)
+   std::vector<uint8_t> localTy;  // valtype per declared local (index order)
+   uint32_t paramCount = 1;       // wasm param 0 = scratch base address (f64)
+@@ -258,11 +261,13 @@ struct WJBackend {
+   uint32_t iterIdx = 0;          // i32 DEDICATED: LoadSlotByIteratorIndex extracted PropertyIndex index
+   uint32_t iterKind = 0;         // i32 DEDICATED: LoadSlotByIteratorIndex extracted PropertyIndex kind
+   uint32_t iterAddr = 0;         // i32 DEDICATED: StoreSlotByIteratorIndex computed store address
++  uint32_t abObjLocal = 0;       // i32 DEDICATED: GuardHasAttachedArrayBuffer view object
++  uint32_t toIdxLocal = 0;       // i32 DEDICATED: ToIntegerIndex normalized index temp
+   uint32_t dynArgAcc = 0;        // i64 DEDICATED accumulator for dynamic GetFrameArgument's
+   uint32_t dynArgIdx = 0;        // i32 DEDICATED index  -- must NOT reuse unboxScratch/
+                                  // propShapeLocal: a dyn arguments[i] can be a sub-operand
+                                  // of a parent op that holds those scratch locals live.
+-  int32_t argCopyLocal[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
++  int32_t argCopyLocal[kWJMaxArgs];
+                                  // per-arg-index GC-ROOTED copy local (or -1). GetFrameArgument
+                                  // MUST read this, not the raw wasm param -- the raw param goes
+                                  // stale when a GC moves an object arg (the copy is reloaded by
+@@ -320,6 +325,11 @@ struct WJBackend {
+   // deoptSiteLocal and runs the matching resume. Only active on the dispatch path.
+   bool oolDeopt = false;          // out-of-line mode enabled
+   bool hasCatchTrynote = false;   // try/catch: the script has a Catch/Finally trynote
++  // Compile-time flag: the resume currently being emitted is an ERROR resume (an
++  // exception exit that hands the pending exception to PBL, which unwinds to the
++  // catch). Such a resume does NOT re-execute the op's pc, so the for-in
++  // loop-head re-run hazard does not apply (see EmitDeoptResumeInline).
++  bool resumeInError = false;
+                                   // (only compiled when GECKO_WJ_NOTRYBAIL removes the
+                                   // bail). Routes call/helper exceptions through
+                                   // deopt-in-error so PBL's HandleException runs the
+@@ -706,7 +716,10 @@ static uint32_t TagWord(JSValueType t) {
+ 
+ // Box a typed value already on the stack into an i64 JS::Value.
+ static bool EmitBoxFromStack(Encoder& e, MIRType from) {
+-  if (from == MIRType::Double) {
++  if (from == MIRType::Double || from == MIRType::Float32) {
++    // Float32 is held widened to f64 in our repr, and a JS number Value is a
++    // double, so boxing either is a plain reinterpret (matches the Constant
++    // Float32 lowering, which also emits f64).
+     return e.writeOp(Op::I64ReinterpretF64);
+   }
+   if (from == MIRType::Int32 || from == MIRType::Boolean ||
+@@ -1402,8 +1415,8 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+     // the function runs in PBL. Narrow: only for-in loop heads (iterator
+     // operand on the rp stack), not every loop head.
+     static int noForinBail = WJGETENV("GECKO_WJ_NOFORINBAIL") ? 1 : 0;
+-    if (!noForinBail && f == 0 && !IsResumeAfter(rp->mode()) &&
+-        JSOp(*rp->pc()) == JSOp::LoopHead) {
++    if (!be.resumeInError && !noForinBail && f == 0 &&
++        !IsResumeAfter(rp->mode()) && JSOp(*rp->pc()) == JSOp::LoopHead) {
+       uint32_t nfixed = info.nlocals();
+       uint32_t base = 1 + info.nargs() + nfixed;  // this + args + locals
+       for (uint32_t i = base; i < rp->numOperands(); i++) {
+@@ -2095,7 +2108,10 @@ static bool EmitExceptionExit(Encoder& e, WJBackend& be) {
+     // the OOL br-depth would be wrong) -- mirror the Throw case's inDispatchBody save.
+     bool saved = be.inDispatchBody;
+     be.inDispatchBody = false;
++    bool savedErr = be.resumeInError;
++    be.resumeInError = true;  // error resume: PBL unwinds to the catch, no pc re-run
+     bool ok = EmitDeoptResume(e, be);
++    be.resumeInError = savedErr;
+     be.inDispatchBody = saved;
+     return ok;
+   }
+@@ -2114,7 +2130,7 @@ static bool EmitExceptionExit(Encoder& e, WJBackend& be) {
+ }
+ 
+ static bool EmitHelperCallResult(Encoder& e, WJBackend& be, MInstruction* ins,
+-                                 int kind, uint32_t site) {
++                                 int kind, double site) {
+   // Remat cache: this helper call is a MOVING GC point (alloc/GC/user-code) -- any
+   // cached re-derived pointer is stale after it. Invalidate (args were staged by the
+   // caller before this). Barriers do NOT use this path (direct Op::Call), so the
+@@ -4127,6 +4143,21 @@ static bool EmitIterSlotStore(Encoder& e, WJBackend& be, MDefinition* object,
+   return true;
+ }
+ 
++// Emit `d` on the wasm stack as an f64: F64-repr passes through, I32-repr (an
++// Int32/Boolean/IntPtr Number at runtime) is converted with f64.convert_i32_s --
++// the exact numeric value. Returns false (caller bails the compile) for i64/Value
++// reprs, which would need unboxing. Warp's emitDoubleBinaryArithResult builds
++// MAdd/MSub/MMul/MDiv(lhs, rhs, Double) from NumberOperandIds whose defs can be
++// Int32 phis; emitting f64.* on the raw i32 local is INVALID wasm and V8 rejects
++// the whole module (`f64.add expected f64, found local.get i32`), silently
++// dropping the function to PBL (string-ops / mixed-arith microbenches).
++static bool EmitOperandAsF64(Encoder& e, WJBackend& be, MDefinition* d) {
++  uint8_t r = WJValType(d->type());
++  if (r != uint8_t(TypeCode::F64) && r != uint8_t(TypeCode::I32)) return false;
++  if (!GetOp(e, be, d)) return false;
++  return r == uint8_t(TypeCode::I32) ? e.writeOp(Op::F64ConvertI32S) : true;
++}
++
+ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+   WJSetBailOp(ins);  // attribute an internal bail to this op (+ precise op line)
+   switch (ins->op()) {
+@@ -4151,6 +4182,8 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         case MIRType::IntPtr:  // wasm32: pointer-sized int constant == i32
+           return e.writeOp(Op::I32Const) &&
+                  e.writeVarS32(int32_t(c->toIntPtr()));
++        case MIRType::Int64:  // 64-bit int constant (e.g. a Date local-time operand)
++          return e.writeOp(Op::I64Const) && e.writeVarS64(c->toInt64());
+         case MIRType::Boolean:
+           return e.writeOp(Op::I32Const) && e.writeVarS32(c->toBoolean() ? 1 : 0);
+         case MIRType::Double:
+@@ -4165,6 +4198,16 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         case MIRType::Undefined:
+           return e.writeOp(Op::I64Const) &&
+                  e.writeVarS64(int64_t(JS::UndefinedValue().asRawBits()));
++        case MIRType::MagicOptimizedOut:
++        case MIRType::MagicHole:
++        case MIRType::MagicIsConstructing:
++        case MIRType::MagicUninitializedLexical: {
++          // Payload-less magic constants (e.g. an optimized-out argument, a
++          // holesentinel, JS_IS_CONSTRUCTING): bake the boxed Value bits. No GC
++          // pointer, so no traced-pool slot is needed.
++          uint64_t bits = c->toJSValue().asRawBits();
++          return e.writeOp(Op::I64Const) && e.writeVarS64(int64_t(bits));
++        }
+         case MIRType::Object: {
+           // Bake the object via the traced GC-constant pool, then load the live
+           // pointer (low 32 bits of the boxed Value) at runtime.
+@@ -4192,6 +4235,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+           return e.writeOp(Op::I32WrapI64);  // -> GC pointer
+         }
+         default:
++          if (WJGETENV("GECKO_WJ_BAILDBG"))
++            fprintf(stderr, "[wj-const-bail] unsupported MIRType %s\n",
++                    StringFromMIRType(c->type()));
+           return false;
+       }
+     }
+@@ -4230,8 +4276,19 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return e.writeOp(Op::I64Const) &&
+                e.writeVarS64(int64_t(JS::NullValue().asRawBits()));
+       }
+-      if (!GetOp(e, be, in)) return false;
+-      return EmitBoxFromStack(e, in->type());
++      if (!GetOp(e, be, in)) {
++        if (WJGETENV("GECKO_WJ_BAILDBG"))
++          fprintf(stderr, "[wj-box-nolocal] input op=%s ty=%s\n",
++                  WJOpName(in->op()), StringFromMIRType(in->type()));
++        return false;
++      }
++      if (!EmitBoxFromStack(e, in->type())) {
++        if (WJGETENV("GECKO_WJ_BAILDBG"))
++          fprintf(stderr, "[wj-box-bail] unsupported MIRType %s\n",
++                  StringFromMIRType(in->type()));
++        return false;
++      }
++      return true;
+     }
+     case MDefinition::Opcode::BoxNonStrictThis: {
+       // `this` in a sloppy function. For an object receiver this is identity;
+@@ -6227,8 +6284,22 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       bool d = ins->type() == MIRType::Double;
+       bool i = ins->type() == MIRType::Int32;
+       if (d) {
+-        if (!GetOp(e, be, ins->getOperand(0)) ||
+-            !GetOp(e, be, ins->getOperand(1)))
++        // Operands must be f64-repr in wasm; an Int32-repr operand is converted
++        // (see EmitOperandAsF64). i64/Value operands bail cleanly.
++        MDefinition* a = ins->getOperand(0);
++        MDefinition* b = ins->getOperand(1);
++        uint8_t ra = WJValType(a->type()), rb = WJValType(b->type());
++        if ((ra != uint8_t(TypeCode::F64) && ra != uint8_t(TypeCode::I32)) ||
++            (rb != uint8_t(TypeCode::F64) && rb != uint8_t(TypeCode::I32))) {
++          if (WJGETENV("GECKO_WJ_ARITHDBG"))
++            fprintf(stderr, "[wj-f64-arith-badop] %s op0=%s:%s op1=%s:%s\n",
++                    WJOpName(ins->op()), WJOpName(a->op()),
++                    StringFromMIRType(a->type()), WJOpName(b->op()),
++                    StringFromMIRType(b->type()));
++          js::wasm::gWJBailReason = "f64-arith-nonF64-operand";
++          return false;
++        }
++        if (!EmitOperandAsF64(e, be, a) || !EmitOperandAsF64(e, be, b))
+           return false;
+         return e.writeOp(ins->isAdd()   ? Op::F64Add
+                          : ins->isSub() ? Op::F64Sub
+@@ -6252,6 +6323,21 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+           return false;
+         return e.writeOp(Op::F32DemoteF64) && e.writeOp(Op::F64PromoteF32);
+       }
++      if (ins->type() == MIRType::IntPtr) {
++        if (WJGETENV("GECKO_WJ_NO_INTPTR_ARITH")) return false;
++        // IntPtr Add/Sub/Mul (index/pointer arithmetic, e.g. the ToIntegerIndex
++        // path): Ion uses LAddIntPtr/LSubIntPtr/LMulIntPtr -- a plain i32 op with
++        // NO overflow snapshot (unlike the fallible Int32 case below).
++        MDefinition* pa = ins->getOperand(0);
++        MDefinition* pb = ins->getOperand(1);
++        if (WJValType(pa->type()) != uint8_t(TypeCode::I32) ||
++            WJValType(pb->type()) != uint8_t(TypeCode::I32))
++          return false;
++        if (!GetOp(e, be, pa) || !GetOp(e, be, pb)) return false;
++        return e.writeOp(ins->isAdd()   ? Op::I32Add
++                         : ins->isSub() ? Op::I32Sub
++                                        : Op::I32Mul);
++      }
+       if (!i) return false;
+       // Operands MUST be i32-repr in wasm. An Int32-result op can have a non-i32
+       // operand (a Value/Int64 local) -- emitting i32.add/sub/mul on an i64
+@@ -6347,10 +6433,12 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+     }
+     case MDefinition::Opcode::Div: {
+       if (ins->type() == MIRType::Double) {
+-        if (!GetOp(e, be, ins->getOperand(0)) ||
+-            !GetOp(e, be, ins->getOperand(1))) {
++        // Same Int32-operand case as Add/Sub/Mul (Warp's emitDoubleBinaryArithResult
++        // can build MDiv(Double) over Int32 phis): convert, don't emit f64.div on
++        // an i32 local. i64/Value operands bail cleanly.
++        if (!EmitOperandAsF64(e, be, ins->getOperand(0)) ||
++            !EmitOperandAsF64(e, be, ins->getOperand(1)))
+           return false;
+-        }
+         return e.writeOp(Op::F64Div);
+       }
+       if (ins->type() == MIRType::Int32) {
+@@ -6476,6 +6564,572 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       if (!GetOp(e, be, ins->getOperand(0))) return false;
+       return e.writeOp(Op::F64Sqrt);
+     }
++    case MDefinition::Opcode::TypedArraySubarray: {
++      // STAGED (default OFF): the lowering is correct on the tasub-probe microbench,
++      // but compiling pdf.js's FlateStream_readBlock (which needs it) MISCOMPILES
++      // (illegal-hex-string wrong value / OOB) -- a latent bug in that big function
++      // exposed by compiling it, not in this op. Default to the bail so the function
++      // stays in PBL (correct); enable with GECKO_WJ_TASUB=1 to reproduce.
++      if (!WJGETENV("GECKO_WJ_TASUB")) return false;
++      // ta.subarray(start, length): a new view over the same buffer. VM call
++      // js::TypedArraySubarrayWithLength. start/length are IntPtr (i32); pack them
++      // into the untraced gWJHelpI64 (length high 32, start low) so no raw int
++      // bits land in the GC-traced scratch.
++      MTypedArraySubarray* m = ins->toTypedArraySubarray();
++      if (WJValType(m->start()->type()) != uint8_t(TypeCode::I32) ||
++          WJValType(m->length()->type()) != uint8_t(TypeCode::I32))
++        return false;
++      if (!EmitStageScratch(e, be, m->object(), 0)) return false;
++      if (!e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(uintptr_t(static_cast<void*>(&gWJHelpI64)))))
++        return false;
++      if (!GetOp(e, be, m->length()) || !e.writeOp(Op::I64ExtendI32U) ||
++          !e.writeOp(Op::I64Const) || !e.writeVarS64(32) || !e.writeOp(Op::I64Shl))
++        return false;
++      if (!GetOp(e, be, m->start()) || !e.writeOp(Op::I64ExtendI32U) ||
++          !e.writeOp(Op::I64Or))
++        return false;
++      if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_TYPEDARRSUBARRAY, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Object
++    }
++    case MDefinition::Opcode::ToIntegerIndex: {
++      if (WJGETENV("GECKO_WJ_NO_TIDX")) return false;
++      // Normalize a possibly-negative relative index against a length (the
++      // copyWithin/slice/fill `ToIntegerIndex`): negative counts from the end and
++      // clamps to 0, non-negative clamps to length. Port of
++      // CodeGenerator::visitToIntegerIndex (IntPtr == i32 on wasm32).
++      MDefinition* index = ins->getOperand(0);
++      MDefinition* length = ins->getOperand(1);
++      if (!GetOp(e, be, index) || !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(0) || !e.writeOp(Op::I32LtS) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(uint8_t(TypeCode::I32)))
++        return false;
++      // index < 0: out = (index + length < 0) ? 0 : index + length
++      if (!GetOp(e, be, index) || !GetOp(e, be, length) ||
++          !e.writeOp(Op::I32Add) || !e.writeOp(Op::LocalSet) ||
++          !e.writeVarU32(be.toIdxLocal))
++        return false;
++      if (!GetLocal(e, be.toIdxLocal) || !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(0) || !e.writeOp(Op::I32LtS) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(uint8_t(TypeCode::I32)) ||
++          !e.writeOp(Op::I32Const) || !e.writeVarS32(0) ||
++          !e.writeOp(Op::Else) || !GetLocal(e, be.toIdxLocal) ||
++          !e.writeOp(Op::End) || !e.writeOp(Op::Else))
++        return false;
++      // index >= 0: out = (index > length) ? length : index
++      if (!GetOp(e, be, index) || !GetOp(e, be, length) ||
++          !e.writeOp(Op::I32GtS) || !e.writeOp(Op::If) ||
++          !e.writeFixedU8(uint8_t(TypeCode::I32)) || !GetOp(e, be, length) ||
++          !e.writeOp(Op::Else) || !GetOp(e, be, index) ||
++          !e.writeOp(Op::End))
++        return false;
++      return e.writeOp(Op::End);
++    }
++    case MDefinition::Opcode::GuardHasAttachedArrayBuffer: {
++      if (WJGETENV("GECKO_WJ_NO_ABGUARD")) return false;
++      // Guard that a TypedArray/DataView has a live (non-detached) ArrayBuffer;
++      // a detached buffer deopts to PBL. Inline port of
++      // MacroAssembler::branchIfHasDetachedArrayBuffer (==
++      // ArrayBufferViewObject::hasDetachedBuffer): shared-memory elements can't
++      // be detached; a null/non-object buffer slot has never been exposed; else
++      // test the buffer's DETACHED flag. Pdfjs Lexer_getObj bailed here before.
++      MDefinition* obj = ins->getOperand(0);
++      if (!GetOp(e, be, obj) || !e.writeOp(Op::LocalSet) ||
++          !e.writeVarU32(be.abObjLocal))
++        return false;
++      // if ((obj->elements.flags & SHARED_MEMORY) == 0) {
++      if (!GetLocal(e, be.abObjLocal) || !e.writeOp(Op::I32Load) ||
++          !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::NativeObject::offsetOfElements())) ||
++          !e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::ObjectElements::offsetOfFlags())) ||
++          !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(js::ObjectElements::SHARED_MEMORY)) ||
++          !e.writeOp(Op::I32And) || !e.writeOp(Op::I32Eqz) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      //   if (obj->buffer is an Object) {
++      if (!GetLocal(e, be.abObjLocal) || !e.writeOp(Op::I64Load) ||
++          !e.writeVarU32(3) ||
++          !e.writeVarU32(uint32_t(js::ArrayBufferViewObject::bufferOffset())) ||
++          !e.writeOp(Op::I64Const) || !e.writeVarS64(32) ||
++          !e.writeOp(Op::I64ShrU) || !e.writeOp(Op::I32WrapI64) ||
++          !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(TagWord(JSVAL_TYPE_OBJECT))) ||
++          !e.writeOp(Op::I32Eq) || !e.writeOp(Op::If) ||
++          !e.writeFixedU8(0x40))
++        return false;
++      //     if ((buffer.flags & DETACHED) != 0) deopt;
++      if (!GetLocal(e, be.abObjLocal) || !e.writeOp(Op::I32Load) ||
++          !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::ArrayBufferViewObject::bufferOffset())) ||
++          !e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::ArrayBufferObject::offsetOfFlagsSlot())) ||
++          !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(js::ArrayBufferObject::DETACHED)) ||
++          !e.writeOp(Op::I32And) || !e.writeOp(Op::If) ||
++          !e.writeFixedU8(0x40))
++        return false;
++      // deopt sits 2 `if` levels deeper than the usual single guard-if.
++      uint32_t savedNest = be.deoptExtraNest;
++      be.deoptExtraNest = savedNest + 2;
++      bool ok = EmitDeopt(e, be);
++      be.deoptExtraNest = savedNest;
++      if (!ok) return false;
++      if (!e.writeOp(Op::End) || !e.writeOp(Op::End) || !e.writeOp(Op::End))
++        return false;
++      return GetLocal(e, be.abObjLocal);  // passthrough the object
++    }
++    case MDefinition::Opcode::IntPtrToDouble: {
++      // IntPtr -> Double (index/pointer as a JS number).
++      if (!GetOp(e, be, ins->getOperand(0)) || !e.writeOp(Op::F64ConvertI32S))
++        return false;
++      return true;
++    }
++    case MDefinition::Opcode::WrapInt64ToInt32: {
++      // low 32 bits (bottomHalf) or the high 32 bits (c >> 32) of an i64.
++      MWrapInt64ToInt32* w = ins->toWrapInt64ToInt32();
++      if (!GetOp(e, be, w->input())) return false;
++      if (!w->bottomHalf()) {
++        if (!e.writeOp(Op::I64Const) || !e.writeVarS64(32) ||
++            !e.writeOp(Op::I64ShrS))
++          return false;
++      }
++      return e.writeOp(Op::I32WrapI64);
++    }
++    case MDefinition::Opcode::IntPtrToInt64: {
++      if (!GetOp(e, be, ins->getOperand(0)) || !e.writeOp(Op::I64ExtendI32S))
++        return false;
++      return true;
++    }
++    case MDefinition::Opcode::Int64ToIntPtr: {
++      if (!GetOp(e, be, ins->getOperand(0)) || !e.writeOp(Op::I32WrapI64))
++        return false;
++      return true;
++    }
++    case MDefinition::Opcode::ExtendInt32ToInt64: {
++      MExtendInt32ToInt64* x = ins->toExtendInt32ToInt64();
++      if (!GetOp(e, be, x->input())) return false;
++      return e.writeOp(x->isUnsigned() ? Op::I64ExtendI32U : Op::I64ExtendI32S);
++    }
++    case MDefinition::Opcode::SameValueDouble: {
++      // Object.is(a, b) for doubles: a == b || (a != a && b != b).
++      MSameValueDouble* s = ins->toSameValueDouble();
++      if (!EmitOperandAsF64(e, be, s->lhs()) ||
++          !EmitOperandAsF64(e, be, s->rhs()) || !e.writeOp(Op::F64Eq))
++        return false;
++      if (!EmitOperandAsF64(e, be, s->lhs()) ||
++          !EmitOperandAsF64(e, be, s->lhs()) || !e.writeOp(Op::F64Ne))
++        return false;
++      if (!EmitOperandAsF64(e, be, s->rhs()) ||
++          !EmitOperandAsF64(e, be, s->rhs()) || !e.writeOp(Op::F64Ne))
++        return false;
++      return e.writeOp(Op::I32And) && e.writeOp(Op::I32Or);
++    }
++    case MDefinition::Opcode::NegativeToUndefined: {
++      // input < 0 ? undefined : boxed Int32(input) (charCodeAt out-of-bounds).
++      MDefinition* in = ins->getOperand(0);
++      if (!GetOp(e, be, in) || !e.writeOp(Op::I32Const) || !e.writeVarS32(0) ||
++          !e.writeOp(Op::I32LtS) || !e.writeOp(Op::If) ||
++          !e.writeFixedU8(uint8_t(TypeCode::I64)))
++        return false;
++      if (!e.writeOp(Op::I64Const) ||
++          !e.writeVarS64(int64_t(JS::UndefinedValue().asRawBits())))
++        return false;
++      if (!e.writeOp(Op::Else) || !GetOp(e, be, in) ||
++          !EmitBoxFromStack(e, MIRType::Int32))
++        return false;
++      return e.writeOp(Op::End);
++    }
++    case MDefinition::Opcode::LoadValueTag: {
++      // extractTag(value) == the high 32 bits of the boxed Value.
++      if (!GetOp(e, be, ins->getOperand(0)) || !e.writeOp(Op::I64Const) ||
++          !e.writeVarS64(32) || !e.writeOp(Op::I64ShrU))
++        return false;
++      return e.writeOp(Op::I32WrapI64);
++    }
++    case MDefinition::Opcode::IdToStringOrSymbol: {
++      // A PropertyKey (jsid) is already a string/symbol Value -> passthrough.
++      return GetOp(e, be, ins->getOperand(0));
++    }
++    case MDefinition::Opcode::GuardIntPtrIsNonNegative: {
++      MDefinition* in = ins->getOperand(0);
++      if (!GetOp(e, be, in) || !e.writeOp(Op::I32Const) || !e.writeVarS32(0) ||
++          !e.writeOp(Op::I32LtS) || !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return false;
++      return GetOp(e, be, in);
++    }
++    case MDefinition::Opcode::GuardInt32Range: {
++      MGuardInt32Range* g = ins->toGuardInt32Range();
++      MDefinition* in = g->input();
++      if (!GetOp(e, be, in) || !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(g->minimum()) || !e.writeOp(Op::I32LtS))
++        return false;
++      if (!GetOp(e, be, in) || !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(g->maximum()) || !e.writeOp(Op::I32GtS) ||
++          !e.writeOp(Op::I32Or) || !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return false;
++      return GetOp(e, be, in);
++    }
++    case MDefinition::Opcode::GuardIsExtensible: {
++      // Deopt if the object's Shape carries ObjectFlag::NotExtensible.
++      MDefinition* obj = ins->getOperand(0);
++      // shape offset via the shadow struct (JSObject::offsetOfShape is protected).
++      if (!GetOp(e, be, obj) || !e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(offsetof(JS::shadow::Object, shape))) ||
++          !e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::Shape::offsetOfObjectFlags())) ||
++          !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(uint32_t(js::ObjectFlag::NotExtensible))) ||
++          !e.writeOp(Op::I32And) || !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return false;
++      return GetOp(e, be, obj);
++    }
++    case MDefinition::Opcode::ArrayBufferViewByteOffset: {
++      // byteOffset is a PrivateValue fixed slot; its payload is the intptr.
++      if (!GetOp(e, be, ins->getOperand(0)) || !e.writeOp(Op::I32Load) ||
++          !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::ArrayBufferViewObject::byteOffsetOffset())))
++        return false;
++      return true;
++    }
++    case MDefinition::Opcode::Atan2: {
++      MAtan2* a = ins->toAtan2();
++      if (!EmitStageScratch(e, be, a->y(), 0)) return false;
++      if (!EmitStageScratch(e, be, a->x(), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_ATAN2, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::SameValue: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SAMEVALUE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::Hypot: {
++      // Math.hypot(x0..xn-1): Ion calls ecmaHypot/hypot3/hypot4 for 2..4 args.
++      uint32_t n = ins->numOperands();
++      if (n < 2 || n > 4) return false;
++      for (uint32_t i = 0; i < n; i++) {
++        if (!EmitStageScratch(e, be, ins->getOperand(i), i)) return false;
++      }
++      if (!EmitHelperCallResult(e, be, ins, WJH_HYPOT, n)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::GuardIsResizableTypedArray:
++    case MDefinition::Opcode::GuardIsNonResizableTypedArray: {
++      // Pure class-range check (IsResizableTypedArrayClass / fixed+immutable);
++      // the helper's f64 CALL RESULT is the guard outcome (0 pass, 1 deopt).
++      MDefinition* obj = ins->getOperand(0);
++      if (!EmitStageScratch(e, be, obj, 0)) return false;
++      int kind = ins->op() == MDefinition::Opcode::GuardIsResizableTypedArray
++                     ? WJH_ISRESIZABLETYPEDARRAY
++                     : WJH_ISNONRESIZABLETYPEDARRAY;
++      if (!e.writeOp(Op::F64Const) || !e.writeFixedF64(double(kind)) ||
++          !e.writeOp(Op::F64Const) || !e.writeFixedF64(0.0) ||
++          !e.writeOp(Op::Call) || !e.writeVarU32(0) ||
++          !e.writeOp(Op::LocalSet) || !e.writeVarU32(be.callFlagLocal))
++        return false;
++      if (!GetLocal(e, be.callFlagLocal) || !e.writeOp(Op::F64Const) ||
++          !e.writeFixedF64(0.0) || !e.writeOp(Op::F64Ne) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return false;
++      return GetOp(e, be, obj);
++    }
++    case MDefinition::Opcode::Sign: {
++      // Math.sign: Int32/Double in, Int32/Double out.
++      MSign* s = ins->toSign();
++      MDefinition* in = s->input();
++      MIRType it = in->type(), rt = s->type();
++      if (it == MIRType::Int32 && rt == MIRType::Int32) {
++        // (x>>31)|1, then 0 when x==0 (signInt32).
++        if (!e.writeOp(Op::I32Const) || !e.writeVarS32(0)) return false;
++        if (!GetOp(e, be, in) || !e.writeOp(Op::I32Const) ||
++            !e.writeVarS32(31) || !e.writeOp(Op::I32ShrS) ||
++            !e.writeOp(Op::I32Const) || !e.writeVarS32(1) ||
++            !e.writeOp(Op::I32Or))
++          return false;
++        if (!GetOp(e, be, in) || !e.writeOp(Op::I32Eqz)) return false;
++        return e.writeOp(Op::SelectNumeric);  // x==0 ? 0 : sign
++      }
++      if (it == MIRType::Int32 && rt == MIRType::Double) {
++        // signInt32 then convert to double.
++        if (!e.writeOp(Op::I32Const) || !e.writeVarS32(0)) return false;
++        if (!GetOp(e, be, in) || !e.writeOp(Op::I32Const) ||
++            !e.writeVarS32(31) || !e.writeOp(Op::I32ShrS) ||
++            !e.writeOp(Op::I32Const) || !e.writeVarS32(1) ||
++            !e.writeOp(Op::I32Or))
++          return false;
++        if (!GetOp(e, be, in) || !e.writeOp(Op::I32Eqz) ||
++            !e.writeOp(Op::SelectNumeric) || !e.writeOp(Op::F64ConvertI32S))
++          return false;
++        return true;
++      }
++      if (it == MIRType::Double && rt == MIRType::Double) {
++        // signDouble: 0/NaN pass through, else +/-1.0.
++        if (!GetOp(e, be, in) || !e.writeOp(Op::F64Const) ||
++            !e.writeFixedF64(0.0) || !e.writeOp(Op::F64Eq))
++          return false;
++        if (!GetOp(e, be, in) || !GetOp(e, be, in) || !e.writeOp(Op::F64Ne) ||
++            !e.writeOp(Op::I32Or) || !e.writeOp(Op::If) ||
++            !e.writeFixedU8(uint8_t(TypeCode::F64)))
++          return false;
++        if (!GetOp(e, be, in)) return false;  // preserve +/-0 and NaN
++        if (!e.writeOp(Op::Else) || !GetOp(e, be, in) ||
++            !e.writeOp(Op::F64Const) || !e.writeFixedF64(0.0) ||
++            !e.writeOp(Op::F64Lt) || !e.writeOp(Op::If) ||
++            !e.writeFixedU8(uint8_t(TypeCode::F64)))
++          return false;
++        if (!e.writeOp(Op::F64Const) || !e.writeFixedF64(-1.0) ||
++            !e.writeOp(Op::Else) || !e.writeOp(Op::F64Const) ||
++            !e.writeFixedF64(1.0) || !e.writeOp(Op::End) ||
++            !e.writeOp(Op::End))
++          return false;
++        return true;
++      }
++      if (it == MIRType::Double && rt == MIRType::Int32) {
++        // signDoubleToInt32: NaN bails out; 0 -> 0; else +/-1.
++        if (!GetOp(e, be, in) || !GetOp(e, be, in) || !e.writeOp(Op::F64Ne) ||
++            !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++          return false;
++        if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return false;
++        if (!GetOp(e, be, in) || !e.writeOp(Op::F64Const) ||
++            !e.writeFixedF64(0.0) || !e.writeOp(Op::F64Eq) ||
++            !e.writeOp(Op::If) || !e.writeFixedU8(uint8_t(TypeCode::I32)))
++          return false;
++        if (!e.writeOp(Op::I32Const) || !e.writeVarS32(0) ||
++            !e.writeOp(Op::Else) || !GetOp(e, be, in) ||
++            !e.writeOp(Op::F64Const) || !e.writeFixedF64(0.0) ||
++            !e.writeOp(Op::F64Lt) || !e.writeOp(Op::If) ||
++            !e.writeFixedU8(uint8_t(TypeCode::I32)))
++          return false;
++        if (!e.writeOp(Op::I32Const) || !e.writeVarS32(-1) ||
++            !e.writeOp(Op::Else) || !e.writeOp(Op::I32Const) ||
++            !e.writeVarS32(1) || !e.writeOp(Op::End) || !e.writeOp(Op::End))
++          return false;
++        return true;
++      }
++      return false;
++    }
++    case MDefinition::Opcode::ObjectWithProto: {
++      // Object.create(proto) / `__proto__: proto` -> js::ObjectWithProtoOperation.
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_OBJECTWITHPROTO, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Object
++    }
++    case MDefinition::Opcode::NewClassBodyEnvironmentObject: {
++      // Class-body lexical env from the baked template object.
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_NEWCLASSBODYENV, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Object
++    }
++    case MDefinition::Opcode::MinMaxArray: {
++      // Math.max/min(...arr): dense-number fast path; anything else returns the
++      // helper flag 1.0 -> DEOPT to PBL (no side effects yet, so re-run is safe).
++      MMinMaxArray* m = ins->toMinMaxArray();
++      if (!EmitStageScratch(e, be, m->array(), 0)) return false;
++      uint32_t site = (m->isMax() ? 1u : 0u) |
++                      (m->type() == MIRType::Int32 ? 2u : 0u);
++      if (!e.writeOp(Op::F64Const) || !e.writeFixedF64(double(WJH_MINMAXARRAY)) ||
++          !e.writeOp(Op::F64Const) || !e.writeFixedF64(double(site)) ||
++          !e.writeOp(Op::Call) || !e.writeVarU32(0) ||
++          !e.writeOp(Op::LocalSet) || !e.writeVarU32(be.callFlagLocal))
++        return false;
++      if (!GetLocal(e, be.callFlagLocal) || !e.writeOp(Op::F64Const) ||
++          !e.writeFixedF64(0.0) || !e.writeOp(Op::F64Ne) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return false;
++      if (!GetLocal(e, be.scratchBase) || !e.writeOp(Op::I64Load) ||
++          !e.writeVarU32(3) || !e.writeVarU32(kWJResultOff))
++        return false;
++      return EmitHelperResultAsType(e, be, ins->type());
++    }
++    case MDefinition::Opcode::NewPrivateName: {
++      // Class `#name` private name -> a unique Symbol (js::NewPrivateName).
++      MNewPrivateName* m = ins->toNewPrivateName();
++      if (!EmitStageConstBoxed(e, be,
++                              JS::StringValue(m->name()->unwrap()).asRawBits(), 0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_NEWPRIVATENAME, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Symbol
++    }
++    case MDefinition::Opcode::FunctionWithProto: {
++      // Function with an explicit proto (js::FunWithProtoOperation).
++      MFunctionWithProto* m = ins->toFunctionWithProto();
++      if (!EmitStageScratch(e, be, m->environmentChain(), 0)) return false;
++      if (!EmitStageScratch(e, be, m->prototype(), 1)) return false;
++      if (!EmitStageConstBoxed(e, be, JS::ObjectValue(*m->function()).asRawBits(),
++                              2))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_FUNCTIONWITHPROTO, 0))
++        return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Object
++    }
++    case MDefinition::Opcode::InitHomeObject: {
++      // Set a method's [[HomeObject]] (class methods). Cold (once per class).
++      MInitHomeObject* m = ins->toInitHomeObject();
++      if (!EmitStageScratch(e, be, m->function(), 0)) return false;
++      if (!EmitStageScratch(e, be, m->homeObject(), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_INITHOMEOBJECT, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Object
++    }
++    case MDefinition::Opcode::CheckClassHeritage: {
++      // Guard: `class X extends H` -- H must be null or a constructor; else
++      // deopt to PBL (which throws). Cold (once per class).
++      MDefinition* h = ins->getOperand(0);
++      if (!EmitStageScratch(e, be, h, 0)) return false;
++      if (!e.writeOp(Op::F64Const) ||
++          !e.writeFixedF64(double(WJH_CHECKCLASSHERITAGE)) ||
++          !e.writeOp(Op::F64Const) || !e.writeFixedF64(0.0) ||
++          !e.writeOp(Op::Call) || !e.writeVarU32(0) ||
++          !e.writeOp(Op::LocalSet) || !e.writeVarU32(be.callFlagLocal))
++        return false;
++      if (!GetLocal(e, be.callFlagLocal) || !e.writeOp(Op::F64Const) ||
++          !e.writeFixedF64(0.0) || !e.writeOp(Op::F64Ne) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return false;
++      return GetOp(e, be, h);  // passthrough the heritage value
++    }
++    case MDefinition::Opcode::IsTypedArrayConstructor: {
++      // Pure class check (js::IsTypedArrayConstructor).
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_ISTYPEDARRAYCTOR, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::MapObjectSize: {
++      if (!EmitStageScratch(e, be, ins->toMapObjectSize()->mapObject(), 0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPSIZE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Int32
++    }
++    case MDefinition::Opcode::SetObjectSize: {
++      if (!EmitStageScratch(e, be, ins->toSetObjectSize()->setObject(), 0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETSIZE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Int32
++    }
++    case MDefinition::Opcode::MapObjectGetValue:
++    case MDefinition::Opcode::MapObjectGetValueVMCall:
++    case MDefinition::Opcode::MapObjectGetNonBigInt: {
++      // Map.get(key) (the fast-path variants carry a precomputed hash we ignore).
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPGET, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Value
++    }
++    case MDefinition::Opcode::MapObjectHasValue:
++    case MDefinition::Opcode::MapObjectHasValueVMCall:
++    case MDefinition::Opcode::MapObjectHasNonBigInt: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPHAS, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::MapObjectDelete: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPDELETE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::SetObjectHasValue:
++    case MDefinition::Opcode::SetObjectHasValueVMCall:
++    case MDefinition::Opcode::SetObjectHasNonBigInt: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETHAS, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::SetObjectDelete: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETDELETE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Boolean
++    }
++    case MDefinition::Opcode::ObjectState: {
++      // Recover-only node (Ion never lowers it; it summarizes an object literal
++      // for bailout reconstruction). Our deopt resumes to PBL and re-executes
++      // the literal, so this is a passthrough of the summarized object. It blocked
++      // compiling large real-world functions (preact renderToString, 5.7KB).
++      return GetOp(e, be, ins->toObjectState()->object());
++    }
++    case MDefinition::Opcode::ArrayState: {
++      // Recover-only array-literal summary -> passthrough of the array.
++      return GetOp(e, be, ins->toArrayState()->array());
++    }
++    case MDefinition::Opcode::DateNow: {
++      // Date.now() / new Date() fast path -> double ms since epoch. VM fn
++      // (js::jit::DateNow) -- the same helper Ion's visitDateNow calls.
++      if (!EmitHelperCallResult(e, be, ins, WJH_DATENOW, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::DateParse: {
++      // Date.parse(str) -> double ms (NaN on parse failure).
++      if (!EmitStageScratch(e, be, ins->toDateParse()->string(), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_DATEPARSE, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::TimeClip: {
++      // TimeClip(t): NaN if !finite or |t|>8.64e15, else trunc(t). Pure; runs
++      // before every NewDateObject (whose operand Ion requires to be clipped).
++      if (!EmitStageScratch(e, be, ins->toTimeClip()->time(), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_TIMECLIP, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
++    case MDefinition::Opcode::YearFromTime:
++    case MDefinition::Opcode::MonthFromTime:
++    case MDefinition::Opcode::DateFromTime: {
++      // Date's local-time field extraction (getFullYear/getMonth/getDate) -> a
++      // boxed Int32 or NaN Value. Reads the time zone -> VM fn, not movable.
++      int kind = ins->op() == MDefinition::Opcode::YearFromTime    ? WJH_YEARFROMTIME
++                 : ins->op() == MDefinition::Opcode::MonthFromTime ? WJH_MONTHFROMTIME
++                                                                   : WJH_DATEFROMTIME;
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, kind, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Value
++    }
++    case MDefinition::Opcode::NewDateObject: {
++      // new Date(utcTime): allocate the DateObject (js::NewDateObjectMsec).
++      if (!EmitStageScratch(e, be, ins->toNewDateObject()->utcTime(), 0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_NEWDATEOBJECT, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Object
++    }
++    case MDefinition::Opcode::DateHoursFromSecondsIntoYear:
++    case MDefinition::Opcode::DateMinutesFromSecondsIntoYear:
++    case MDefinition::Opcode::DateSecondsFromSecondsIntoYear: {
++      // getHours/getMinutes/getSeconds: reduce the cached seconds-into-year slot
++      // ((s/3600)%24, (s/60)%60, s%60) -> boxed Int32 (NaN passes through).
++      int kind = ins->op() == MDefinition::Opcode::DateHoursFromSecondsIntoYear
++                     ? WJH_DATEHOURSFROMSECONDS
++                 : ins->op() == MDefinition::Opcode::DateMinutesFromSecondsIntoYear
++                     ? WJH_DATEMINUTESFROMSECONDS
++                     : WJH_DATESECONDSFROMSECONDS;
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return false;
++      if (!EmitHelperCallResult(e, be, ins, kind, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Value
++    }
++    case MDefinition::Opcode::LocalTimeToUTC: {
++      // getTimezoneOffset: localTime (Int64) -> UTC double (js::jit::DateLocalTimeToUTC).
++      // The Int64 operand is staged in the dedicated UNTRACED gWJHelpI64 global --
++      // raw timestamp bits must not sit in the GC-traced gWJScratch.
++      MDefinition* in = ins->toLocalTimeToUTC()->localTime();
++      if (!e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(uintptr_t(static_cast<void*>(&gWJHelpI64)))))
++        return false;
++      if (!GetOp(e, be, in)) return false;
++      if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(0))
++        return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_LOCALTIMETOUTC, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());  // Double
++    }
+     case MDefinition::Opcode::MathFunction: {
+       // Math.sin/cos/tan/log/exp/acos/asin/atan/log2/log10/cbrt/sinh/.../floor/ceil/
+       // round (Double). wasm has no transcendentals -> call the SAME fdlibm/native fn
+@@ -6762,16 +7416,30 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       return pushRounded() && e.writeOp(Op::I32TruncF64S);
+     }
+     case MDefinition::Opcode::MinMax: {
++      if (WJGETENV("GECKO_WJ_NO_MINMAX")) return false;
+       MMinMax* m = ins->toMinMax();
+-      if (!GetOp(e, be, m->lhs()) || !GetOp(e, be, m->rhs())) return false;
+-      if (m->type() == MIRType::Double) {
++      MIRType ty = m->type();
++      if (ty == MIRType::Double || ty == MIRType::Float32) {
++        // Float32 is held as f64 here, and f64 min/max already give the JS
++        // semantics (-0/+0 and NaN propagation match). Convert Int32 operands
++        // rather than emitting f64.min on an i32 local (invalid wasm).
++        if (!EmitOperandAsF64(e, be, m->lhs()) ||
++            !EmitOperandAsF64(e, be, m->rhs()))
++          return false;
+         return e.writeOp(m->isMax() ? Op::F64Max : Op::F64Min);
+       }
+-      if (m->type() == MIRType::Int32) {
+-        // i32 has no min/max: select on a signed compare. Stack: [a, b].
+-        if (!GetOp(e, be, m->lhs()) || !GetOp(e, be, m->rhs())) return false;
++      if (ty == MIRType::Int32 || ty == MIRType::IntPtr) {
++        // i32 has no min/max: select on a signed compare. `select` wants
++        // [a, b, cond], so push a and b TWICE (once as the select operands, once
++        // to compare).
++        if (WJValType(m->lhs()->type()) != uint8_t(TypeCode::I32) ||
++            WJValType(m->rhs()->type()) != uint8_t(TypeCode::I32))
++          return false;
++        if (!GetOp(e, be, m->lhs()) || !GetOp(e, be, m->rhs()) ||
++            !GetOp(e, be, m->lhs()) || !GetOp(e, be, m->rhs()))
++          return false;
+         if (!e.writeOp(m->isMax() ? Op::I32GtS : Op::I32LtS)) return false;
+-        return e.writeOp(Op::SelectNumeric);  // a (gt/lt) b ? a : b
++        return e.writeOp(Op::SelectNumeric);  // [a, b, a(gt/lt)b] -> a : b
+       }
+       return false;
+     }
+@@ -9986,6 +10654,48 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return true;
+       }
+       uint32_t argc = call->numActualArgs();
++      // Direct native call (Ion's callNative ABI): when the callee is a
++      // compile-time constant JSFunction that isNativeFun (self-hosted
++      // intrinsics, CacheIR-constant method callees like Math.round/String),
++      // stage the CallArgs vp layout straight into the GC-traced scratch --
++      // [0]=callee/rval, [1]=this, [2..]=args -- and call wjhelp(WJH_CALLNATIVE),
++      // which invokes fun->native() directly with CallJSNative's checks. Skips
++      // the call-IC compares, the gWJCallCallee/Argc global staging and
++      // JS::Call's InvokeArgs+InternalCallOrConstruct. siteF packs
++      // argc<<32 | uint32(effective native fn ptr) (wasm32 fn ptrs are i32
++      // table indices -> low32 round-trips); ignoresReturnValue swaps in the
++      // jitInfo alternate entry like Ion's visitCallNative. argc<=60 keeps the
++      // staged vp below the callee(62)/newTarget(63) slots.
++      static int noNativeBE = WJGETENV("GECKO_WJ_NONATIVEBE") ? 1 : 0;
++      if (!noNativeBE && argc <= 60) {
++        JSFunction* nfn = nullptr;
++        MDefinition* ncD = call->getCallee();
++        if (ncD->isConstant() && ncD->toConstant()->type() == MIRType::Object) {
++          JSObject* nco = ncD->toConstant()->toObjectOrNull();
++          if (nco && nco->is<JSFunction>() &&
++              nco->as<JSFunction>().isNativeFun()) {
++            nfn = &nco->as<JSFunction>();
++          }
++        }
++        if (nfn) {
++          JSNative nat = nfn->native();
++          if (call->ignoresReturnValue() && nfn->hasJitInfo() &&
++              nfn->jitInfo()->type() == JSJitInfo::IgnoresReturnValueNative) {
++            nat = nfn->jitInfo()->ignoresReturnValueMethod;
++          }
++          if (!EmitStageScratch(e, be, call->getCallee(), 0)) return false;
++          if (!EmitStageScratch(e, be, call->getArg(0), 1)) return false;
++          for (uint32_t i = 0; i < argc; i++) {
++            if (!EmitStageScratch(e, be, call->getArg(1 + i), 2 + i)) {
++              return false;
++            }
++          }
++          double npk = double((uint64_t(argc) << 32) |
++                              uint64_t(uint32_t(
++                                  reinterpret_cast<uintptr_t>(nat))));
++          return EmitHelperCallResult(e, be, ins, WJH_CALLNATIVE, npk);
++        }
++      }
+       // WIDE calls (argc > kWJMaxArgs): the 8-reg fast ABI can't carry them, but
+       // the slow WJH_CALL path stages args in gWJScratch[0..argc-1] (traced slots
+       // 0..61 are free below callee@62) -- route them there instead of bailing
+@@ -10779,6 +11489,70 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return EffectKind::Fail;
+       return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
+     }
++    case MDefinition::Opcode::DateFillLocalTimeSlots: {
++      // Cache the DateObject's local-time slots before getHours/getFullYear/...
++      // read them (WJH_DATEFILLLOCALTIMESLOTS -> DateObject::fillLocalTimeSlots).
++      // Effect op: void, non-throwing; drop the helper's boxed result.
++      if (!EmitStageScratch(e, be, ins->toDateFillLocalTimeSlots()->date(), 0))
++        return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_DATEFILLLOCALTIMESLOTS, 0))
++        return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::MapObjectSet: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, ins->getOperand(2), 2)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_MAPSET, 0)) return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::SetObjectAdd: {
++      if (!EmitStageScratch(e, be, ins->getOperand(0), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, ins->getOperand(1), 1)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETADD, 0)) return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::SetFunName: {
++      // Inferred function `.name` (const f = () => {}, { m() {} }). Cold.
++      MSetFunName* m = ins->toSetFunName();
++      if (!EmitStageScratch(e, be, m->fun(), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->name(), 1)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_SETFUNNAME,
++                                uint32_t(m->prefixKind())))
++        return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::InitPropGetterSetter: {
++      // Object-literal accessor definition (`get x(){}`). The name atom is
++      // interned in the traced GC pool (scratch[2]); site carries the pc.
++      MInitPropGetterSetter* m = ins->toInitPropGetterSetter();
++      if (!EmitStageScratch(e, be, m->object(), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->value(), 1)) return EffectKind::Fail;
++      uintptr_t slot = WJInternConstant(JS::StringValue(m->name()).asRawBits());
++      if (!slot) return EffectKind::Fail;
++      if (!GetLocal(e, be.scratchBase) || !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(slot)) || !e.writeOp(Op::I64Load) ||
++          !e.writeVarU32(3) || !e.writeVarU32(0) || !e.writeOp(Op::I64Store) ||
++          !e.writeVarU32(3) || !e.writeVarU32(2 * 8))
++        return EffectKind::Fail;
++      uint32_t pc = uint32_t(uintptr_t(
++          ins->resumePoint() ? ins->resumePoint()->pc() : nullptr));
++      if (!EmitHelperCallResult(e, be, ins, WJH_INITPROPGETTERSETTER, pc))
++        return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::InitElemGetterSetter: {
++      // Computed accessor definition (`get [k](){}`). site carries the pc.
++      MInitElemGetterSetter* m = ins->toInitElemGetterSetter();
++      if (!EmitStageScratch(e, be, m->object(), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->id(), 1)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->value(), 2)) return EffectKind::Fail;
++      uint32_t pc = uint32_t(uintptr_t(
++          ins->resumePoint() ? ins->resumePoint()->pc() : nullptr));
++      if (!EmitHelperCallResult(e, be, ins, WJH_INITELEMGETTERSETTER, pc))
++        return EffectKind::Fail;
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
+     case MDefinition::Opcode::Bail:
+     case MDefinition::Opcode::Unreachable:
+     case MDefinition::Opcode::ThrowWithStack:  // `throw` variant that attaches an
+@@ -10797,9 +11571,29 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+       be.inDispatchBody = savedDispatch;
+       return ok ? EffectKind::Emitted : EffectKind::Fail;
+     }
++    case MDefinition::Opcode::GuardFuse: {
++      // Deopt if the realm fuse has popped. Looked up by index in the runtime
++      // (single-realm shell). Cold-ish; a helper call is fine.
++      MGuardFuse* g = ins->toGuardFuse();
++      if (!e.writeOp(Op::F64Const) || !e.writeFixedF64(double(WJH_CHECKFUSE)) ||
++          !e.writeOp(Op::F64Const) ||
++          !e.writeFixedF64(double(uint32_t(g->fuseIndex()))) ||
++          !e.writeOp(Op::Call) || !e.writeVarU32(0) ||
++          !e.writeOp(Op::LocalSet) || !e.writeVarU32(be.callFlagLocal))
++        return EffectKind::Fail;
++      if (!GetLocal(e, be.callFlagLocal) || !e.writeOp(Op::F64Const) ||
++          !e.writeFixedF64(0.0) || !e.writeOp(Op::F64Ne) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return EffectKind::Fail;
++      if (!EmitDeopt(e, be) || !e.writeOp(Op::End)) return EffectKind::Fail;
++      return EffectKind::Emitted;
++    }
+     case MDefinition::Opcode::Start:
+     case MDefinition::Opcode::CheckOverRecursed:
+     case MDefinition::Opcode::InterruptCheck:
++    case MDefinition::Opcode::Nop:                       // no-op marker
++    case MDefinition::Opcode::AssertFloat32:             // assert-only
++    case MDefinition::Opcode::AssertCanElidePostWriteBarrier:  // assert-only
+       return EffectKind::Skip;  // prologue / ignored (host stack guards depth)
+     case MDefinition::Opcode::AddAndStoreSlot: {
+       // Add an own property: transition obj->shape to the new shape (which has the
+@@ -11864,7 +12658,12 @@ static bool EmitReturn(Encoder& e, WJBackend& be, MDefinition* val) {
+   }
+   if (!GetOp(e, be, val)) return false;
+   if (val->type() != MIRType::Value && val->type() != MIRType::Int64) {
+-    if (!EmitBoxFromStack(e, val->type())) return false;
++    if (!EmitBoxFromStack(e, val->type())) {
++      if (WJGETENV("GECKO_WJ_BAILDBG"))
++        fprintf(stderr, "[wj-return-box-bail] unsupported return MIRType %s\n",
++                StringFromMIRType(val->type()));
++      return false;
++    }
+   }
+   if (!EmitEnvRootPop(e, be)) return false;
+   if (!EmitDepthPop(e, be)) return false;
+@@ -13576,6 +14375,8 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+   be.iterIdx = uint32_t(be.reserve(uint8_t(TypeCode::I32)));    // Load/StoreSlotByIteratorIndex temps
+   be.iterKind = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
+   be.iterAddr = uint32_t(be.reserve(uint8_t(TypeCode::I32)));
++  be.abObjLocal = uint32_t(be.reserve(uint8_t(TypeCode::I32)));  // GuardHasAttachedArrayBuffer view
++  be.toIdxLocal = uint32_t(be.reserve(uint8_t(TypeCode::I32)));  // ToIntegerIndex normalized index
+   be.callScratch = be.reserve(uint8_t(TypeCode::I32));   // call-site IC callee ptr
+   be.callArgBase = uint32_t(be.reserve(uint8_t(TypeCode::I64)));  // boxed this
+   for (uint32_t i = 0; i < kWJMaxArgs; i++) {
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index a55de9774e..b7dbbc5370 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -179,6 +179,48 @@ enum WJHelpKind : int {
+   WJH_ASYNCRESOLVE = 113,       // scratch[0]=generator(AsyncFunctionGeneratorObject, boxed Object), [1]=value(boxed) -> Object; MAsyncResolve via js::AsyncFunctionResolve (resolves an async fn's promise at its return/resolve point). May GC/OOM. Async fns bailed whole-fn to PBL here (reddit.com).
+   WJH_CANSKIPAWAIT = 114,       // scratch[0]=value(boxed) -> Boolean; MCanSkipAwait via js::CanSkipAwait (await-skip optimization: true when the awaited value isn't a thenable). May GC (getter on .then/.constructor).
+   WJH_EXTRACTAWAITVALUE = 115,  // scratch[0]=value(boxed) -> Value; MMaybeExtractAwaitValue's can-skip branch via js::ExtractAwaitValue (unwrap the already-resolved await value). May GC.
++  WJH_DATENOW = 116,          // (no operands) -> Double; js::jit::DateNow(cx) (Date.now() / new Date())
++  WJH_DATEPARSE = 117,        // scratch[0]=string(String Value) -> Double; js::jit::DateParse(cx,str)
++  WJH_TIMECLIP = 118,         // scratch[0]=time(Double Value) -> Double; JS::TimeClip (NaN if !finite or |t|>8.64e15, else trunc)
++  WJH_YEARFROMTIME = 119,     // scratch[0]=utcTime(Double Value) -> Value; js::jit::DateYearFromTime (local-time year)
++  WJH_MONTHFROMTIME = 120,    // scratch[0]=utcTime(Double Value) -> Value; js::jit::DateMonthFromTime
++  WJH_DATEFROMTIME = 121,     // scratch[0]=utcTime(Double Value) -> Value; js::jit::DateDateFromTime
++  WJH_NEWDATEOBJECT = 122,    // scratch[0]=utcTime(Double Value) -> Object; js::NewDateObjectMsec(cx, JS::TimeClip(t))
++  WJH_DATEFILLLOCALTIMESLOTS = 123,  // scratch[0]=DateObject -> void; js::jit::DateFillLocalTimeSlots (cache local-time slots)
++  WJH_DATEHOURSFROMSECONDS = 124,    // scratch[0]=secondsIntoYear(Int32 or NaN Value) -> Value; (s/3600)%24 (getHours)
++  WJH_DATEMINUTESFROMSECONDS = 125,  // scratch[0]=secondsIntoYear -> Value; (s/60)%60 (getMinutes)
++  WJH_DATESECONDSFROMSECONDS = 126,  // scratch[0]=secondsIntoYear -> Value; s%60 (getSeconds)
++  WJH_LOCALTIMETOUTC = 127,          // gWJHelpI64=localTime(Int64) -> Double; js::jit::DateLocalTimeToUTC
++  WJH_TYPEDARRSUBARRAY = 128,        // scratch[0]=typedArray(Object), gWJHelpI64=(length<<32|start) -> Object; js::TypedArraySubarrayWithLength
++  WJH_ATAN2 = 129,                   // scratch[0]=y, scratch[1]=x (both numbers) -> Double; js::ecmaAtan2(y,x)
++  WJH_SAMEVALUE = 130,               // scratch[0]=v1, scratch[1]=v2 -> Boolean; js::SameValue
++  WJH_HYPOT = 131,                   // scratch[0..n-1]=args (numbers), site=n -> Double; js::ecmaHypot/hypot3/hypot4
++  WJH_INITPROPGETTERSETTER = 132,    // scratch[0]=obj, scratch[1]=getter/setter fn, scratch[2]=interned name atom; site=pc -> void; InitPropGetterSetterOperation
++  WJH_INITELEMGETTERSETTER = 133,    // scratch[0]=obj, scratch[1]=id, scratch[2]=fn; site=pc -> void; InitElemGetterSetterOperation
++  WJH_ISRESIZABLETYPEDARRAY = 134,   // scratch[0]=obj -> f64 call flag (0 = is resizable, 1 = not) for GuardIsResizableTypedArray
++  WJH_ISNONRESIZABLETYPEDARRAY = 135,// scratch[0]=obj -> f64 call flag (0 = is fixed/immutable, 1 = not) for GuardIsNonResizableTypedArray
++  WJH_OBJECTWITHPROTO = 136,         // scratch[0]=proto(Value) -> Object; js::ObjectWithProtoOperation (Object.create / __proto__)
++  WJH_NEWCLASSBODYENV = 137,         // scratch[0]=template ClassBodyLexicalEnvironmentObject -> Object; createWithoutEnclosing
++  WJH_MINMAXARRAY = 138,             // scratch[0]=array; site bit0=isMax, bit1=wantInt32 -> result boxed; f64 flag 1 = unsupported -> deopt
++  WJH_NEWPRIVATENAME = 139,          // scratch[0]=interned name atom -> Symbol; js::NewPrivateName (#priv)
++  WJH_FUNCTIONWITHPROTO = 140,       // scratch[0]=envChain, scratch[1]=prototype, scratch[2]=baked function -> Object; js::FunWithProtoOperation
++  WJH_INITHOMEOBJECT = 141,          // scratch[0]=function(Object), scratch[1]=homeObject(Value) -> Object; JSFunction::setExtendedSlot(METHOD_HOMEOBJECT_SLOT)
++  WJH_CHECKCLASSHERITAGE = 142,      // scratch[0]=heritage(Value) -> f64 call flag (0 = null/constructor, 1 = deopt)
++  WJH_ISTYPEDARRAYCTOR = 143,        // scratch[0]=object -> Boolean; js::IsTypedArrayConstructor
++  WJH_CHECKFUSE = 144,               // site=fuse index -> f64 call flag (0 = intact, 1 = popped -> deopt); MGuardFuse
++  WJH_SETFUNNAME = 145,              // scratch[0]=function(Object), scratch[1]=name(Value), site=prefixKind -> void; js::SetFunctionName
++  WJH_MAPSIZE = 146,                 // scratch[0]=map -> Int32; MapObject::size()
++  WJH_SETSIZE = 147,                 // scratch[0]=set -> Int32; SetObject::size()
++  WJH_MAPGET = 148,                  // scratch[0]=map, scratch[1]=key -> Value; js::jit::MapObjectGet
++  WJH_MAPHAS = 149,                  // scratch[0]=map, scratch[1]=key -> Boolean; js::jit::MapObjectHas
++  WJH_MAPSET = 150,                  // scratch[0]=map, scratch[1]=key, scratch[2]=value -> void; js::jit::MapObjectSet
++  WJH_MAPDELETE = 151,               // scratch[0]=map, scratch[1]=key -> Boolean; js::jit::MapObjectDelete
++  WJH_SETHAS = 152,                  // scratch[0]=set, scratch[1]=key -> Boolean; js::jit::SetObjectHas
++  WJH_SETADD = 153,                  // scratch[0]=set, scratch[1]=key -> void; js::jit::SetObjectAdd
++  WJH_SETDELETE = 154,               // scratch[0]=set, scratch[1]=key -> Boolean; js::jit::SetObjectDelete
++  WJH_CALLNATIVE = 155,              // direct JSNative call (Ion callNative ABI): caller pre-stages the
++                                     // CallArgs vp at scratch[0..]: [0]=callee, [1]=this, [2..]=args.
++                                     // site arg = double(argc<<32 | nativeFnPtr); result -> kWJResultSlot.
+ };
+ // MNewLexicalEnvironmentObject: the LexicalScope* baked from the template object.
+ extern uint32_t gWJLexScope;
+@@ -339,6 +381,10 @@ extern uint64_t gWJConstructNewTarget;
+ extern uint32_t gWJHelpObj;
+ extern uint32_t gWJHelpSlot;
+ extern uint64_t gWJHelpVal;
++// Raw i64 staging for helpers taking an Int64 operand (WJH_LOCALTIMETOUTC). Kept
++// OUT of the GC-traced gWJScratch: a raw timestamp's bits are not a JS::Value and
++// a GC tracing them could mistake them for a GC pointer. Not traced.
++extern int64_t gWJHelpI64;
+ extern uint64_t gWJElemHits;  // DEBUG: inline typed-array element-store IC hits
+ 
+ // Monomorphic call-site IC for direct wasm->wasm calls. Per call site: the cached
+@@ -445,7 +491,7 @@ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit
+ // module trampoline (f64 scratch-base)->f64 reads scratch and calls main, for
+ // the host-entry path (the JS<->wasm boundary can't carry i64 safely). Functions
+ // with more than kWJMaxArgs actual args fall back (stay PBL).
+-static constexpr uint32_t kWJMaxArgs = 8;
++static constexpr uint32_t kWJMaxArgs = 16;
+ 
+ // EHABI rewrite (EHABI_REWRITE_PLAN.md): when true, the main wasm function ABI is
+ // `(f64 sb, i64 callee, i64 this, i64 args...) -> i64 result` with exceptions carried by
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 3d1c31dcfb..d9508212d5 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -30,7 +30,9 @@
+ #include "js/RootingAPI.h"
+ #include "js/Value.h"
+ #include "vm/JSContext.h"
++#include "vm/Realm.h"  // Realm::realmFuses (WJH_CHECKFUSE / MGuardFuse)
+ #include "vm/JSFunction.h"
++#include "vm/FunctionPrefixKind.h"  // js::FunctionPrefixKind (WJH_SETFUNNAME)
+ #include "vm/ArgumentsObject.h"  // ArgumentsObject::createForWasmJit (WJH_NEWARGUMENTS)
+ #include "builtin/Object.h"      // js::ObjectClassToString (WJH_OBJCLASSTOSTRING)
+ #include "builtin/MapObject.h"   // js::MapObject::create / js::SetObject::create (WJH_NEWMAP/NEWSET)
+@@ -55,6 +57,9 @@
+ #include "vm/Shape.h"    // js::Shape
+ #include "vm/ArrayObject.h"   // js::ArrayObject
+ #include "builtin/Array.h"    // js::SetLengthProperty, IsArrayFromJit
++#include "js/Date.h"           // JS::TimeClip (WJH_TIMECLIP/WJH_NEWDATEOBJECT)
++#include "builtin/Date.h"      // js::NewDateObjectMsec (WJH_NEWDATEOBJECT)
++#include "vm/DateObject.h"     // js::DateObject::fillLocalTimeSlots (WJH_DATEFILLLOCALTIMESLOTS)
+ #include "vm/RegExpObject.h"  // js::CloneRegExpObject (MRegExp)
+ #include "builtin/String.h"   // js::StringFromCharCode
+ #include "builtin/RegExp.h"   // js::RegExpHasCaptureGroups
+@@ -77,6 +82,11 @@
+ #include "vm/PlainObject-inl.h"  // createWithShape
+ #include "vm/Interpreter-inl.h"  // GetElementOperation
+ #include "vm/JSObject-inl.h"     // GuessArrayGCKind
++#include "js/friend/StackLimits.h"  // js::AutoCheckRecursionLimit (native fast path)
++#include "debugger/DebugAPI-inl.h"  // js::DebugAPI::onNativeCall (native fast path)
++#include "js/CallArgs.h"            // JS::CallArgsFromVp (native fast path)
++#include "js/ValueArray.h"          // JS::RootedValueArray (native fast path vp)
++#include "vm/GlobalObject.h"        // js::GlobalObject (native-call this outerization)
+ 
+ #if defined(__EMSCRIPTEN__)
+ #  include <emscripten.h>
+@@ -229,6 +239,7 @@ uintptr_t gWJStringHeaderWord = 0; // NurseryCellHeader value for String cells (
+ uint32_t gWJHelpObj = 0;        // object ptr for WJH_SETSLOT
+ uint32_t gWJHelpSlot = 0;
+ uint64_t gWJHelpVal = 0;        // boxed value for WJH_SETSLOT
++int64_t gWJHelpI64 = 0;         // raw Int64 operand staging (WJH_LOCALTIMETOUTC); untraced
+ uint64_t gWJPreBarBadSkips = 0; // WJH_PREBARRIER: count of skipped invalid/garbage old-value cells (a store handed the barrier a bad ptr -- see discord.com pre-barrier crash)
+ uint64_t gWJElemHits = 0;       // DEBUG: inline typed-array element-store IC hits
+ uint32_t gWJCallFn[kWJCallSites * kWJCallWays];     // polymorphic call IC: callee ptrs
+@@ -325,6 +336,8 @@ alignas(8) uint64_t gWJScratch[js::wasm::kWJScratchSlots];
+ uint64_t gWJWasmRuns = 0;
+ uint64_t gWJFastCalls = 0;
+ uint64_t gWJSlowCalls = 0;
++uint64_t gWJNativeCalls = 0;  // calls to native JSFunctions via the direct
++                            // native() fast path (no JS::Call/InvokeArgs)
+ uint64_t gWJWasmDeopts = 0;
+ // Set by WJH_RESUME; checked by WasmJitRunCall to tell a deopted entry from one
+ // that ran fully in JIT (both return flag 0), driving the deopt-storm safety valve.
+@@ -1484,7 +1497,7 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+   }
+   gWJWasmRuns++;
+   WJStatsDumpTick();  // GECKO_WJ_STATSJSON: periodic stderr snapshot (browser-capturable)
+-  if (((gWJFastCalls+gWJSlowCalls) % 20000)==0 && (gWJFastCalls+gWJSlowCalls)>0 && (getenv("GECKO_WJWARP_DUMP")||getenv("GECKO_DEBUG_JIT"))) fprintf(stderr, "[wb-calls] fast=%llu slow=%llu\n", (unsigned long long)gWJFastCalls,(unsigned long long)gWJSlowCalls);
++  if (((gWJFastCalls+gWJSlowCalls+gWJNativeCalls) % 20000)==0 && (gWJFastCalls+gWJSlowCalls+gWJNativeCalls)>0 && (getenv("GECKO_WJWARP_DUMP")||getenv("GECKO_DEBUG_JIT"))) fprintf(stderr, "[wb-calls] fast=%llu slow=%llu native=%llu\n", (unsigned long long)gWJFastCalls,(unsigned long long)gWJSlowCalls,(unsigned long long)gWJNativeCalls);
+   if (((gWJWasmRuns + gWJWasmDeopts) % 5000) == 0 &&
+       (getenv("GECKO_WJWARP_DUMP") || getenv("GECKO_DEBUG_JIT"))) {
+     fprintf(stderr, "[wb-stats] wasm runs=%llu deopts=%llu\n",
+@@ -1925,6 +1938,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJDumpCrashState() {
+     }
+   }
+ }
++// Direct JSNative call (Ion's callNative ABI), shared by the WJH_CALL native
++// fast path and WJH_CALLNATIVE. Mirrors CallJSNative: recursion check +
++// DebugAPI::onNativeCall + AutoRealm, then native(cx, argc, vp) with the
++// CallArgs vp layout [0]=callee/rval, [1]=this, [2..]=args.
++//
++// vp MUST be a per-call GC-rooted stack buffer (RootedValueArray, same as
++// FixedInvokeArgs uses), NOT the shared gWJScratch: a native may re-enter wasm
++// code (sort's comparator, forEach/map callbacks, getters...) whose own wjhelp
++// arg staging would clobber the scratch mid-call -> corrupted args/rval.
++static double WJNativeCall(JSContext* cx, JSFunction* fun, JSNative native,
++                           uint32_t argc, const JS::Value* args,
++                           JS::HandleValue thisv) {
++  JS::RootedValueArray<62> vbuf(cx);
++  JS::Value* vp = vbuf.begin();
++  vp[0].setObject(*fun);
++  vp[1] = thisv;
++  for (uint32_t i = 0; i < argc; i++) vp[2 + i] = args[i];
++  // js::Call parity (CalleeNeedsOuterizedThisObject): outerize a global-object
++  // `this` for everything except DOM Getter/Setter jitInfo natives.
++  if (vp[1].isObject() && vp[1].toObject().is<GlobalObject>() &&
++      (!fun->hasJitInfo() || fun->jitInfo()->needsOuterizedThisObject())) {
++    vp[1].setObject(*js::GetThisObject(&vp[1].toObject()));
++  }
++  js::AutoCheckRecursionLimit recursion(cx);
++  if (!recursion.check(cx)) {
++    return 1.0;
++  }
++  JS::CallArgs nargs = JS::CallArgsFromVp(argc, vp);
++  js::NativeResumeMode rm =
++      js::DebugAPI::onNativeCall(cx, nargs, js::CallReason::Call);
++  if (rm != js::NativeResumeMode::Continue) {
++    if (rm == js::NativeResumeMode::Override) {
++      gWJScratch[js::wasm::kWJResultSlot] = nargs.rval().get().asRawBits();
++      return 0.0;
++    }
++    return 1.0;
++  }
++  fun = &vp[0].toObject().as<JSFunction>();  // re-derive: the hook may GC->move
++  js::AutoRealm ar(cx, fun);
++  gWJNativeCalls++;
++  if (!native(cx, argc, vp)) {
++    return 1.0;
++  }
++  gWJScratch[js::wasm::kWJResultSlot] = vp[0].asRawBits();
++  return 0.0;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE double wjhelp(double kindF, double siteF) {
+   gWJLastHelpKind = uint32_t(kindF);
+   gWJLastHelpSite = uint32_t(siteF);
+@@ -2781,6 +2841,25 @@ static double wjhelpImpl(double kindF, double siteF) {
+       }
+     }
+ 
++    // Native-callee fast path (Ion's callNative ABI): for a JSFunction that
++    // isNativeFun, call fun->native() directly -- skipping JS::Call's InvokeArgs
++    // plumbing and InternalCallOrConstruct dispatch. WJNativeCall copies the
++    // staged args into a per-call GC-rooted vp buffer (reentrancy-safe: natives
++    // can call back into wasm code that re-stages the shared scratch).
++    static int noNativeCall = getenv("GECKO_WJ_NONATIVECALL") ? 1 : 0;
++    if (!noNativeCall && argc <= 60 && callee.isObject() &&
++        callee.toObject().is<JSFunction>()) {
++      JSFunction* nfun = &callee.toObject().as<JSFunction>();
++      if (nfun->isNativeFun()) {
++        JS::HandleValue thisv = JS::HandleValue::fromMarkedLocation(
++            reinterpret_cast<const JS::Value*>(
++                &gWJScratch[js::wasm::kWJThisSlot]));
++        return WJNativeCall(
++            cx, nfun, nfun->native(), argc,
++            reinterpret_cast<const JS::Value*>(&gWJScratch[0]), thisv);
++      }
++    }
++
+     // gWJScratch[0..kWJThisSlot] is GC-traced by WJTraceRoots, so hand JS::Call
+     // non-owning Handles straight into it -- no per-call RootedValueVector copy or
+     // thisv rooting (the per-call Rooted overhead was ~1.3% across ~1M slow calls).
+@@ -2833,6 +2912,12 @@ static double wjhelpImpl(double kindF, double siteF) {
+     }
+     static int callHist = getenv("GECKO_WJ_CALLHIST") ? 1 : 0;
+     if (callHist) {
++      // GECKO_WJ_CALLHIST=N prints every N slow calls (default/1 = every 200000).
++      static uint64_t histEvery = [] {
++        const char* e = getenv("GECKO_WJ_CALLHIST");
++        uint64_t n = e ? strtoull(e, nullptr, 10) : 0;
++        return n > 1 ? n : 200000;
++      }();
+       static std::map<std::string, uint64_t> hist;
+       static uint64_t tot = 0;
+       char key[80];
+@@ -2858,7 +2943,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+         snprintf(key, sizeof key, "non-fn");
+       }
+       hist[key]++;
+-      if ((++tot % 200000) == 0) {
++      if ((++tot % histEvery) == 0) {
+         std::vector<std::pair<uint64_t, std::string>> v;
+         for (auto& kv : hist) v.push_back({kv.second, kv.first});
+         std::sort(v.rbegin(), v.rend());
+@@ -2875,6 +2960,45 @@ static double wjhelpImpl(double kindF, double siteF) {
+     return 0.0;
+   }
+ 
++  // WJH_CALLNATIVE: backend-staged direct native call. siteF packs
++  // (argc << 32) | uint32(nativeFnPtr). The caller already wrote the CallArgs
++  // vp layout: scratch[0]=callee, [1]=this, [2..argc+1]=args. Same checks as
++  // the WJH_CALL native fast path (CallJSNative parity).
++  if (kind == js::wasm::WJH_CALLNATIVE) {
++    static int noNativeCall = getenv("GECKO_WJ_NONATIVECALL") ? 1 : 0;
++    uint64_t su = uint64_t(siteF);
++    uint32_t argc = uint32_t(su >> 32);
++    JSNative native = JSNative(uintptr_t(uint32_t(su)));
++    JS::Value* svp = reinterpret_cast<JS::Value*>(&gWJScratch[0]);
++    bool bad = noNativeCall || !native || argc > 60 || !svp[0].isObject() ||
++               !svp[0].toObject().is<JSFunction>() ||
++               !svp[0].toObject().as<JSFunction>().isNativeFun();
++    if (!bad) {
++      // The baked ptr is fun->native(), or its IgnoresReturnValue jitInfo
++      // alternate when the call site drops the result (Ion's visitCallNative).
++      JSFunction* vf = &svp[0].toObject().as<JSFunction>();
++      bad = vf->native() != native &&
++            !(vf->hasJitInfo() &&
++              vf->jitInfo()->type() == JSJitInfo::IgnoresReturnValueNative &&
++              vf->jitInfo()->ignoresReturnValueMethod == native);
++    }
++    if (bad) {
++      // Baked identity doesn't match the staged callee (a debug-disable env or
++      // stale embed): re-stage into the WJH_CALL layout and take the generic
++      // path -- which re-detects natives itself.
++      uint64_t thisBits = svp[1].asRawBits();
++      uint64_t calleeBits = svp[0].asRawBits();
++      memmove(svp, svp + 2, argc * sizeof(JS::Value));
++      gWJScratch[js::wasm::kWJThisSlot] = thisBits;
++      gWJCallCallee = calleeBits;
++      gWJCallArgc = argc;
++      return wjhelpImpl(js::wasm::WJH_CALL, siteF);
++    }
++    JSFunction* nfun = &svp[0].toObject().as<JSFunction>();
++    JS::HandleValue thisv = JS::HandleValue::fromMarkedLocation(&svp[1]);
++    return WJNativeCall(cx, nfun, native, argc, &svp[2], thisv);
++  }
++
+   if (kind == js::wasm::WJH_DBGPTR) {
+     // DEBUG: log the value the valNursery post-barrier check is about to chunk-load.
+     // gWJHelpObj = payload (low32), gWJHelpVal = full boxed bits. If the next line is
+@@ -5122,6 +5246,352 @@ static double wjhelpImpl(double kindF, double siteF) {
+     return 0.0;
+   }
+ 
++  if (kind == js::wasm::WJH_DATENOW) {
++    // MDateNow: Date.now() / new Date() fast path -> double ms since epoch.
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(js::jit::DateNow(cx)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_DATEPARSE) {
++    // MDateParse: Date.parse(str) -> double ms (NaN on parse failure). DateParse
++    // asserts the string is linear; flatten first (matches the transpiler's
++    // MLinearizeString / Ion's OOL path).
++    JS::RootedString str(cx, JS::Value::fromRawBits(gWJScratch[0]).toString());
++    if (!str->ensureLinear(cx)) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(js::jit::DateParse(cx, str)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_TIMECLIP) {
++    // MTimeClip: ECMAScript TimeClip -- NaN if !finite or |t| > 8.64e15, else
++    // truncate toward zero. Pure (no GC/throw); matches masm.timeClip.
++    double t = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(JS::TimeClip(t).toDouble()).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_YEARFROMTIME ||
++      kind == js::wasm::WJH_MONTHFROMTIME ||
++      kind == js::wasm::WJH_DATEFROMTIME) {
++    // M{Year,Month,Date}FromTime: utcTime -> boxed Int32 field (or NaN). Reads the
++    // current time zone (UTCToLocalTime), so it is not movable -- matches Ion.
++    double t = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    JS::Value out;
++    if (kind == js::wasm::WJH_YEARFROMTIME) {
++      js::jit::DateYearFromTime(cx, t, &out);
++    } else if (kind == js::wasm::WJH_MONTHFROMTIME) {
++      js::jit::DateMonthFromTime(cx, t, &out);
++    } else {
++      js::jit::DateDateFromTime(cx, t, &out);
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = out.asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_NEWDATEOBJECT) {
++    // MNewDateObject: allocate a DateObject with the given (already time-clipped)
++    // utcTime. Clip here too so a folded-away MTimeClip can't store a fractional
++    // time (Ion's js::jit::NewDateObject asserts clipping; asserts are off in this
++    // optimized build, so clip explicitly). nullptr proto = realm Date.prototype,
++    // which is what the transpiler's template object carries.
++    double t = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    JSObject* obj = js::NewDateObjectMsec(cx, JS::TimeClip(t));
++    if (!obj) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::ObjectValue(*obj).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_DATEFILLLOCALTIMESLOTS) {
++    // MDateFillLocalTimeSlots: populate the DateObject's cached local-time slots
++    // (getHours/getFullYear/... read them). Void; non-throwing.
++    js::DateObject* d =
++        &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<js::DateObject>();
++    js::jit::DateFillLocalTimeSlots(d);
++    gWJScratch[js::wasm::kWJResultSlot] = JS::UndefinedValue().asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_DATEHOURSFROMSECONDS ||
++      kind == js::wasm::WJH_DATEMINUTESFROMSECONDS ||
++      kind == js::wasm::WJH_DATESECONDSFROMSECONDS) {
++    // getHours/getMinutes/getSeconds: pure integer reduction of the cached
++    // seconds-into-year slot, mirroring MacroAssembler::dateTimeFromSecondsIntoYear
++    // (an Int32 reduces; any other value -- NaN -- passes through unchanged).
++    JS::Value v = JS::Value::fromRawBits(gWJScratch[0]);
++    if (v.isInt32()) {
++      uint32_t s = uint32_t(v.toInt32());
++      uint32_t r = kind == js::wasm::WJH_DATEHOURSFROMSECONDS     ? (s / 3600u) % 24u
++                   : kind == js::wasm::WJH_DATEMINUTESFROMSECONDS ? (s / 60u) % 60u
++                                                                  : s % 60u;
++      v = JS::Int32Value(int32_t(r));
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = v.asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_LOCALTIMETOUTC) {
++    // getTimezoneOffset: localTime (Int64) -> UTC double. The raw i64 operand is
++    // staged in the untraced gWJHelpI64 (not gWJScratch); DateLocalTimeToUTC is
++    // AutoUnsafeCallWithABI (no GC/throw).
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(js::jit::DateLocalTimeToUTC(cx, gWJHelpI64)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_TYPEDARRSUBARRAY) {
++    // MTypedArraySubarray: `ta.subarray(start, length)` -> a new view sharing the
++    // buffer. start/length are IntPtr packed into the untraced gWJHelpI64
++    // (length in the high 32 bits, start in the low). May GC/throw.
++    JS::Rooted<js::TypedArrayObject*> obj(
++        cx, &JS::Value::fromRawBits(gWJScratch[0])
++                 .toObject()
++                 .as<js::TypedArrayObject>());
++    intptr_t start = intptr_t(int32_t(uint32_t(uint64_t(gWJHelpI64))));
++    intptr_t length = intptr_t(int32_t(uint32_t(uint64_t(gWJHelpI64) >> 32)));
++    js::TypedArrayObject* ta =
++        js::TypedArraySubarrayWithLength(cx, obj, start, length);
++    if (!ta) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::ObjectValue(*ta).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_ATAN2) {
++    // MAtan2: Math.atan2(y, x) -> Double. ecmaAtan2 is the same helper Ion calls.
++    double y = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    double x = JS::Value::fromRawBits(gWJScratch[1]).toNumber();
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::DoubleValue(js::ecmaAtan2(y, x)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_SAMEVALUE) {
++    // MSameValue: Object.is(a, b) (NaN equals NaN, +0 != -0). May GC/throw.
++    JS::RootedValue a(cx, JS::Value::fromRawBits(gWJScratch[0]));
++    JS::RootedValue b(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    bool res;
++    if (!js::SameValue(cx, a, b, &res)) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::BooleanValue(res).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_HYPOT) {
++    // MHypot: Math.hypot(x0..xn-1). Ion calls ecmaHypot/hypot3/hypot4 for 2..4
++    // args (the helper only lowers those).
++    uint32_t n = uint32_t(siteF);
++    double r;
++    double a0 = JS::Value::fromRawBits(gWJScratch[0]).toNumber();
++    double a1 = JS::Value::fromRawBits(gWJScratch[1]).toNumber();
++    if (n == 2) {
++      r = js::ecmaHypot(a0, a1);
++    } else if (n == 3) {
++      r = js::hypot3(a0, a1, JS::Value::fromRawBits(gWJScratch[2]).toNumber());
++    } else if (n == 4) {
++      r = js::hypot4(a0, a1, JS::Value::fromRawBits(gWJScratch[2]).toNumber(),
++                     JS::Value::fromRawBits(gWJScratch[3]).toNumber());
++    } else {
++      return 1.0;  // shouldn't happen (backend bails for n>4)
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = JS::DoubleValue(r).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_INITPROPGETTERSETTER) {
++    // Object-literal accessor definition (`get x(){}`): scratch[0]=obj,
++    // scratch[1]=getter/setter fn, scratch[2]=interned name atom. site=pc.
++    jsbytecode* pc = reinterpret_cast<jsbytecode*>(uintptr_t(siteF));
++    JS::RootedObject obj(cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject());
++    JS::RootedObject val(cx, &JS::Value::fromRawBits(gWJScratch[1]).toObject());
++    JS::Rooted<PropertyName*> name(
++        cx, JS::Value::fromRawBits(gWJScratch[2]).toString()->asAtom().asPropertyName());
++    if (!InitPropGetterSetterOperation(cx, pc, obj, name, val)) return 1.0;
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_INITELEMGETTERSETTER) {
++    // Computed accessor definition (`get [k](){}`). site=pc.
++    jsbytecode* pc = reinterpret_cast<jsbytecode*>(uintptr_t(siteF));
++    JS::RootedObject obj(cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject());
++    JS::RootedValue id(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    JS::RootedObject val(cx, &JS::Value::fromRawBits(gWJScratch[2]).toObject());
++    if (!InitElemGetterSetterOperation(cx, pc, obj, id, val)) return 1.0;
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_ISRESIZABLETYPEDARRAY ||
++      kind == js::wasm::WJH_ISNONRESIZABLETYPEDARRAY) {
++    // GuardIs{Non,}ResizableTypedArray: pure class-range check; the f64 CALL
++    // RESULT carries the guard outcome (0 = guard passes, 1 = deopt).
++    const JSClass* clasp =
++        JS::Value::fromRawBits(gWJScratch[0]).toObject().getClass();
++    bool ok = kind == js::wasm::WJH_ISRESIZABLETYPEDARRAY
++                  ? IsResizableTypedArrayClass(clasp)
++                  : (IsFixedLengthTypedArrayClass(clasp) ||
++                     IsImmutableTypedArrayClass(clasp));
++    return ok ? 0.0 : 1.0;
++  }
++  if (kind == js::wasm::WJH_OBJECTWITHPROTO) {
++    // MObjectWithProto: Object.create(proto) / `__proto__: proto` literal.
++    JS::RootedValue proto(cx, JS::Value::fromRawBits(gWJScratch[0]));
++    js::PlainObject* obj = js::ObjectWithProtoOperation(cx, proto);
++    if (!obj) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::ObjectValue(*obj).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_NEWCLASSBODYENV) {
++    // MNewClassBodyEnvironmentObject: the class-body lexical environment.
++    JS::Rooted<js::ClassBodyLexicalEnvironmentObject*> tmpl(
++        cx, &JS::Value::fromRawBits(gWJScratch[0])
++                 .toObject()
++                 .as<js::ClassBodyLexicalEnvironmentObject>());
++    JS::Rooted<js::ClassBodyScope*> scope(cx, &tmpl->scope());
++    js::ClassBodyLexicalEnvironmentObject* env =
++        js::ClassBodyLexicalEnvironmentObject::createWithoutEnclosing(cx, scope);
++    if (!env) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::ObjectValue(*env).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_MINMAXARRAY) {
++    // MMinMaxArray: Math.max/min(...arr). Dense array of NUMBERS only -- a
++    // non-number element returns 1.0 so the backend DEOPTS (no side effects yet,
++    // so re-running in PBL is safe). site bit0 = isMax, bit1 = wantInt32.
++    bool isMax = (int(siteF) & 1) != 0;
++    bool wantInt32 = (int(siteF) & 2) != 0;
++    JS::RootedObject obj(cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject());
++    if (!obj->is<js::ArrayObject>()) return 1.0;
++    auto* arr = &obj->as<js::ArrayObject>();
++    if (arr->isIndexed()) return 1.0;
++    uint32_t len = arr->getDenseInitializedLength();
++    double r = isMax ? -mozilla::PositiveInfinity<double>()
++                     : mozilla::PositiveInfinity<double>();
++    for (uint32_t i = 0; i < len; i++) {
++      JS::Value v = arr->getDenseElement(i);
++      if (v.isMagic(JS_ELEMENTS_HOLE)) v = JS::UndefinedValue();
++      if (!v.isNumber()) return 1.0;  // deopt before any side effect
++      double n = v.toNumber();
++      r = isMax ? js::math_max_impl(r, n) : js::math_min_impl(r, n);
++    }
++    if (wantInt32) {
++      int32_t i32;
++      if (!mozilla::NumberIsInt32(r, &i32)) return 1.0;
++      gWJScratch[js::wasm::kWJResultSlot] = JS::Int32Value(i32).asRawBits();
++    } else {
++      gWJScratch[js::wasm::kWJResultSlot] = JS::DoubleValue(r).asRawBits();
++    }
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_NEWPRIVATENAME) {
++    // MNewPrivateName: a class `#name` private name -> a unique Symbol. The name
++    // atom is staged in scratch[0] from the traced pool.
++    JS::Rooted<JSAtom*> name(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toString()->asAtom());
++    JS::Symbol* sym = js::NewPrivateName(cx, name);
++    if (!sym) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::SymbolValue(sym).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_FUNCTIONWITHPROTO) {
++    // MFunctionWithProto: a function with an explicit `__proto__`/home-object
++    // proto. scratch[2] holds the baked function.
++    JS::RootedFunction fun(
++        cx, &JS::Value::fromRawBits(gWJScratch[2]).toObject().as<JSFunction>());
++    JS::RootedObject env(cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject());
++    JS::RootedObject proto(cx,
++                           &JS::Value::fromRawBits(gWJScratch[1]).toObject());
++    JSObject* obj = js::FunWithProtoOperation(cx, fun, env, proto);
++    if (!obj) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::ObjectValue(*obj).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_INITHOMEOBJECT) {
++    // MInitHomeObject: set the function's [[HomeObject]] (extended slot 0).
++    JS::RootedFunction fun(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<JSFunction>());
++    JS::RootedValue home(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    fun->setExtendedSlot(FunctionExtended::METHOD_HOMEOBJECT_SLOT, home);
++    gWJScratch[js::wasm::kWJResultSlot] = JS::ObjectValue(*fun).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_CHECKCLASSHERITAGE) {
++    // MCheckClassHeritage: heritage must be null or a constructor; anything else
++    // returns 1.0 -> the backend DEOPTS (PBL re-runs and throws).
++    JS::Value h = JS::Value::fromRawBits(gWJScratch[0]);
++    if (h.isNull()) return 0.0;
++    if (!h.isObject()) return 1.0;
++    return js::jit::ObjectIsConstructor(&h.toObject()) ? 0.0 : 1.0;
++  }
++  if (kind == js::wasm::WJH_ISTYPEDARRAYCTOR) {
++    // MIsTypedArrayConstructor: is `obj` a typed array constructor? Pure.
++    JSObject* obj = &JS::Value::fromRawBits(gWJScratch[0]).toObject();
++    gWJScratch[js::wasm::kWJResultSlot] =
++        JS::BooleanValue(js::IsTypedArrayConstructor(obj)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_CHECKFUSE) {
++    // MGuardFuse: is the realm fuse still intact? 0 = intact, 1 = popped ->
++    // the backend DEOPTS to PBL. Pure (no GC). The fuse address is looked up
++    // from the realm at runtime (single-realm shell), so no per-script
++    // dependency registration is needed.
++    auto idx = js::RealmFuses::FuseIndex(int(siteF));
++    js::GuardFuse* fuse = cx->realm()->realmFuses.getFuseByIndex(idx);
++    return (fuse && fuse->intact()) ? 0.0 : 1.0;
++  }
++  if (kind == js::wasm::WJH_SETFUNNAME) {
++    // MSetFunName: inferred function `.name` (const f = () => {}, { m() {} }).
++    JS::RootedFunction fun(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<JSFunction>());
++    JS::RootedValue name(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    if (!js::SetFunctionName(cx, fun, name,
++                             js::FunctionPrefixKind(int(siteF)))) {
++      return 1.0;
++    }
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_MAPSIZE || kind == js::wasm::WJH_SETSIZE) {
++    // MMapObjectSize / MSetObjectSize: ordered-hash-table entry count. Pure.
++    JSObject* obj = &JS::Value::fromRawBits(gWJScratch[0]).toObject();
++    uint32_t n = kind == js::wasm::WJH_MAPSIZE
++                     ? obj->as<js::MapObject>().size()
++                     : obj->as<js::SetObject>().size();
++    gWJScratch[js::wasm::kWJResultSlot] = JS::Int32Value(int32_t(n)).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_MAPGET || kind == js::wasm::WJH_MAPHAS ||
++      kind == js::wasm::WJH_MAPSET || kind == js::wasm::WJH_MAPDELETE) {
++    // Map.get/has/set/delete via the same VM helpers Ion's OOL path calls.
++    JS::Rooted<js::MapObject*> map(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<js::MapObject>());
++    JS::RootedValue key(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    if (kind == js::wasm::WJH_MAPGET) {
++      JS::RootedValue rval(cx);
++      if (!js::jit::MapObjectGet(cx, map, key, &rval)) return 1.0;
++      gWJScratch[js::wasm::kWJResultSlot] = rval.get().asRawBits();
++      return 0.0;
++    }
++    if (kind == js::wasm::WJH_MAPHAS) {
++      bool res;
++      if (!js::jit::MapObjectHas(cx, map, key, &res)) return 1.0;
++      gWJScratch[js::wasm::kWJResultSlot] = JS::BooleanValue(res).asRawBits();
++      return 0.0;
++    }
++    if (kind == js::wasm::WJH_MAPSET) {
++      JS::RootedValue val(cx, JS::Value::fromRawBits(gWJScratch[2]));
++      if (!js::jit::MapObjectSet(cx, map, key, val)) return 1.0;
++      return 0.0;
++    }
++    bool res;
++    if (!js::jit::MapObjectDelete(cx, map, key, &res)) return 1.0;
++    gWJScratch[js::wasm::kWJResultSlot] = JS::BooleanValue(res).asRawBits();
++    return 0.0;
++  }
++  if (kind == js::wasm::WJH_SETHAS || kind == js::wasm::WJH_SETADD ||
++      kind == js::wasm::WJH_SETDELETE) {
++    // Set.has/add/delete via the same VM helpers Ion's OOL path calls.
++    JS::Rooted<js::SetObject*> set(
++        cx, &JS::Value::fromRawBits(gWJScratch[0]).toObject().as<js::SetObject>());
++    JS::RootedValue key(cx, JS::Value::fromRawBits(gWJScratch[1]));
++    if (kind == js::wasm::WJH_SETADD) {
++      if (!js::jit::SetObjectAdd(cx, set, key)) return 1.0;
++      return 0.0;
++    }
++    bool res;
++    if (kind == js::wasm::WJH_SETHAS) {
++      if (!js::jit::SetObjectHas(cx, set, key, &res)) return 1.0;
++    } else {
++      if (!js::jit::SetObjectDelete(cx, set, key, &res)) return 1.0;
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = JS::BooleanValue(res).asRawBits();
++    return 0.0;
++  }
++
+   return 1.0;
+ }
+ 

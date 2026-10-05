@@ -1,0 +1,561 @@
+diff --git a/js/src/jit/StubFolding.cpp b/js/src/jit/StubFolding.cpp
+index 4bb868d637..410288f6dc 100644
+--- a/js/src/jit/StubFolding.cpp
++++ b/js/src/jit/StubFolding.cpp
+@@ -24,7 +24,7 @@ using namespace js::jit;
+ 
+ static bool TryFoldingGuardShapes(JSContext* cx, ICFallbackStub* fallback,
+                                   JSScript* script, ICScript* icScript,
+-                                  gc::AutoMarkingLock& lock) {
++                                  gc::AutoMarkingLock& lock, bool foldCold) {
+   // Try folding similar stubs with GuardShapes
+   // into GuardMultipleShapes or GuardMultipleShapesToOffset
+ 
+@@ -190,7 +190,7 @@ static bool TryFoldingGuardShapes(JSContext* cx, ICFallbackStub* fallback,
+     return true;
+   }
+ 
+-  if (numActive == 0) {
++  if (numActive == 0 && !foldCold) {
+     return true;
+   }
+ 
+@@ -474,14 +474,15 @@ static bool TryFoldingGuardShapes(JSContext* cx, ICFallbackStub* fallback,
+ }
+ 
+ bool js::jit::TryFoldingStubs(JSContext* cx, ICFallbackStub* fallback,
+-                              JSScript* script, ICScript* icScript) {
++                              JSScript* script, ICScript* icScript,
++                              bool foldCold) {
+   gc::AutoMarkingLock lock(cx->zone(), icScript->markingLock());
+-  return TryFoldingStubsLocked(cx, fallback, script, icScript, lock);
++  return TryFoldingStubsLocked(cx, fallback, script, icScript, lock, foldCold);
+ }
+ 
+ bool js::jit::TryFoldingStubsLocked(JSContext* cx, ICFallbackStub* fallback,
+                                     JSScript* script, ICScript* icScript,
+-                                    gc::AutoMarkingLock& lock) {
++                                    gc::AutoMarkingLock& lock, bool foldCold) {
+   ICEntry* icEntry = icScript->icEntryForStub(fallback);
+   ICStub* entryStub = icEntry->firstStub();
+ 
+@@ -499,7 +500,7 @@ bool js::jit::TryFoldingStubsLocked(JSContext* cx, ICFallbackStub* fallback,
+     return true;
+   }
+ 
+-  if (!TryFoldingGuardShapes(cx, fallback, script, icScript, lock)) {
++  if (!TryFoldingGuardShapes(cx, fallback, script, icScript, lock, foldCold)) {
+     return false;
+   }
+ 
+diff --git a/js/src/jit/StubFolding.h b/js/src/jit/StubFolding.h
+index e77e661f6f..520c321935 100644
+--- a/js/src/jit/StubFolding.h
++++ b/js/src/jit/StubFolding.h
+@@ -20,11 +20,11 @@ class ICFallbackStub;
+ class ICScript;
+ 
+ bool TryFoldingStubs(JSContext* cx, ICFallbackStub* fallback, JSScript* script,
+-                     ICScript* icScript);
++                     ICScript* icScript, bool foldCold = false);
+ 
+ bool TryFoldingStubsLocked(JSContext* cx, ICFallbackStub* fallback,
+                            JSScript* script, ICScript* icScript,
+-                           gc::AutoMarkingLock& lock);
++                           gc::AutoMarkingLock& lock, bool foldCold = false);
+ 
+ bool AddToFoldedStub(JSContext* cx, const CacheIRWriter& writer,
+                      ICScript* icScript, ICFallbackStub* fallback);
+diff --git a/js/src/jit/WarpOracle.cpp b/js/src/jit/WarpOracle.cpp
+index f55ab4aaf4..9e837260ee 100644
+--- a/js/src/jit/WarpOracle.cpp
++++ b/js/src/jit/WarpOracle.cpp
+@@ -1097,7 +1097,12 @@ AbortReasonOr<Ok> WarpScriptOracle::maybeInlineIC(WarpOpSnapshotList& snapshots,
+   }
+ 
+   // Try to fold stubs, in case new stubs were added after trial inlining.
+-  if (!TryFoldingStubs(cx_, fallbackStub, script_, icScript_)) {
++  // foldCold also folds stubs whose enteredCount was reset by the most recent
++  // attach: without it a one-way shape transition leaves a never-entered older
++  // stub and the IC can never fold, so the transpiler bakes whichever single
++  // shape happens to be first and storms on the other.
++  static bool noColdFold = !!getenv("GECKO_WJ_NOCOLDFOLD");
++  if (!TryFoldingStubs(cx_, fallbackStub, script_, icScript_, !noColdFold)) {
+     return abort(AbortReason::Error);
+   }
+ 
+@@ -1135,13 +1140,59 @@ AbortReasonOr<Ok> WarpScriptOracle::maybeInlineIC(WarpOpSnapshotList& snapshots,
+            s = s->maybeNext())
+         nstubs++;
+       fprintf(stderr,
+-              "[wj-icdbg] %s:%u op=%s nstubs=%u firstHandlesAll=%d "
++              "[wj-icdbg] %s:%u pcoff=%u op=%s nstubs=%u firstHandlesAll=%d "
+               "fbEntered=%u fbFailures=%d firstEntered=%u\n",
+               script_->filename() ? script_->filename() : "?",
+-              unsigned(script_->lineno()), CodeName(loc.getOp()), nstubs,
++              unsigned(script_->lineno()), unsigned(offset),
++              CodeName(loc.getOp()), nstubs,
+               firstStubHandlesAllCases, unsigned(fallbackStub->enteredCount()),
+               fallbackStub->state().hasFailures(),
+               unsigned(stub->enteredCount()));
++      if (getenv("GECKO_WJ_ICDBG2")) {
++        uint32_t si = 0;
++        for (ICStub* s = entry.firstStub(); s && s != fallbackStub;
++             s = s->maybeNext(), si++) {
++          ICCacheIRStub* cs = s->toCacheIRStub();
++          const CacheIRStubInfo* sinfo = cs->stubInfo();
++          const uint8_t* sdata = cs->stubDataStart();
++          uint32_t fieldIndex = 0;
++          size_t foff = 0;
++          fprintf(stderr, "[wj-icstub]   #%u entered=%u kind=%u", si,
++                  unsigned(cs->enteredCount()), unsigned(sinfo->kind()));
++          while (sinfo->fieldType(fieldIndex) != StubField::Type::Limit &&
++                 fieldIndex < 12) {
++            StubField::Type ft = sinfo->fieldType(fieldIndex);
++            if (ft == StubField::Type::Shape ||
++                ft == StubField::Type::WeakShape) {
++              Shape* shp = reinterpret_cast<Shape*>(
++                  sinfo->getStubRawWord(sdata, foff));
++              fprintf(stderr, " sh%zu=%p", foff, (void*)shp);
++              if (shp && shp->isNative() && shp->isShared()) {
++                auto* nsh = static_cast<NativeShape*>(shp);
++                PropMap* pm = nsh->propMap();
++                if (pm && nsh->propMapLength() > 0) {
++                  PropertyInfoWithKey pi = pm->getPropertyInfoWithKey(
++                      nsh->propMapLength() - 1);
++                  if (pi.key().isAtom()) {
++                    JSAtom* a = pi.key().toAtom();
++                    JS::AutoCheckCannotGC nogc;
++                    if (a->hasLatin1Chars()) {
++                      const JS::Latin1Char* c = a->latin1Chars(nogc);
++                      fputc('(', stderr);
++                      for (size_t j = 0; j < a->length() && j < 24; j++)
++                        fputc(c[j], stderr);
++                      fputc(')', stderr);
++                    }
++                  }
++                }
++              }
++            }
++            foff += StubField::sizeInBytes(ft);
++            fieldIndex++;
++          }
++          fprintf(stderr, "\n");
++        }
++      }
+     }
+   }
+ 
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index 8ca8e62e88..ca09e8a7f5 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -49,6 +49,7 @@ extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx);
+ #include "vm/PropertyKey.h"   // HashPropertyKeyThreadSafe (megamorphic cache hash)
+ #include "vm/Iteration.h"  // NativeIterator/PropertyIndex layout (LoadSlotByIteratorIndex)
+ #include "vm/BoundFunctionObject.h"     // offsetOfFlagsSlot/NumBoundArgsShift (BoundFunctionNumArgs)
++#include "proxy/DOMProxy.h"             // GetDOMProxyHandlerFamily
+ #include "vm/ProxyObject.h"             // offsetOfPrivateSlot (LoadWrapperTarget)
+ #include "vm/ArrayObject.h"             // ArrayObject::class_ (element-store IC clasp guard)
+ #include "vm/ArrayBufferViewObject.h"  // dataOffset (typed-array element access)
+@@ -86,6 +87,10 @@ const uint32_t js::wasm::gWJOpGuardGlobalGeneration =
+     uint32_t(js::jit::MDefinition::Opcode::GuardGlobalGeneration);
+ const uint32_t js::wasm::gWJOpGuardSpecificFunction =
+     uint32_t(js::jit::MDefinition::Opcode::GuardSpecificFunction);
++const uint32_t js::wasm::gWJOpGuardShape =
++    uint32_t(js::jit::MDefinition::Opcode::GuardShape);
++uint32_t js::wasm::gWJGSActual = 0;
++uint32_t js::wasm::gWJGSExpect = 0;
+ using namespace js::jit;
+ using namespace js::wasm;
+ 
+@@ -117,8 +122,8 @@ int32_t gWJBCDbgIdx = -1;
+ int32_t gWJBCDbgLen = -1;
+ uint32_t gWJBCDbgHits = 0;
+ // GECKO_WJ_GSRT: actual obj->shape_ vs expected (pool) at a taken GuardShape deopt.
+-uint32_t gWJGSActual = 0;
+-uint32_t gWJGSExpect = 0;
++// gWJGSActual/gWJGSExpect live in js::wasm (declared in WasmJitBackend.h) so the
++// runtime resume handler can read them for GECKO_WJ_THISDBG.
+ uint32_t gWJGSHits = 0;
+ // GECKO_WJ_UNBOXDBG: at a taken Unbox tag-guard deopt, histogram the ACTUAL value tag
+ // (gWJUnboxTagHist[actualTag&15]) and record the most-recent expected tag. Tells us
+@@ -5362,6 +5367,45 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       // so the guard keeps comparing against the live pointer. Baking it raw made
+       // a moved shape ALWAYS fail -> permanent deopt storm (crypto am3: ~475k).
+       MGuardShape* g = ins->toGuardShape();
++      if (WJGETENV("GECKO_WJ_GSDUMP")) {
++        JSScript* ms = be.info ? be.info->script() : nullptr;
++        js::Shape* sh = g->shape();
++        static char keybuf[256];
++        keybuf[0] = 0;
++        if (sh && sh->isNative() && sh->isShared()) {
++          auto* ns = static_cast<js::NativeShape*>(sh);
++          js::PropMap* pm = ns->propMap();
++          if (pm) {
++            uint32_t len = ns->propMapLength();
++            if (len > 4) len = 4;
++            char* p = keybuf;
++            for (uint32_t i = 0; i < len && p < keybuf + 200; i++) {
++              js::PropertyInfoWithKey pi = pm->getPropertyInfoWithKey(i);
++              if (pi.key().isAtom()) {
++                JSAtom* a = pi.key().toAtom();
++                JS::AutoCheckCannotGC nogc;
++                if (a->hasLatin1Chars()) {
++                  const JS::Latin1Char* c = a->latin1Chars(nogc);
++                  *p++ = ' ';
++                  for (size_t j = 0; j < a->length() && p < keybuf + 240; j++)
++                    *p++ = char(c[j]);
++                }
++              }
++            }
++            *p = 0;
++          }
++        }
++        fprintf(stderr,
++                "[wj-gsdump] %s:%u guardShape exp=%p objOp=%s uses:",
++                ms && ms->filename() ? ms->filename() : "?",
++                ms ? unsigned(ms->lineno()) : 0, (void*)sh,
++                WJOpName(g->object()->op()));
++        for (jit::MUseIterator u = g->usesBegin(); u != g->usesEnd(); u++) {
++          if (!u->consumer()->isDefinition()) { fprintf(stderr, " <rp>"); continue; }
++          fprintf(stderr, " %s", WJOpName(u->consumer()->toDefinition()->op()));
++        }
++        fprintf(stderr, " keys[%s ]\n", keybuf);
++      }
+       // PROBE (GECKO_WJ_NOSHAPEGUARD): passthrough ALL shape guards (no deopt).
+       // UNSAFE for polymorphic receivers, but CORRECT for monomorphic ones (same
+       // object, shape merely mutated) -- measures the ceiling if gbemu's shape-guard
+@@ -6413,6 +6457,71 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       if (!e.writeOp(Op::End)) return false;
+       return GetOp(e, be, obj);
+     }
++    case MDefinition::Opcode::GuardIsProxy: {
++      // Inverse of GuardIsNotProxy above: deopt when the shape kind is NOT
++      // Proxy (vibeyboot's fake-DOM proxy trap handlers guard IS-proxy).
++      if (WJGETENV("GECKO_WJ_NO_GUARDPROXY")) return false;
++      MDefinition* obj = ins->getOperand(0);
++      if (!GetOp(e, be, obj)) return false;
++      if (!e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(offsetof(JS::shadow::Object, shape))))
++        return false;
++      if (!e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::Shape::offsetOfImmutableFlags())))
++        return false;
++      if (!e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(js::Shape::kindMask() << js::Shape::kindShift())))
++        return false;
++      if (!e.writeOp(Op::I32And)) return false;
++      if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
++      if (!EmitDeopt(e, be)) return false;
++      if (!e.writeOp(Op::End)) return false;
++      return GetOp(e, be, obj);
++    }
++    case MDefinition::Opcode::GuardIsNotDOMProxy: {
++      // Operand is a known proxy (shape kind guarded upstream). Deopt when its
++      // handler's family equals GetDOMProxyHandlerFamily() -- baked at compile
++      // like Ion (set once at startup). Layout: handler = first field of the
++      // ProxyDataLayout at obj+ProxyDataOffset; family via offsetOfFamily()
++      // (after the vptr). Passthrough object.
++      if (WJGETENV("GECKO_WJ_NO_GUARDPROXY")) return false;
++      MDefinition* obj = ins->getOperand(0);
++      if (!GetOp(e, be, obj)) return false;
++      if (!e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::detail::ProxyDataOffset) +
++              uint32_t(offsetof(js::detail::ProxyDataLayout, handler))))
++        return false;
++      if (!e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(uint32_t(js::BaseProxyHandler::offsetOfFamily())))
++        return false;
++      if (!e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(uintptr_t(js::GetDOMProxyHandlerFamily()))) ||
++          !e.writeOp(Op::I32Eq))
++        return false;
++      if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
++      if (!EmitDeopt(e, be)) return false;
++      if (!e.writeOp(Op::End)) return false;
++      return GetOp(e, be, obj);
++    }
++    case MDefinition::Opcode::ProxyGet: {
++      // proxy.name -- full get-trap -> helper (ProxyGetProperty). The jsid is
++      // baked as a boxed IdToValue via the traced const pool (atoms don't move).
++      MProxyGet* m = ins->toProxyGet();
++      if (!EmitStageScratch(e, be, m->proxy(), 0)) return false;
++      uint64_t idBits = js::IdToValue(m->id()).asRawBits();
++      if (!EmitStageConstBoxed(e, be, idBits, 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_PROXYGET, 0)) return false;
++      return EmitHelperResultAsType(e, be, ins->type());
++    }
++    case MDefinition::Opcode::ProxyGetByValue: {
++      // proxy[key] -- stage the runtime id Value directly.
++      MProxyGetByValue* m = ins->toProxyGetByValue();
++      if (!EmitStageScratch(e, be, m->proxy(), 0)) return false;
++      if (!EmitStageScratch(e, be, m->idVal(), 1)) return false;
++      if (!EmitHelperCallResult(e, be, ins, WJH_PROXYGETBYVALUE, 0))
++        return false;
++      return EmitHelperResultAsType(e, be, ins->type());
++    }
+     case MDefinition::Opcode::GuardFunctionFlags: {
+       // Deopt unless fun's flags match: at least one expectedFlags bit set AND no
+       // unexpectedFlags bit set. Mirrors masm.branchTestFunctionFlags (test32 of
+@@ -13249,6 +13358,31 @@ static EffectKind EmitEffect(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return EffectKind::Fail;
+       return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
+     }
++    case MDefinition::Opcode::ProxySet: {
++      // proxy.name = v -- full set-trap -> helper (ProxySetProperty); jsid
++      // baked via the traced const pool like ProxyGet; site bit0 = strict.
++      MProxySet* m = ins->toProxySet();
++      if (!EmitStageScratch(e, be, m->proxy(), 0)) return EffectKind::Fail;
++      uint64_t idBits = js::IdToValue(m->id()).asRawBits();
++      if (!EmitStageConstBoxed(e, be, idBits, 1)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->rhs(), 2)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_PROXYSET,
++                               m->strict() ? 1u : 0u)) {
++        return EffectKind::Fail;
++      }
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
++    case MDefinition::Opcode::ProxySetByValue: {
++      MProxySetByValue* m = ins->toProxySetByValue();
++      if (!EmitStageScratch(e, be, m->proxy(), 0)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->idVal(), 1)) return EffectKind::Fail;
++      if (!EmitStageScratch(e, be, m->rhs(), 2)) return EffectKind::Fail;
++      if (!EmitHelperCallResult(e, be, ins, WJH_PROXYSETBYVALUE,
++                               m->strict() ? 1u : 0u)) {
++        return EffectKind::Fail;
++      }
++      return e.writeOp(Op::Drop) ? EffectKind::Emitted : EffectKind::Fail;
++    }
+     case MDefinition::Opcode::Bail:
+     case MDefinition::Opcode::Unreachable:
+     case MDefinition::Opcode::ThrowWithStack:  // `throw` variant that attaches an
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index 0a31b2f64b..c29dd4fdaf 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -227,6 +227,10 @@ enum WJHelpKind : int {
+   WJH_CALLNATIVE = 155,              // direct JSNative call (Ion callNative ABI): caller pre-stages the
+                                      // CallArgs vp at scratch[0..]: [0]=callee, [1]=this, [2..]=args.
+                                      // site arg = double(argc<<32 | nativeFnPtr); result -> kWJResultSlot.
++  WJH_PROXYGET = 156,                // scratch[0]=proxy(Object),[1]=id(IdToValue boxed) -> Value; js::ProxyGetProperty
++  WJH_PROXYSET = 157,                // scratch[0]=proxy,[1]=id(boxed),[2]=rhs, site bit0=strict -> void; js::ProxySetProperty
++  WJH_PROXYGETBYVALUE = 158,         // scratch[0]=proxy,[1]=idVal -> Value; js::ProxyGetPropertyByValue
++  WJH_PROXYSETBYVALUE = 159,         // scratch[0]=proxy,[1]=idVal,[2]=rhs, site bit0=strict -> void; js::ProxySetPropertyByValue
+ };
+ // MNewLexicalEnvironmentObject: the LexicalScope* baked from the template object.
+ extern uint32_t gWJLexScope;
+@@ -382,6 +386,9 @@ extern uint32_t gWJExitFPSetCount;
+ extern uint32_t gWJLastDeoptOp;         // MIR opcode of the most recent deopt site
+ extern const uint32_t gWJOpGuardGlobalGeneration;  // numeric MIR opcode (backend-exported)
+ extern const uint32_t gWJOpGuardSpecificFunction;  // numeric MIR opcode (backend-exported)
++extern const uint32_t gWJOpGuardShape;             // numeric MIR opcode (backend-exported)
++extern uint32_t gWJGSActual;   // GECKO_WJ_GSRT store: actual obj->shape_ at deopt
++extern uint32_t gWJGSExpect;   // GECKO_WJ_GSRT store: expected (pool) shape at deopt
+ // Call boundary: callee + argc for wjhelp(WJH_CALL).
+ extern uint64_t gWJCallCallee;
+ extern uint32_t gWJCallSiteLine[];  // DEBUG: caller script line per call site
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 56026f63ae..4ced897627 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -55,6 +55,7 @@
+ #include "vm/Interpreter.h"  // SetObjectElement, InstanceofOperator, LessThan, ...
+ #include "vm/EqualityOperations.h"  // LooselyEqual, StrictlyEqual
+ #include "vm/Stack.h"  // ConstructArgs
++#include "proxy/Proxy.h"   // ProxyGetProperty/ProxySetProperty
+ #include "vm/ProxyObject.h"
+ #include "gc/Barrier.h"  // gc::ValuePreWriteBarrier
+ #include "gc/Tracer.h"   // js::TraceRoot
+@@ -2811,6 +2812,83 @@ static double wjhelpImpl(double kindF, double siteF) {
+                   ds->filename() ? ds->filename() : "?", unsigned(ds->lineno()),
+                   pcoff, opname, js::wasm::WJMirOpName(gWJLastDeoptOp),
+                   (unsigned long long)sc);
++          if (getenv("GECKO_WJ_THISDBG") &&
++              gWJLastDeoptOp == js::wasm::gWJOpGuardShape) {
++            uint32_t off = gWJResumeValsOff[0];
++            uint32_t nv = 1 + gWJResumeNArgs[0] + gWJResumeNLocals[0] +
++                          gWJResumeStackDepth[0];
++            if (nv > 6) nv = 6;
++            const char* expCls = "?";
++            uint32_t expProps = 0, expFixed = 0;
++            js::Shape* es = reinterpret_cast<js::Shape*>(
++                uintptr_t(js::wasm::gWJGSExpect));
++            if (es) {
++              expCls = es->getObjectClass()->name;
++              if (es->isNative()) {
++                auto* ns = static_cast<js::NativeShape*>(es);
++                expProps = ns->propMapLength();
++                expFixed = ns->numFixedSlots();
++              }
++            }
++            uint32_t actProps = 0, actFixed = 0;
++            js::Shape* as = reinterpret_cast<js::Shape*>(
++                uintptr_t(js::wasm::gWJGSActual));
++            if (as && as->isNative()) {
++              auto* ns = static_cast<js::NativeShape*>(as);
++              actProps = ns->propMapLength();
++              actFixed = ns->numFixedSlots();
++            }
++            fprintf(stderr, "[wj-this] exp=%p(%s,p%u,f%u) act=%p(p%u,f%u)",
++                    (void*)uintptr_t(js::wasm::gWJGSExpect), expCls, expProps,
++                    expFixed, (void*)uintptr_t(js::wasm::gWJGSActual), actProps,
++                    actFixed);
++            auto dumpKeys = [](js::Shape* s) {
++              if (!s || !s->isNative() || !s->isShared()) return;
++              auto* ns = static_cast<js::NativeShape*>(s);
++              js::PropMap* map = ns->propMap();
++              if (!map) return;
++              uint32_t len = ns->propMapLength();
++              if (len > 8) len = 8;
++              JS::AutoCheckCannotGC nogc;
++              for (uint32_t i = 0; i < len; i++) {
++                js::PropertyInfoWithKey pi = map->getPropertyInfoWithKey(i);
++                js::PropertyKey k = pi.key();
++                fputc(' ', stderr);
++                if (k.isAtom()) {
++                  JSAtom* a = k.toAtom();
++                  if (a->hasLatin1Chars()) {
++                    const JS::Latin1Char* c = a->latin1Chars(nogc);
++                    for (size_t j = 0; j < a->length(); j++) fputc(c[j], stderr);
++                  } else {
++                    fprintf(stderr, "<twobyte>");
++                  }
++                } else if (k.isInt()) {
++                  fprintf(stderr, "#%d", k.toInt());
++                } else {
++                  fprintf(stderr, "<sym>");
++                }
++              }
++            };
++            fprintf(stderr, " expKeys[");
++            dumpKeys(es);
++            fprintf(stderr, " ] actKeys[");
++            dumpKeys(as);
++            fprintf(stderr, " ]");
++            for (uint32_t vi = 0; vi < nv; vi++) {
++              JS::Value tv = JS::Value::fromRawBits(gWJResumeVals[off + vi]);
++              if (tv.isObject()) {
++                JSObject* o = &tv.toObject();
++                fprintf(stderr, " v%u=%s@%p/sh%p", vi, o->getClass()->name,
++                        (void*)o,
++                        o->is<js::NativeObject>()
++                            ? (void*)o->as<js::NativeObject>().shape()
++                            : nullptr);
++              } else {
++                fprintf(stderr, " v%u=<nonobj>", vi);
++              }
++            }
++            fprintf(stderr, "\n");
++          }
+         }
+       }
+     }
+@@ -5831,6 +5909,44 @@ static double wjhelpImpl(double kindF, double siteF) {
+     return 0.0;
+   }
+ 
++  if (kind == js::wasm::WJH_PROXYGET ||
++      kind == js::wasm::WJH_PROXYGETBYVALUE) {
++    RootedValue pv(cx, JS::Value::fromRawBits(gWJScratch[0]));
++    if (!pv.isObject()) return 1.0;
++    RootedObject proxy(cx, &pv.toObject());
++    RootedValue res(cx);
++    if (kind == js::wasm::WJH_PROXYGET) {
++      RootedValue idv(cx, JS::Value::fromRawBits(gWJScratch[1]));
++      RootedId id(cx);
++      if (!JS_ValueToId(cx, idv, &id)) return 1.0;
++      if (!js::ProxyGetProperty(cx, proxy, id, &res)) return 1.0;
++    } else {
++      RootedValue idv(cx, JS::Value::fromRawBits(gWJScratch[1]));
++      if (!js::ProxyGetPropertyByValue(cx, proxy, idv, &res)) return 1.0;
++    }
++    gWJScratch[js::wasm::kWJResultSlot] = res.asRawBits();
++    return 0.0;
++  }
++
++  if (kind == js::wasm::WJH_PROXYSET ||
++      kind == js::wasm::WJH_PROXYSETBYVALUE) {
++    RootedValue pv(cx, JS::Value::fromRawBits(gWJScratch[0]));
++    if (!pv.isObject()) return 1.0;
++    RootedObject proxy(cx, &pv.toObject());
++    RootedValue val(cx, JS::Value::fromRawBits(gWJScratch[2]));
++    bool strict = (uint32_t(siteF) & 1) != 0;
++    if (kind == js::wasm::WJH_PROXYSET) {
++      RootedValue idv(cx, JS::Value::fromRawBits(gWJScratch[1]));
++      RootedId id(cx);
++      if (!JS_ValueToId(cx, idv, &id)) return 1.0;
++      if (!js::ProxySetProperty(cx, proxy, id, val, strict)) return 1.0;
++    } else {
++      RootedValue idv(cx, JS::Value::fromRawBits(gWJScratch[1]));
++      if (!js::ProxySetPropertyByValue(cx, proxy, idv, val, strict)) return 1.0;
++    }
++    return 0.0;
++  }
++
+   if (kind == js::wasm::WJH_ARRAYPUSH) {
+     // arr.push(val): set arr[length] = val (auto-grows dense + bumps length),
+     // result = new length (Int32). MArrayPush guarantees an Array operand.
+diff --git a/js/src/wasm/WasmJitWarp.cpp b/js/src/wasm/WasmJitWarp.cpp
+index 2a5ccc8d30..8123fdec7c 100644
+--- a/js/src/wasm/WasmJitWarp.cpp
++++ b/js/src/wasm/WasmJitWarp.cpp
+@@ -302,6 +302,58 @@ static std::unique_ptr<WJMemberBuild> WJBuildMember(JSContext* cx,
+     if (!OptimizeMIR(mb->mirGen)) return nullptr;
+     if (compileStatP)
+       js::wasm::gWJOptimizeMs += (mozilla::TimeStamp::Now() - t0).ToMilliseconds();
++    // x >>> 0 (and x >>> variable) can return a uint32 above INT32_MAX. Warp
++    // types it Int32 when the IC has only seen small results, and the
++    // deopt->resume path never updates that IC, so every recompile
++    // re-speculates Int32 and the bit31 guard storms forever (mulberry32/LCG
++    // PRNGs in three.js/game code). Widen to Double post-optimize: the backend
++    // emits the inline dblUrsh path (i32.shr_u + f64.convert_i32_u) and
++    // consumers pick their unbox from the operand's type -- deopt-free either
++    // way. Only shift counts that can be 0 mod 32 preserve bit31.
++    // Also: Ion applies operand type policies in LIR lowering (inserting
++    // MTruncateToInt32 around non-Int32 bit-op inputs); we go MIR->wasm
++    // directly, so a Double-typed operand (LCG's `t*N >>> 0`, `t >>> 16`)
++    // makes the backend bail the whole function to PBL. Wrap those operands
++    // here instead -- the TruncateToInt32 emit handles Double/Value inline
++    // with a helper fallback, which is the correct ToInt32/ToUint32 semantics
++    // for all the bit ops.
++    for (ReversePostorderIterator b = mb->graph.rpoBegin();
++         b != mb->graph.rpoEnd(); b++) {
++      for (MInstructionIterator it = b->begin(); it != b->end(); it++) {
++        const auto op = it->op();
++        if (op == MDefinition::Opcode::Ursh &&
++            it->type() == MIRType::Int32) {
++          MDefinition* rhs = it->getOperand(1);
++          bool mayKeepBit31 = true;
++          if (rhs->isConstant() && rhs->type() == MIRType::Int32) {
++            mayKeepBit31 = (rhs->toConstant()->toInt32() & 31) == 0;
++          }
++          if (mayKeepBit31) it->setResultType(MIRType::Double);
++        }
++        if (op != MDefinition::Opcode::BitAnd &&
++            op != MDefinition::Opcode::BitOr &&
++            op != MDefinition::Opcode::BitXor &&
++            op != MDefinition::Opcode::Lsh &&
++            op != MDefinition::Opcode::Rsh &&
++            op != MDefinition::Opcode::Ursh &&
++            op != MDefinition::Opcode::BitNot) {
++          continue;
++        }
++        uint32_t nops = op == MDefinition::Opcode::BitNot ? 1 : 2;
++        for (uint32_t i = 0; i < nops; i++) {
++          MDefinition* in = it->getOperand(i);
++          if (in->type() != MIRType::Double && in->type() != MIRType::Float32 &&
++              in->type() != MIRType::Value) {
++            continue;
++          }
++          MTruncateToInt32* trunc =
++              MTruncateToInt32::New(mb->mirGen->alloc(), in);
++          if (!trunc) continue;
++          b->insertBefore(*it, trunc);
++          it->replaceOperand(i, trunc);
++        }
++      }
++    }
+   }
+   if (dump) {
+     fprintf(stderr, "[wb-compile] %s:%u optimized, %u blocks\n",

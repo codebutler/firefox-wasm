@@ -1,0 +1,87 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index ca09e8a7f5..22f0f23611 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -14417,9 +14417,19 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+   // big-frame fn (few levels to overflow) from a small one. The limit is in BYTES
+   // ~= V8's wasm execution-stack size minus a safety margin (GECKO_WJ_DEPTHLIMIT
+   // overrides, in bytes).
+-  static int limit = WJGETENV("GECKO_WJ_DEPTHLIMIT")
+-                         ? atoi(WJGETENV("GECKO_WJ_DEPTHLIMIT")) : 2500000;
++  // GECKO_WJ_DEPTHLIMIT bakes a const override (also disables calibration).
++  // Otherwise the emitted code LOADS gWJJitDepthLimit: the default (480000)
++  // bounds any fn to ~600 frames, and the host probe recalibrates the global
++  // to ~60% of the measured wasm-stack capacity at first instantiate -- the old
++  // 2.5MB constant exceeded V8's real ~1MB wasm stack, so deep JIT recursion
++  // crashed the pthread with an uncatchable RangeError instead of throwing.
++  static int envLimit = WJGETENV("GECKO_WJ_DEPTHLIMIT")
++                            ? atoi(WJGETENV("GECKO_WJ_DEPTHLIMIT")) : 0;
++  // Floor: real V8 wasm frames cost ~700B+ even for tiny fns (operand-stack
++  // slots aren't in the estimate), so the estimate alone under-charges and the
++  // guard fires too late. 800 also caps levels outright: limit/800.
+   int32_t fb = int32_t(be.frameBytesEst);
++  if (fb < 800) fb = 800;
+   int32_t dAddr = int32_t(uintptr_t(static_cast<void*>(&gWJJitDepth)));
+   // savedDepthLocal = gWJJitDepth
+   if (!e.writeOp(Op::I32Const) || !e.writeVarS32(dAddr) || !e.writeOp(Op::I32Load) ||
+@@ -14440,9 +14450,18 @@ static bool EmitDepthCheck(Encoder& e, WJBackend& be) {
+   // so PBL calls back into the JIT each level and V8's wasm stack keeps growing ->
+   // still crashes. Throwing unwinds the whole recursion catchably (== PBL behavior).
+   if (!GetLocal(e, be.savedDepthLocal) || !e.writeOp(Op::I32Const) ||
+-      !e.writeVarS32(fb) || !e.writeOp(Op::I32Add) || !e.writeOp(Op::I32Const) ||
+-      !e.writeVarS32(limit) || !e.writeOp(Op::I32GtS))
++      !e.writeVarS32(fb) || !e.writeOp(Op::I32Add))
+     return false;
++  if (envLimit) {
++    if (!e.writeOp(Op::I32Const) || !e.writeVarS32(envLimit)) return false;
++  } else {
++    if (!e.writeOp(Op::I32Const) ||
++        !e.writeVarS32(int32_t(uintptr_t(
++            static_cast<void*>(&js::wasm::gWJJitDepthLimit)))) ||
++        !e.writeOp(Op::I32Load) || !e.writeVarU32(2) || !e.writeVarU32(0))
++      return false;
++  }
++  if (!e.writeOp(Op::I32GtS)) return false;
+   if (!e.writeOp(Op::If) || !e.writeFixedU8(0x40)) return false;
+   // THROW is the DEFAULT (GECKO_WJ_NODEPTHTHROW reverts to the flag-2 valve): a throw
+   // unwinds V8's wasm stack cleanly; the valve regrows it (PBL re-enters the JIT) and
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index c29dd4fdaf..ed5a1a9237 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -543,6 +543,11 @@ static constexpr uint32_t kWJCallRootsSize = 1048576;
+ extern uint64_t gWJCallRoots[];
+ extern uint32_t gWJRootSP;
+ extern int32_t gWJJitDepth;  // JIT recursion depth (deopt-to-PBL past the limit)
++// Byte budget for gWJJitDepth. Runtime-mutable: the host calibrates it once per
++// thread by probing the real wasm call-stack limit (wasmhost_instantiate ->
++// wj_set_depth_limit), since the capacity varies across browsers. Compiled code
++// loads it on entry, so calibration applies to modules compiled before it too.
++extern int32_t gWJJitDepthLimit;
+ 
+ // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
+ // call marshalling). Sized for nargs<=64 with slack.
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 4ced897627..e65c54579d 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -6835,9 +6835,19 @@ uint32_t gWJRootSP = 0;
+ // frames DO trip the real quota -> catchable "too much recursion"). Self-correcting:
+ // each frame RESTORES it to the entry value at exit, so cold/leaked paths re-balance.
+ int32_t gWJJitDepth = 0;
++// Runtime-mutable budget for the recursion byte-guard (EmitDepthCheck loads it
++// per entry). The conservative default bounds any call-containing JIT fn to
++// ~600 frames; the host recalibrates upward to ~60% of the measured wasm stack
++// capacity via wj_set_depth_limit (first wasmhost_instantiate on the thread).
++// GECKO_WJ_DEPTHLIMIT overrides outright (EmitDepthCheck bakes it as a const).
++int32_t gWJJitDepthLimit = 480000;
+ }  // namespace wasm
+ }  // namespace js
+ 
++extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
++  if (v > 0) js::wasm::gWJJitDepthLimit = v;
++}
++
+ // DEBUG (GECKO_WJ_ROOTLOG): log every OBJECT-valued Value root right before the GC
+ // traces it during a minor (tenuring) collection. The LAST line printed before a
+ // crash pinpoints the stale root's array+index (the misrooted JIT value of #19).

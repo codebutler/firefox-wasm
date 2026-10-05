@@ -4,6 +4,7 @@
 #include "js/Conversions.h"
 #include "js/Exception.h"
 #include "js/PropertyAndElement.h"
+#include "xpcpublic.h"
 
 // A single windowless browser / chrome AppWindow is created lazily and kept alive
 // across loads + input events so the live document stays interactive.
@@ -66,7 +67,7 @@ NS_IMETHODIMP RenderLoadListener::OnLocationChange(nsIWebProgress* aWebProgress,
   }
   nsAutoCString spec;
   if (NS_FAILED(aURI->GetSpec(spec)) || spec.IsEmpty()) return NS_OK;
-  EM_ASM(
+  MAIN_THREAD_EM_ASM(
       {
         if (typeof Module !== 'undefined' &&
             typeof Module['geckoOnLocationChange'] === 'function') {
@@ -95,12 +96,12 @@ static void RefreshScreen(int width, int height) {
   // Host may publish the desktop/viewport size on Module.geckoScreen so
   // GetConstraintRect can place popups that hang off the content window
   // (overflow right/bottom). Fall back to the window size.
-  int sw = EM_ASM_INT({
+  int sw = MAIN_THREAD_EM_ASM_INT({
     return (typeof Module !== 'undefined' && Module['geckoScreen'])
                ? (Module['geckoScreen'].sw | 0)
                : 0;
   });
-  int sh = EM_ASM_INT({
+  int sh = MAIN_THREAD_EM_ASM_INT({
     return (typeof Module !== 'undefined' && Module['geckoScreen'])
                ? (Module['geckoScreen'].sh | 0)
                : 0;
@@ -147,6 +148,23 @@ void EnsureSize(int width, int height) {
   if (!bw) bw = do_QueryInterface(g_docShell);
   if (bw) bw->SetPositionAndSize(0, 0, width, height, nsIBaseWindow::eRepaint);
   RefreshScreen(width, height);
+}
+
+// Load embedding chrome in a system global, never in a page's realm. This
+// installs Firefox's select actor before the first content document is created.
+static bool RegisterSelectActor() {
+  mozilla::dom::AutoJSAPI jsapi;
+  if (!jsapi.Init(xpc::PrivilegedJunkScope())) return false;
+  JSContext* cx = jsapi.cx();
+  JS::CompileOptions options(cx);
+  options.setFileAndLine("embed-select-init", 1);
+  constexpr char script[] =
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedSelect.sys.mjs');";
+  JS::SourceText<mozilla::Utf8Unit> source;
+  if (!source.init(cx, script, sizeof(script) - 1, JS::SourceOwnership::Borrowed))
+    return false;
+  JS::Rooted<JS::Value> result(cx);
+  return JS::Evaluate(cx, options, source, &result);
 }
 
 static nsIDocShell* EnsureBrowser(int width, int height) {
@@ -199,6 +217,12 @@ static nsIDocShell* EnsureBrowser(int width, int height) {
     return g_docShell;
   }
 
+  if (!RegisterSelectActor()) {
+    printf("EnsureBrowser: select actor registration failed\n");
+    fflush(stdout);
+    return nullptr;
+  }
+
   // Content-only embedding: a windowless browser is enough to host a page and
   // render it to canvas.
   nsresult rv = appShell->CreateWindowlessBrowser(false, 0, getter_AddRefs(g_wb));
@@ -207,6 +231,16 @@ static nsIDocShell* EnsureBrowser(int width, int height) {
     return nullptr;
   }
   g_wb->GetDocShell(getter_AddRefs(g_docShell));
+  // Windowless browsers have no front-end to initialize session history. Do
+  // this before the first content load so Back/Forward own real entries.
+  if (g_docShell) {
+    g_docShell->GetBrowsingContext()->InitSessionHistory();
+    // There is no tab browser to mark this standalone content context active.
+    // Visibility alone doesn't do that: documents stay hidden and native
+    // picker eligibility rejects their selects until activeness is set.
+    (void)g_docShell->GetBrowsingContext()->SetExplicitActive(
+        mozilla::dom::ExplicitActiveStatus::Active);
+  }
   // Give the docshell a real size + make it visible, so its PresShell has a
   // non-empty viewport and actually reflows/paints.
   nsCOMPtr<nsIBaseWindow> baseWin = do_QueryInterface(g_docShell);

@@ -26,20 +26,65 @@ name: build-and-release
 # This workflow is a STARTING POINT; the local upgrade to emscripten 6.0.1 was
 # verified with a DEBUG build. The RELEASE path here runs optimized + wasm-opt but
 # WITHOUT engine LTO (LTO doesn't fit this runner — see above).
+#
+# HOSTED (public repo) MODE: on a PUBLIC repo the standard GitHub-hosted runners are
+# free + unlimited and give 4 vCPU / 16 GB RAM (private repos only get 2 vCPU), so builds
+# run there by DEFAULT now -- push included (that is what publishes releases). To use a
+# machine of your own instead, dispatch with `runner=firefox` (any label a self-hosted
+# runner is registered under); the IS_HOSTED gate then turns off free-disk-space and the
+# objdir prune so the self-hosted objdir stays a usable incremental cache.
+# Hosted runs additionally free ~31 GB of disk (free-disk-space), prune the ~14 GB objdir
+# after the link, and can skip the wasm-opt pass. The dispatch defaults are the low-risk
+# first-run combination: runner=ubuntu-24.04, no_wasm_opt=1, prune_objdir=1, swap_gb=16.
+# Re-enable wasm-opt (no_wasm_opt=0) once the pipeline is green.
+#
+# NOTE: the engine build applies patches/*.patch itself and FAILS if the result is not
+# `pin + patches` (the Makefile's $(PATCH_STAMP) target) -- without them the artifact
+# ships the fork's baseline JIT, which measured identical to the pre-JIT upstream release.
+#
+# Measured on ubuntu-24.04 (first hosted run): 145 GB disk with ~92 GB free (the
+# documented 14 GB is stale -- disk was never the constraint), a release objdir of
+# 14 GB (not 26 GB) shrinking to 9.2 GB when pruned, and 80 min for mach build x2 +
+# the -r relink. Because that 80 min depends only on firefox/ + mozconfig + toolchain
+# and NOT on the embedder/JS sources we actually iterate on, the pruned objdir is
+# cached (see the engine-cache steps) so a hit skips the engine build: ~90 min per
+# iteration becomes ~15 min. The self-hosted `firefox` runner keeps its own persistent
+# objdir and never touches that cache.
 
 on:
   push:
     branches: ['master']
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'runs-on label (ubuntu-24.04 = free GitHub-hosted for public repos; firefox = self-hosted)'
+        type: string
+        default: 'ubuntu-24.04'
+      no_wasm_opt:
+        description: '1 = skip the wasm-opt -O3 pass (shortest/lowest-RAM first run), 0 = full release'
+        type: choice
+        options: ['1', '0']
+        default: '1'
+      prune_objdir:
+        description: '1 = delete objdir .o/.a after the link (hosted/ephemeral runners only)'
+        type: choice
+        options: ['1', '0']
+        default: '1'
+      swap_gb:
+        description: 'swap size in GB added for the link wasm-opt peak'
+        type: string
+        default: '16'
 
 permissions:
   contents: write   # create releases / upload assets / push tags
 
 # One build at a time per ref; a new master push supersedes the running one
 # (the build is hours long on this runner -- don't queue stale builds).
+# event_name is part of the key so a workflow_dispatch experiment is not cancelled
+# by an unrelated master push (they run on different runners anyway).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -48,14 +93,86 @@ env:
   PNPM_VERSION: '9.12.0'         # matches root package.json "packageManager"
   MOZBUILD_STATE_PATH: ${{ github.workspace }}/.mozbuild
   MACH_NO_TERMINAL_FOOTER: '1'
+  # Defaults apply to BOTH push and dispatch now: push must build on a hosted runner
+  # (that is the only path that publishes), and the IS_HOSTED gate below keeps the
+  # self-hosted behaviour intact for `runner=firefox`.
+  NO_WASM_OPT: ${{ inputs.no_wasm_opt || '0' }}   # '1' skips build-lib.sh's wasm-opt pass
+  PRUNE_OBJDIR: ${{ inputs.prune_objdir || '1' }}  # only acted on when IS_HOSTED anyway
+  SWAP_GB: ${{ inputs.swap_gb || '16' }}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Default runner is the free GitHub-hosted one (public repo) so a plain master push
+    # builds and publishes; dispatch `runner=firefox` for a self-hosted runner.
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 350
+    env:
+      # Hosted = ephemeral, small disk: free disk + prune. Self-hosted keeps its
+      # objdir as the incremental build cache, so neither must run there.
+      IS_HOSTED: ${{ startsWith(inputs.runner || 'ubuntu-24.04', 'ubuntu') }}
     steps:
       - name: Checkout the embedder + build harness (this repo)
         uses: actions/checkout@v4
+
+      # A hosted runner starts with only ~13-25 GB free, far short of the ~26 GB
+      # objdir + 5.5 GB firefox clone + emsdk/rust/cargo + the staged libxul copy.
+      # Reclaims ~31 GB in ~3 min. MUST run before the swap step (a 16 GB swapfile
+      # needs disk too). swap-storage stays false so the swap step below owns swap.
+      - name: Free up disk space (hosted runners only)
+        if: env.IS_HOSTED == 'true'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      # --- engine objdir cache (hosted fast path) -----------------------------
+      # The ~80 min engine build depends only on firefox/ + mozconfig + toolchain, not
+      # on the embedder/JS sources being iterated on, so cache the PRUNED objdir
+      # (9.2 GB, which compresses well under the 10 GB/repo Actions cache limit) and
+      # skip `make build` entirely on a hit. Keyed on every input that changes the
+      # objdir -- including the FIREFOX_REF pin, which lives in the Makefile -- so a
+      # miss is always safe (it just falls back to a full build). NOTES:
+      #   * the `patches1` salt marks that patches/*.patch are APPLIED by the build (see
+      #     the Makefile's $(PATCH_STAMP) target). Hashing patches/** alone is not enough:
+      #     it cannot distinguish an objdir built WITH the patches from one built without
+      #     them, so without the salt this would restore a baseline-JIT objdir and silently
+      #     ship an artifact identical to the pre-JIT upstream release. Bump it whenever
+      #     the patch APPLICATION changes, not when patches/*.patch content changes.
+      #   * the engine LTO knob (GECKO_LTO) comes from the environment, not a file: if an
+      #     LTO run is ever added, add it to this key or it will reuse a non-LTO objdir.
+      - name: Compute the engine objdir cache key (hosted)
+        if: env.IS_HOSTED == 'true'
+        run: |
+          KEY="engine-objdir-${{ hashFiles('Makefile','mozconfig.full.emscripten','em_config','vendor-std-deps.py','patches/**','gecko.js/relink-engine-r.sh','gecko.js/patch-emsdk-*.mjs','gecko.js/emsdk-patches/**') }}-patches2-emsdk${EMSDK_VERSION}-rust${RUST_VERSION}"
+          echo "ENGINE_CACHE_KEY=$KEY" >> "$GITHUB_ENV"
+          echo ">> ENGINE_CACHE_KEY=$KEY"
+
+      - name: Restore the cached engine objdir (hosted)
+        id: engine-cache
+        if: env.IS_HOSTED == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: obj-full-emscripten-release
+          key: ${{ env.ENGINE_CACHE_KEY }}
+
+      # Always runs: needs BOTH a cache hit and libxul.so present in the restored
+      # objdir, so a truncated/absent cache falls back to the full engine build. On the
+      # self-hosted runner cache-hit is empty (the restore step is skipped), so the
+      # engine build always runs there, unchanged.
+      - name: Decide whether the engine build can be skipped
+        id: engine
+        run: |
+          if [ "${{ steps.engine-cache.outputs.cache-hit }}" = "true" ] && \
+             [ -e obj-full-emscripten-release/dist/bin/libxul.so ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo ">> objdir cache hit: skipping the ~80 min engine build"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       # Release naming + auto-tag decision. Artifacts are named after the pushed
       # tag, or after the gecko.js package version for branch pushes (which feed
@@ -80,18 +197,6 @@ jobs:
           echo "tag=${TAG}"                >> "$GITHUB_OUTPUT"
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo ">> version=${PKG_VERSION} tag=${TAG} new_version=${NEW_VERSION}"
-
-      - name: Free up disk space (Gecko objdir is ~26 GB)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          # Keep swap: the final emcc relink (wasm-opt over the ~245 MB module)
-          # spikes past what 16 GB of RAM alone can absorb.
-          swap-storage: false
 
       - name: Install build prerequisites (clang/libclang for bindgen, etc.)
         run: |
@@ -155,8 +260,15 @@ jobs:
       # em_config is committed and portable (reads $EMSDK; binaryen defaults to the
       # emsdk's bundled $EMSDK/upstream), so no shim or config generation is needed.
 
-      - name: Clone the pinned Gecko engine fork (depth 1)
-        run: make firefox
+      - name: Check embedding transport behavior
+        run: node --test gecko.js/wisp-net.test.mjs gecko.js/engine-loader.test.mjs gecko.js/select-bridge.test.mjs
+
+      # Cached dist/include contains source symlinks. The fresh source checkout
+      # must have the same verified patch series even when compilation is skipped.
+      - name: Prepare the pinned and patched Gecko source
+        run: |
+          make firefox
+          make firefox/.wj-patched
 
       # Memory headroom safety net. Engine LTO is OFF by default (it needs >54 GiB and
       # OOM-killed this 8-core/~31 GiB runner), so the big remaining spike is wasm-opt
@@ -169,33 +281,82 @@ jobs:
             echo ">> swap already present:"; swapon --show; free -h; exit 0
           fi
           SW=/swapfile
-          ( sudo fallocate -l 24G "$SW" || sudo dd if=/dev/zero of="$SW" bs=1M count=24576 ) 2>/dev/null \
+          SWAP_GB="${SWAP_GB:-24}"
+          ( sudo fallocate -l "${SWAP_GB}G" "$SW" || sudo dd if=/dev/zero of="$SW" bs=1M count=$((SWAP_GB * 1024)) ) 2>/dev/null \
             && sudo chmod 600 "$SW" && sudo mkswap "$SW" >/dev/null 2>&1 && sudo swapon "$SW" 2>/dev/null \
-            && echo ">> added 24G swap at $SW" || echo "!! could not add swap (continuing without it)"
+            && echo ">> added ${SWAP_GB}G swap at $SW" || echo "!! could not add swap (continuing without it)"
           free -h || true
+          df -h . | sed 's/^/>> disk: /' || true
 
       # No path rewriting needed: mozconfig.full.emscripten derives its objdir and
       # FreeType include from $topsrcdir, and libclang from $LIBCLANG_PATH (set above).
 
-      - name: "Build the engine + gecko.js (release: zstd + wasm-opt, no engine LTO) — long"
+      # Step 1/3: the engine. wasm-opt's recursive passes overflow the default 8 MB
+      # stack on the ~250 MB module and die with SIGSEGV, so raise the stack limit for
+      # the whole make -> mach -> em++ -> wasm-opt subprocess tree (ulimit is inherited).
+      # Also needed for the libxul.so relink: emscripten 6.0.1's wasm-ld SIGSEGVs on the
+      # `-shared` link, so `make build` relinks the engine libs as `-r` relocatable
+      # objects (gecko.js/relink-engine-r.sh, run between two `mach build` passes) --
+      # handled inside `make`, no extra step here. Engine LTO is intentionally OFF
+      # (LTO=1 would need a ~64 GiB+ runner; this one OOM-kills the LTO link).
+      - name: "Build the engine: mach build x2 + -r relink (release, no engine LTO) — long"
+        if: steps.engine.outputs.skip != 'true'
         run: |
-          # wasm-opt's recursive passes overflow the default 8MB stack on the
-          # ~250MB module and die with SIGSEGV. Raise the stack limit for the whole
-          # make -> mach -> em++ -> wasm-opt subprocess tree (ulimit is inherited).
-          # Also needed for the libxul.so relink: emscripten 6.0.1's wasm-ld SIGSEGVs
-          # on the `-shared` link, so `make build` relinks the engine libs as `-r`
-          # relocatable objects (gecko.js/relink-engine-r.sh, run between two
-          # `mach build` passes) -- handled inside `make`, no extra step here.
-          # Engine LTO is intentionally OFF (LTO=1 would need a ~64 GiB+ runner; this one
-          # OOM-kills the LTO link). RELEASE still gives -O3 + wasm-opt over the module.
           ulimit -s unlimited || ulimit -s 524288 || true
-          make libxul RELEASE=1   # firefox cloned; vendor -> mach build (+relink) -> build-lib.sh -> rspack
+          make build RELEASE=1
+
+      # Step 2/3: reclaim disk. Once libxul.so is relinked the ~26 GB of .o/.a files
+      # are dead for this run, and the gecko.js build only reads dist/include,
+      # dist/bin/*.so and the MOZ_GLUE_IN_PROGRAM loose objects it globs straight out
+      # of the objdir (build-lib.sh: mfbt, mozglue/*, memory/*, third_party/fmt) -- so
+      # those dirs are preserved. This is what makes the staged libxul.so copy
+      # (~3.4 GB) + 245 MB wasm fit on a hosted runner. Hosted/ephemeral only: on the
+      # self-hosted runner the objdir IS the incremental cache, so never prune it.
+      - name: Prune engine objdir intermediates (ephemeral runners only)
+        if: env.IS_HOSTED == 'true' && env.PRUNE_OBJDIR == '1'
+        run: |
+          OBJ=obj-full-emscripten-release
+          if [ ! -d "$OBJ" ]; then echo "!! $OBJ missing"; exit 1; fi
+          echo ">> before:"; df -h . | sed 's/^/   /'; du -sh "$OBJ" | sed 's/^/   /'
+          find "$OBJ" -type f \( -name '*.o' -o -name '*.a' \) \
+            -not -path "$OBJ/mfbt/*" \
+            -not -path "$OBJ/mozglue/*" \
+            -not -path "$OBJ/memory/*" \
+            -not -path "$OBJ/third_party/fmt/*" \
+            -delete
+          echo ">> after:"; df -h . | sed 's/^/   /'; du -sh "$OBJ" | sed 's/^/   /'
+
+      # Save the PRUNED objdir so the next run can skip the engine build. Saved here
+      # (before the gecko.js step) on purpose: the expensive engine work is already
+      # done, so the cache is usable even if the gecko.js/link step below fails --
+      # which is exactly the fast iteration loop we want. Best-effort: a cache failure
+      # must not fail an otherwise green build.
+      - name: Save the engine objdir to the Actions cache (hosted)
+        if: env.IS_HOSTED == 'true' && steps.engine.outputs.skip != 'true' && steps.engine-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: obj-full-emscripten-release
+          key: ${{ env.ENGINE_CACHE_KEY }}
+
+      # Step 3/3: gecko.js. The engine is already built, so `libxul` skips `make build`
+      # (its `test -e $(LIBXUL)` guard) and only does pnpm + build-lib.sh (emcc link,
+      # optional wasm-opt) + rspack.
+      - name: "Build the gecko.js package (emcc link + wasm-opt + rspack)"
+        run: |
+          make emsdk
+          node gecko.js/check-webgl-contexts.mjs
+          RELEASE=1 bash gecko.js/check-embedder.sh
+          make libxul RELEASE=1
 
       - name: Show link errors on failure
         if: failure()
         run: |
           echo "=== gecko.js/build/link.err (tail) ==="
           tail -n 60 gecko.js/build/link.err 2>/dev/null || echo "(no link.err)"
+
+      - name: Record source and artifact provenance
+        run: node gecko.js/build-provenance.mjs
 
       - name: Package the gecko.js library (the runnable ESM bundle)
         run: |
@@ -263,8 +424,12 @@ jobs:
       # `latest` prerelease (delete + recreate so the tag always points at this
       # commit), and bumping gecko.js/package.json "version" additionally cuts a
       # permanent v<version> tag + release from the same artifacts.
+      # PUSH ONLY (`github.event_name == 'push'`): a workflow_dispatch test run from
+      # master has the same github.ref, and its inputs can deliberately ship a
+      # degraded artifact (no_wasm_opt=1 / pruned objdir) that must NOT become
+      # `latest` or a versioned release.
       - name: Delete the previous rolling release + tag
-        if: github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: dev-drprasad/delete-tag-and-release@v1.0.1
         with:
           delete_release: true
@@ -272,7 +437,7 @@ jobs:
           github_token: ${{ github.token }}
 
       - name: Publish the rolling `latest` prerelease
-        if: github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: ncipollo/release-action@v1
         with:
           name: Continuous Build
@@ -283,7 +448,7 @@ jobs:
           prerelease: true
 
       - name: Tag + release ${{ steps.version.outputs.tag }} (version bumped)
-        if: github.ref == 'refs/heads/master' && steps.version.outputs.new_version == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.version.outputs.new_version == 'true'
         uses: ncipollo/release-action@v1
         with:
           name: ${{ steps.version.outputs.version }}

@@ -55,10 +55,7 @@ CXXFLAGS=(
 )
 echo ">> compiling embedder (embed-*.cpp)"
 EMBED_OBJS=()
-# embed-chrome.cpp (nsIPrompt) is compiled once its EM_ASM comma-args are
-# sorted; this disc ships context-menu / popup / target=_blank from the
-# files below. RegisterEmbedChrome is a stub in embed-init.cpp.
-for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror; do
+for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirror embed-chrome; do
   "$EMXX" "${CXXFLAGS[@]}" -c "$SRC/$src.cpp" -o "$BUILD/$src.o" || exit 1
   EMBED_OBJS+=( "$BUILD/$src.o" )
 done
@@ -90,7 +87,7 @@ EMSETTINGS=(
   -sSTACK_SIZE=67108864 -sEXIT_RUNTIME=0
   -pthread -sPTHREAD_POOL_SIZE=20 -sPTHREAD_POOL_SIZE_STRICT=0
   -sMODULARIZE=1 -sEXPORT_NAME=createGecko
-  -sEXPORTED_FUNCTIONS=_main,_xul_init,_free,_malloc,_WasmXPTCStubDispatch,_xul_cmd_ptr,_wisp_wakeword,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error,_wasmfs_create_provider_backend,_provider_record_entry,_wasmhost_invoke_import,_wjhelp,_wasmjit_invoke,_WJTraceRoots,_InterpTraceRoots,_b_help,_hostimg_renderer_tid,_gecko_coarse_now_ptr
+  -sEXPORTED_FUNCTIONS=_main,_xul_init,_free,_malloc,_WasmXPTCStubDispatch,_xul_cmd_ptr,_wisp_wakeword,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error,_wasmfs_create_provider_backend,_provider_record_entry,_wasmhost_invoke_import,_wjhelp,_wasmjit_invoke,_wj_set_depth_limit,_WJTraceRoots,_InterpTraceRoots,_b_help,_hostimg_renderer_tid,_gecko_coarse_now_ptr,_gecko_prompt_wake
   # specialHTMLTargets is emscripten's selector->element override map, consulted by
   # findEventTarget/findCanvasEventTarget BEFORE document.querySelector. Exporting it
   # lets the embedder hand the engine its canvas directly (js/index.ts, registerGlTarget),
@@ -169,7 +166,7 @@ if [ "${GECKO_RELEASE:-}" = "1" ] && [ "${NO_WASM_OPT:-}" != "1" ]; then
   # unbounded on a module this large. Override with $GECKO_WASMOPT_FLAGS.
   WASMOPT_FLAGS="${GECKO_WASMOPT_FLAGS:--all -O4 -O3}"
   echo ">> wasm-opt $WASMOPT_FLAGS  (release, on gecko.wasm)"
-  # shellcheck disable=SC2086 -- intentional word-splitting of the flag string
+  # shellcheck disable=SC2086  # intentional word-splitting of the flag string
   "$WASMOPT" $WASMOPT_FLAGS "$PKG/wasm/gecko.wasm" -o "$PKG/wasm/gecko.wasm.opt" \
     && mv -f "$PKG/wasm/gecko.wasm.opt" "$PKG/wasm/gecko.wasm" \
     || { echo "!! wasm-opt failed"; rm -f "$PKG/wasm/gecko.wasm.opt"; exit 1; }

@@ -6,7 +6,7 @@
 #include "nsIRollupListener.h"
 
 static bool HostWantsNewWindow() {
-  return EM_ASM_INT({
+  return MAIN_THREAD_EM_ASM_INT({
            return (typeof Module !== 'undefined' &&
                    typeof Module['geckoOnNewWindow'] === 'function')
                       ? 1
@@ -45,7 +45,7 @@ static bool MaybeHostBlankTarget(mozilla::PresShell* ps, int x, int y) {
       }
     }
     if (spec.IsEmpty()) continue;
-    EM_ASM(
+    MAIN_THREAD_EM_ASM(
         {
           if (typeof Module !== 'undefined' &&
               typeof Module['geckoOnNewWindow'] === 'function') {
@@ -63,7 +63,7 @@ static bool MaybeHostBlankTarget(mozilla::PresShell* ps, int x, int y) {
 }
 
 static bool HostWantsContextMenu() {
-  return EM_ASM_INT({
+  return MAIN_THREAD_EM_ASM_INT({
            return (typeof Module !== 'undefined' &&
                    typeof Module['geckoOnContextMenu'] === 'function')
                       ? 1
@@ -267,7 +267,7 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
   printf("xul: ctxmenu json=%s\n", json.get());
   fflush(stdout);
 
-  EM_ASM(
+  MAIN_THREAD_EM_ASM(
       {
         var s = UTF8ToString($0);
         console.log('[embed] ctxmenu ' + s);
@@ -285,6 +285,20 @@ static void MaybeHostContextMenu(mozilla::PresShell* ps, int x, int y) {
       json.get());
 }
 
+// Popup widgets belong to their own chrome document. Dispatch to that widget
+// (and its PresShell), not the content widget underneath the host popup canvas.
+static nsMenuPopupFrame* PopupAt(const mozilla::LayoutDeviceIntPoint& point) {
+  if (nsXULPopupManager* manager = nsXULPopupManager::GetInstance()) {
+    nsTArray<nsMenuPopupFrame*> popups;
+    manager->GetVisiblePopups(popups);
+    for (auto* popup : popups) {
+      if (popup && popup->GetWidget() && popup->CalcWidgetBounds().Contains(point))
+        return popup;
+    }
+  }
+  return nullptr;
+}
+
 // Synthesize a mouse event (evType: 0 move, 1 down, 2 up) at CSS px (x,y) and
 // dispatch it through the full event path (hit-testing, focus, click synthesis).
 void do_mouse(int evType, int x, int y, int button, int clickCount,
@@ -298,6 +312,11 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   nsIWidget* widget = nsContentUtils::GetWidget(ps, &offset);
   if (!widget || !pc) return;
 
+  LayoutDeviceIntPoint ref =
+      nsContentUtils::ToWidgetPoint(CSSPoint(x, y), offset, pc);
+  const LayoutDeviceIntPoint screenPoint = ref + widget->WidgetToScreenOffset();
+  nsMenuPopupFrame* inputPopup = PopupAt(screenPoint);
+
   // Outside-click rollup: native widgets roll popups up when you click off them
   // (the widget's rollup listener); the headless widget never delivers that, so do
   // it here. On a mousedown outside every open popup, roll them all up and consume
@@ -308,16 +327,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
       nsTArray<nsMenuPopupFrame*> popups;
       pm->GetVisiblePopups(popups);
       if (!popups.IsEmpty()) {
-        bool inside = false;
-        for (auto* pf : popups) {
-          if (!pf) continue;
-          LayoutDeviceIntRect b = pf->CalcWidgetBounds();
-          if (x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height) {
-            inside = true;
-            break;
-          }
-        }
-        if (!inside) {
+        if (!inputPopup) {
           nsIRollupListener::RollupOptions opts;
           opts.mCount = 0;  // close all open popups
           pm->Rollup(opts, nullptr);
@@ -325,11 +335,22 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
         }
       }
     }
-    if (button == 0 && MaybeHostBlankTarget(ps, x, y)) return;
+    if (!inputPopup && button == 0 && MaybeHostBlankTarget(ps, x, y)) return;
   }
 
-  LayoutDeviceIntPoint ref =
-      nsContentUtils::ToWidgetPoint(CSSPoint(x, y), offset, pc);
+  const bool popupInput = inputPopup != nullptr;
+  if (inputPopup) {
+    ps = inputPopup->PresShell();
+    widget = inputPopup->GetWidget();
+    // Standalone PuppetWidgets have no BrowserChild to supply screen offsets.
+    // The popup frame owns the positioned bounds that we also publish to hosts.
+    ref = screenPoint - inputPopup->CalcWidgetBounds().TopLeft();
+  }
+  if (getenv("GECKO_SELECT_DEBUG")) {
+    printf("[embed-select] mouse type=%d screen=%d,%d popup=%d local=%d,%d\n",
+           evType, screenPoint.x, screenPoint.y, popupInput, ref.x, ref.y);
+    fflush(stdout);
+  }
   // evType: 0=mousemove 1=mousedown 2=mouseup 3=contextmenu. A synthesized right
   // mousedown/up doesn't generate eContextMenu in this headless build, so the JS
   // side sends an explicit contextmenu event (button 2) to open context menus.
@@ -340,7 +361,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   nsAutoString type;
   type.AssignASCII(typeStr);
 
-  if (evType == 3 && HostWantsContextMenu()) {
+  if (!popupInput && evType == 3 && HostWantsContextMenu()) {
     RunChromeScript(
         "window.__geckoCtxPrev=false;"
         "window.addEventListener('contextmenu',function(e){"
@@ -360,7 +381,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
                                                  options, noCallback);
   (void)rv;
 
-  if (evType == 3) {
+  if (!popupInput && evType == 3) {
     MaybeHostContextMenu(ps, x, y);
   }
 
@@ -368,7 +389,7 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   // can mirror it (cursor: pointer over links, text over inputs, resize handles,
   // etc.). This is what EventStateManager::UpdateCursor feeds the widget; we read
   // it back from the frame since the windowless widget's SetCursor is a no-op.
-  if (g_cmd) {
+  if (g_cmd && !popupInput) {
     int32_t a = AppUnitsPerCSSPixel();
     nsPoint rootPt(x * a, y * a);
     int kind = (int)StyleCursorKind::Auto;
@@ -395,6 +416,21 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   nsIWidget* widget = nsContentUtils::GetWidget(ps, &offset);
   if (!widget || !pc) return;
 
+  const LayoutDeviceIntPoint screenPoint =
+      nsContentUtils::ToWidgetPoint(CSSPoint(x, y), offset, pc) +
+      widget->WidgetToScreenOffset();
+  if (nsMenuPopupFrame* popup = PopupAt(screenPoint)) {
+    widget = popup->GetWidget();
+    WidgetWheelEvent event(true, eWheel, widget);
+    event.mModifiers = nsContentUtils::GetWidgetModifiers(modifiers);
+    event.mDeltaX = dx;
+    event.mDeltaY = dy;
+    event.mDeltaMode = 0;
+    event.mRefPoint = screenPoint - popup->CalcWidgetBounds().TopLeft();
+    widget->DispatchEvent(&event);
+    return;  // a popup wheel must not scroll the underlying content document
+  }
+
   ScrollContainerFrame* sf = ps->GetRootScrollContainerFrame();
   nsPoint before = sf ? sf->GetScrollPosition() : nsPoint();
 
@@ -403,6 +439,9 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   ev.mDeltaX = dx;
   ev.mDeltaY = dy;
   ev.mDeltaZ = 0.0;
+  // Always pixel mode: the JS side normalizes DOM_DELTA_LINE/PAGE wheel deltas to
+  // CSS pixels before forwarding (js/index.ts wheelPixels), since only a pixel
+  // delta crosses the command struct.
   ev.mDeltaMode = 0;  // WheelEvent.DOM_DELTA_PIXEL
   ev.mLineOrPageDeltaX = dx > 0 ? (int32_t)std::floor(dx) : (int32_t)std::ceil(dx);
   ev.mLineOrPageDeltaY = dy > 0 ? (int32_t)std::floor(dy) : (int32_t)std::ceil(dy);
@@ -431,15 +470,43 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
   }
 
   // Non-APZ (software) path: the dispatched wheel event is "consumed" by the event
-  // manager (eConsumeNoDefault) but the scroll isn't applied. If the position didn't
-  // move and content didn't preventDefault (e.g. a custom scroller / map), apply the
-  // scroll to the root scroll frame ourselves. Use Smooth mode so the GPU compositor
-  // animates it over refresh-driver ticks.
+  // manager (eConsumeNoDefault) but the scroll isn't applied for network-loaded
+  // documents (wisp). If the root scroll frame's position didn't move and content
+  // didn't preventDefault (e.g. a custom scroller / map), apply the scroll to the
+  // root scroll frame ourselves.
+  //
+  // ScrollMode::Instant, not Smooth: Smooth animates over refresh-driver ticks on
+  // the compositor, and in headless software rendering nothing drives that
+  // animation, so a Smooth fallback never visibly moves (measured: zero motion on
+  // http(s) documents even with large deltas). Instant applies the scroll now.
   widget->DispatchEvent(&ev);
-  if (sf && sf->GetScrollPosition() == before && !ev.DefaultPrevented()) {
+
+  static int s_scrollDiag = 0;
+  if (s_scrollDiag < 10) {
+    s_scrollDiag++;
+    // Diagnose why the fallback does or doesn't fire for a given document type:
+    // sf missing -> wrong presShell; prevented -> content handled it;
+    // scrolled<=port -> the doc has no vertical overflow (print-like view).
+    // GetScrolledRect() is the scrolled CONTENT rect (what "scrollable rect" means
+    // here); ScrollContainerFrame has no GetScrollableRect -- that name only exists
+    // on APZ's FrameMetrics, which is not what this main-thread path has.
+    printf("do_wheel: sf=%p prevented=%d rootMoved=%d scrolledH=%d portH=%d\n",
+           (void*)sf, ev.DefaultPrevented() ? 1 : 0,
+           !sf || sf->GetScrollPosition() == before
+               ? 0
+               : 1,
+           sf ? sf->GetScrolledRect().Height() : -1,
+           sf ? sf->GetScrollPortRect().Height() : -1);
+    fflush(stdout);
+  }
+  // GetScrollRange().height is the documented "can this be scrolled vertically"
+  // test (nonzero iff scrolled content exceeds the scroll port; it is exactly
+  // max(GetScrolledRect().height - scrollPort.height, 0) in the engine).
+  if (sf && sf->GetScrollPosition() == before && !ev.DefaultPrevented() &&
+      sf->GetScrollRange().height > 0) {
     sf->ScrollToCSSPixels(
         CSSPoint::FromAppUnits(before) + CSSPoint((float)dx, (float)dy),
-        ScrollMode::Smooth);
+        ScrollMode::Instant);
   }
 }
 
@@ -481,6 +548,18 @@ void do_key(int evType, const char* keyUtf8, int keyCode, int charCode,
   nsPoint offset;
   nsIWidget* widget = nsContentUtils::GetWidget(ps, &offset);
   if (!widget) return;
+
+  if (nsXULPopupManager* manager = nsXULPopupManager::GetInstance()) {
+    nsTArray<nsMenuPopupFrame*> popups;
+    manager->GetVisiblePopups(popups);
+    if (!popups.IsEmpty() && popups[0] && popups[0]->GetWidget())
+      widget = popups[0]->GetWidget();
+  }
+  if (getenv("GECKO_SELECT_DEBUG")) {
+    printf("[embed-select] key type=%d name=%s code=%d char=%d\n",
+           evType, keyUtf8, keyCode, charCode);
+    fflush(stdout);
+  }
 
   NS_ConvertUTF8toUTF16 key(keyUtf8);
   KeyNameIndex kni = WidgetKeyboardEvent::GetKeyNameIndex(key);
