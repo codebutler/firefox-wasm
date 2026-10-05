@@ -47,6 +47,22 @@ trees that a basic embed doesn't need — notably the Firefox front-end (`browse
 returns the bytes. The provider root maps to `/gre`. See `chrome-demo` for a provider
 that serves the Firefox front-end so the full browser UI boots (`GECKO_CHROME=1`).
 
+### Live embedding themes
+
+After `init()`, call `await gecko.setTheme({ contentCss, popupCss, dark })` before
+the first `load()` and whenever the host theme changes. `contentCss` is registered
+at Gecko's user-agent cascade origin, so ordinary page-authored CSS takes
+precedence. It applies to existing and future documents, including frames.
+`popupCss` styles the privileged native-select document; it also updates an open
+menu. `dark` updates Gecko's system appearance preference. Supply complete
+replacement stylesheets on each call; an identical theme is a no-op.
+
+The embedder owns the design tokens and can embed a local font as a data URL.
+The UTF-8 JSON payload must be smaller than 65,536 bytes. The theme command runs
+in a privileged module, separately from `evalChrome()` (which, despite its old
+name, evaluates in the content realm). Native controls and their DOM state are
+preserved; theming does not substitute host DOM widgets for page controls.
+
 ## Building
 
 `gecko.*` is produced by `build-lib.sh` (stages the engine libs + a minimal

@@ -21,7 +21,7 @@ function bridge() {
   }
   const base = { setPositionAndSize(...args) { this.size = args; } };
   const context = vm.createContext({
-    DesktopSelectParent, SelectParentHelper: helper, console,
+    DesktopSelectParent, SelectParentHelper: helper, console, registerChromeDocument() {},
     Ci: { nsIBaseWindow: { eRepaint: 1 } },
     ChromeUtils: { unregisterWindowActor() {}, registerWindowActor(name, actor) { actors.push({ name, actor }); } },
     Services: {
@@ -44,6 +44,7 @@ function bridge() {
     },
   });
   const source = readFileSync(new URL('./chrome/EmbedSelect.sys.mjs', import.meta.url), 'utf8')
+    .replace(/import \{ registerChromeDocument \} from .*?;/, '')
     .replace(/import \{[\s\S]*?\} from "resource:\/\/gre\/actors\/SelectParent.sys.mjs";/, '')
     .replace('export class SelectParent', 'globalThis.SelectParent = class SelectParent');
   vm.runInContext(source, context);

@@ -153,7 +153,7 @@ struct XulCmd {
   int32_t height;
   uint8_t* result;
   int32_t resultLen;
-  char url[8192];
+  char url[65536];
   int32_t op;       // 0 load, 1 mouse, 2 key, 3 wheel, 4 paint-only
   int32_t evType;   // mouse: 0 move/1 down/2 up;  key: 0 down/1 up
   int32_t ex;       // event x (CSS px)
@@ -182,6 +182,7 @@ extern "C" int xul_init(const char* greDir);                 // embed-init.cpp
 bool xul_load(const char* url, int width, int height);       // embed-browser.cpp
 void EnsureSize(int width, int height);                      // embed-browser.cpp
 bool RunChromeScript(const nsACString& aScript, char** aOutResult = nullptr);
+bool SetEmbedTheme(const char* json);
 
 uint8_t* xul_paint(int width, int height);                   // embed-paint.cpp
 void gpu_ensure_active(int width, int height);               // embed-paint.cpp

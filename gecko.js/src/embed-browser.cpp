@@ -1,6 +1,7 @@
 // Window/docshell lifecycle + URL loading (content windowless-browser path and the
 // chrome AppWindow path). Split from embed-xul.cpp. See embed-xul.h.
 #include "embed-xul.h"
+#include "js/CallAndConstruct.h"
 #include "js/Conversions.h"
 #include "js/Exception.h"
 #include "js/PropertyAndElement.h"
@@ -165,6 +166,26 @@ static bool RegisterSelectActor() {
     return false;
   JS::Rooted<JS::Value> result(cx);
   return JS::Evaluate(cx, options, source, &result);
+}
+
+bool SetEmbedTheme(const char* json) {
+  mozilla::dom::AutoJSAPI jsapi;
+  if (!jsapi.Init(xpc::PrivilegedJunkScope())) return false;
+  JSContext* cx = jsapi.cx();
+  JS::CompileOptions options(cx);
+  options.setFileAndLine("embed-theme", 1);
+  constexpr char script[] =
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedTheme.sys.mjs').setTheme";
+  JS::SourceText<mozilla::Utf8Unit> source;
+  if (!source.init(cx, script, sizeof(script) - 1, JS::SourceOwnership::Borrowed))
+    return false;
+  JS::Rooted<JS::Value> function(cx), result(cx);
+  if (!JS::Evaluate(cx, options, source, &function)) return false;
+  JS::Rooted<JSString*> argument(cx, JS_NewStringCopyUTF8Z(cx, JS::ConstUTF8CharsZ(json, strlen(json))));
+  if (!argument) return false;
+  JS::Rooted<JS::Value> value(cx, JS::StringValue(argument));
+  return JS::Call(cx, JS::UndefinedHandleValue, function,
+                  JS::HandleValueArray(value), &result);
 }
 
 static nsIDocShell* EnsureBrowser(int width, int height) {

@@ -201,15 +201,16 @@ export interface GeckoOptions {
 }
 
 // ---- command struct (mirror embed-xul.cpp XulCmd) -------------------------
-// state@0 w@4 h@8 result(ptr)@12 len@16 url@20[8192], then input fields after url.
+// state@0 w@4 h@8 result(ptr)@12 len@16 url@20[65536], then input fields after url.
 const ST = 0, W = 4, H = 8, RES = 12, LEN = 16, URLOFF = 20;
-const OP = URLOFF + 8192,
+const URL_CAPACITY = 65536;
+const OP = URLOFF + URL_CAPACITY,
   EVTYPE = OP + 4, EX = OP + 8, EY = OP + 12, BTN = OP + 16, BTNS = OP + 20,
   CLICKS = OP + 24, MODS = OP + 28, KEYCODE = OP + 32, CHARCODE = OP + 36,
   DX = OP + 40, DY = OP + 44, KEYVAL = OP + 48, CURSOR = KEYVAL + 64;
 
 const OP_LOAD = 0, OP_MOUSE = 1, OP_KEY = 2, OP_WHEEL = 3, OP_PAINT = 4, OP_EVAL = 5;
-const OP_CLIP_SET = 9, OP_ROLLUP = 10;
+const OP_CLIP_SET = 9, OP_ROLLUP = 10, OP_THEME = 11;
 const MOD_ALT = 0x1, MOD_CTRL = 0x2, MOD_SHIFT = 0x4, MOD_META = 0x8;
 
 // Wheel deltas arrive in one of three units (WheelEvent.deltaMode): PIXEL (0),
@@ -632,7 +633,14 @@ export class Gecko {
     await this.run({ op: OP_PAINT });
   }
 
-  /** Evaluate JS in the chrome context; returns the stringified result. */
+  /** Set UA form defaults and privileged popup styling, including live updates. */
+  async setTheme(theme: { contentCss: string; popupCss: string; dark: boolean }): Promise<void> {
+    const json = JSON.stringify(theme);
+    if (this.enc.encode(json).length >= URL_CAPACITY) throw new RangeError('Embedding theme is too large');
+    if (await this.run({ op: OP_THEME, url: json }) === null) throw new Error('Could not apply embedding theme');
+  }
+
+  /** Evaluate JS in the content context; returns the stringified result. */
   async evalChrome(js: string): Promise<string> {
     const r = await this.run({ op: OP_EVAL, url: js });
     return typeof r === 'string' ? r : '';
@@ -767,9 +775,9 @@ export class Gecko {
     set(KEYCODE, item.keyCode || 0);
     set(CHARCODE, item.charCode || 0);
     set(DX, item.deltaX || 0); set(DY, item.deltaY || 0);
-    if (item.op === OP_LOAD || item.op === OP_EVAL || item.op === OP_CLIP_SET) {
+    if (item.op === OP_LOAD || item.op === OP_EVAL || item.op === OP_CLIP_SET || item.op === OP_THEME) {
       const bytes = this.enc.encode(item.url || '');
-      if (bytes.length >= 8190) return null;
+      if (bytes.length >= URL_CAPACITY) return null;
       u8().set(bytes, this.cmd + URLOFF); u8()[this.cmd + URLOFF + bytes.length] = 0;
     }
     if (item.op === OP_KEY) {
@@ -795,6 +803,7 @@ export class Gecko {
         ? this.dec.decode(new Uint8Array(u8().subarray(resPtr, resPtr + len)))
         : '';
     }
+    if (item.op === OP_THEME) return 0;
     const n = this.blit();
     if (item.op === OP_MOUSE) {
       const ck = i32()[(this.cmd + CURSOR) >> 2];
