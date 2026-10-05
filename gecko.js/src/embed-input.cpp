@@ -342,7 +342,14 @@ void do_mouse(int evType, int x, int y, int button, int clickCount,
   if (inputPopup) {
     ps = inputPopup->PresShell();
     widget = inputPopup->GetWidget();
-    ref = screenPoint - widget->WidgetToScreenOffset();
+    // Standalone PuppetWidgets have no BrowserChild to supply screen offsets.
+    // The popup frame owns the positioned bounds that we also publish to hosts.
+    ref = screenPoint - inputPopup->CalcWidgetBounds().TopLeft();
+  }
+  if (getenv("GECKO_SELECT_DEBUG")) {
+    printf("[embed-select] mouse type=%d screen=%d,%d popup=%d local=%d,%d\n",
+           evType, screenPoint.x, screenPoint.y, popupInput, ref.x, ref.y);
+    fflush(stdout);
   }
   // evType: 0=mousemove 1=mousedown 2=mouseup 3=contextmenu. A synthesized right
   // mousedown/up doesn't generate eContextMenu in this headless build, so the JS
@@ -419,7 +426,7 @@ void do_wheel(int x, int y, double dx, double dy, int modifiers) {
     event.mDeltaX = dx;
     event.mDeltaY = dy;
     event.mDeltaMode = 0;
-    event.mRefPoint = screenPoint - widget->WidgetToScreenOffset();
+    event.mRefPoint = screenPoint - popup->CalcWidgetBounds().TopLeft();
     widget->DispatchEvent(&event);
     return;  // a popup wheel must not scroll the underlying content document
   }
@@ -547,6 +554,11 @@ void do_key(int evType, const char* keyUtf8, int keyCode, int charCode,
     manager->GetVisiblePopups(popups);
     if (!popups.IsEmpty() && popups[0] && popups[0]->GetWidget())
       widget = popups[0]->GetWidget();
+  }
+  if (getenv("GECKO_SELECT_DEBUG")) {
+    printf("[embed-select] key type=%d name=%s code=%d char=%d\n",
+           evType, keyUtf8, keyCode, charCode);
+    fflush(stdout);
   }
 
   NS_ConvertUTF8toUTF16 key(keyUtf8);
