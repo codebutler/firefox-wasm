@@ -466,6 +466,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
       fflush(stdout);
     }
 
+    // Headless Gecko otherwise chooses the Android scrollbar drawing backend:
+    // narrow tracks with no arrow buttons. An embedded desktop browser needs
+    // persistent, draggable desktop scrollbars. Keep native layout/hit testing;
+    // the host's UA theme can style the anonymous scrollbar parts.
+    mozilla::Preferences::SetInt("widget.non-native-theme.scrollbar.style", 4);
+    mozilla::Preferences::SetInt("widget.non-native-theme.scrollbar.size.override", 16);
+    mozilla::Preferences::SetInt("ui.scrollArrowStyle", 0x1000 | 0x0001);
+    mozilla::Preferences::SetInt("ui.useOverlayScrollbars", 0);
+
     // Smooth scrolling: animated over several refresh-driver ticks. With the GPU
     // compositor presenting continuously (the paint loop composites every frame),
     // the animation is visible, so keep it enabled (it was forced off under the
