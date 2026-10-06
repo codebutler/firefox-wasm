@@ -1,0 +1,16 @@
+gecko.js/README.md
+  h_74fbce6cd3ee90 44-52
+patches/README.md
+  h_74fbce6cd3ee90 668-684
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "39051566e9e139cd54b48502f4643792793ed975",
+  "prompts": {},
+  "humans": {
+    "h_74fbce6cd3ee90": {
+      "author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
