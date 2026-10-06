@@ -41,6 +41,15 @@ trees that a basic embed doesn't need — notably the Firefox front-end (`browse
 | `onPopups` | optional; tight BGRA frames for `<select>` / autocomplete (`nsMenuPopupFrame`). Empty array = closed. Unset → canvas overlay |
 | `locateFile`, `print`, `printErr`, `width`, `height`, `forwardInput` | as named |
 
+### TCP destinations
+
+The socket bridge supports IPv4 and IPv6 for both `tcpTransport` and WISP.
+Transport callbacks receive a hostname or an unbracketed IP literal, plus a
+separate port. IPv4-mapped IPv6 addresses normalize to IPv4 at this boundary;
+Emscripten's synthetic addresses still resolve back to their original hostname.
+Socket address queries retain the original family. Scoped IPv6 destinations
+return `EOPNOTSUPP`: neither transport API supports choosing a network interface.
+
 ### The `fs` provider
 
 `readdir(path)` returns child names (directories **suffixed with `/`**); `readFile(path)`
