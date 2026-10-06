@@ -36,6 +36,7 @@ trees that a basic embed doesn't need — notably the Firefox front-end (`browse
 | `wispUrl` | WISP websocket endpoint; Necko fetches `http(s)://` over it |
 | `assetBase` | URL prefix where you serve `gecko.wasm` + `gecko.data` (default `./`, relative to the page) |
 | `tcpTransport` | optional embedder TCP factory (Necko sockets); when set, WISP is unused |
+| `onFrame` | optional; called after pixels reach the canvas. Use to invalidate an embedding compositor. GPU reports continue beyond startup only when subscribed; software reports follow the blit. No callbacks after destruction. |
 | `onLocationChange` | optional; top-level location changes (`nsIWebProgressListener`) |
 | `onContextMenu` | optional; content context-menu payload (engine rolls up XUL first). Unset → XUL menus paint on the canvas |
 | `onPopups` | optional; tight BGRA frames for `<select>` / autocomplete (`nsMenuPopupFrame`). Empty array = closed. Unset → canvas overlay |

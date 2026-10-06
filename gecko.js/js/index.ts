@@ -131,6 +131,10 @@ export interface GeckoOptions {
    * target selector); WebRender presents through an overlaid #glout canvas.
    */
   canvas: HTMLCanvasElement;
+  /** A frame reached the canvas. Compositing embedders resample it here.
+   * GPU notifications follow the Renderer worker's present yield; software
+   * notifications follow putImageData. Omit when the browser presents directly. */
+  onFrame?: () => void;
   width?: number;
   height?: number;
   /** Extra engine env vars (e.g. MOZ_LOG, GECKO_WASMJIT, GECKO_STYLO_THREADS). */
@@ -389,16 +393,23 @@ export class Gecko {
   private loadSettled = false;
 
   private onPresent(n: number): void {
+    if (this.destroyed) return;
     if (this.opts.env?.GECKO_PRESENT_DEBUG) {
       (this.opts.printErr ?? ((s: string) => console.warn(s)))(
         `present #${n}${this.loadSettled ? ' (load settled)' : ' (pre-load)'}`);
     }
     // PRESENT_REPORT_CAP -- MUST stay in sync with lib/gl-present.js, which stops
-    // reporting there. Resolving at the cap means a pathologically long first
+    // startup-only reporting there. Frame subscribers continue after the cap.
+    // Resolving at the cap means a pathologically long first
     // load degrades to "uncover anyway" instead of leaving firstPaint pending
     // forever, which would wedge an embedder that waits on it.
-    if (this.destroyed) return;
     if ((this.loadSettled && n >= 2) || n >= 600) this.resolveFirstPaint();
+    this.frameCommitted();
+  }
+
+  private frameCommitted(): void {
+    if (this.destroyed) return;
+    try { this.opts.onFrame?.(); } catch { /* embedder callbacks cannot stop presentation */ }
   }
 
   constructor(opts: GeckoOptions) {
@@ -490,8 +501,8 @@ export class Gecko {
         printErr('[libxul] abort: ' + w);
         this.destroy();
       },
-      // Called from the Renderer worker via CMD_CALL_HANDLER for the first few
-      // presents (lib/gl-present.js). MUST exist before any thread starts:
+      // Called from the Renderer worker via CMD_CALL_HANDLER for startup and
+      // subscribed frame commits (lib/gl-present.js). MUST exist before threads start:
       // emscripten's dispatch does a bare `Module[d.handler](...)`, no null check.
       geckoOnPresent: (n: number) => this.onPresent(n),
       // Called from RenderLoadListener::OnLocationChange (embed-browser.cpp) on
@@ -535,6 +546,7 @@ export class Gecko {
         const hostMatchMedia = (globalThis as { matchMedia?: (q: string) => { matches: boolean } }).matchMedia;
         m.ENV['GECKO_DARK'] = hostMatchMedia && hostMatchMedia('(prefers-color-scheme: dark)').matches ? '1' : '0';
         for (const [k, v] of Object.entries(this.opts.env ?? {})) m.ENV[k] = v;
+        if (this.opts.onFrame) m.ENV['GECKO_FRAME_COMMITS'] = '1';
         // The WISP transport (lib/wisp-net.js, a --js-library) reads the endpoint
         // from Module.wispUrl and drives the wisp-js ClientConnection injected here
         // as Module.WispClientConnection; it lazily opens the single connection on
@@ -967,6 +979,7 @@ export class Gecko {
       if ((p & 0x00FFFFFF) !== 0x00FFFFFF) nonWhite++;
     }
     this.ctx.putImageData(this.blitImg, 0, 0);
+    this.frameCommitted();
     return nonWhite;
   }
 

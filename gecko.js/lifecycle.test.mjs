@@ -136,3 +136,25 @@ test('late native prompt/picker completion never allocates or wakes a terminated
     assert.equal(heap.some(value=>value!==0),false);
   }
 });
+
+test('frame commits continue after firstPaint and stop on disposal', async () => {
+  const {g}=wrapper(); let frames=0;
+  g.opts.onFrame=()=>frames++;
+  g.loadSettled=true;
+  g.onPresent(2); await g.firstPaint;
+  g.onPresent(601); assert.equal(frames,2);
+  g.destroy(); g.onPresent(602); assert.equal(frames,2);
+});
+test('a throwing frame consumer cannot stop the engine callback', () => {
+  const {g}=wrapper();g.opts.onFrame=()=>{throw Error('consumer failed');};
+  assert.doesNotThrow(()=>g.onPresent(601));
+});
+test('software commits follow a successful pixel upload, not empty paint results', () => {
+  const {g}=wrapper();const events=[];
+  const buffer=new ArrayBuffer(256);
+  g.mod={HEAP32:new Int32Array(buffer),HEAPU8:new Uint8Array(buffer)};g.cmd=64;
+  g.blitImg={};g.blitDst32=new Uint32Array(1);g.ctx={putImageData(){events.push('pixels');}};
+  g.opts.onFrame=()=>events.push('commit');g.blit();assert.deepEqual(events,[]);
+  g.mod.HEAP32[(64+12)>>2]=128;g.mod.HEAP32[(64+16)>>2]=4;
+  g.blit();assert.deepEqual(events,['pixels','commit']);
+});
