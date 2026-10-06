@@ -28,9 +28,11 @@ mergeInto(LibraryManager.library, {
   hostimg_decode__proxy: 'sync',
   hostimg_decode__deps: ['$UTF8ToString'],
   hostimg_decode: function (ctrl, mimePtr, dataPtr, dataLen) {
+    if (Module.geckoDisposed) return;
     var c = ctrl >> 2;  // int32 index of the control block
 
     function finish(status) {
+      if (Module.geckoDisposed) return;
       Atomics.store(HEAP32, c + 0 /* IMG_STATUS */, status);
       Atomics.notify(HEAP32, c + 0);
     }
@@ -49,6 +51,14 @@ mergeInto(LibraryManager.library, {
     var dec;
     try {
       dec = new ImageDecoder({ data: enc, type: mime });
+      if (!Module.geckoImages) {
+        Module.geckoImages = new Set();
+        Module.geckoCleanup.push(function () {
+          for (var resource of Module.geckoImages) { try { resource.close(); } catch (_) {} }
+          Module.geckoImages.clear();
+        });
+      }
+      Module.geckoImages.add(dec);
     } catch (e) {
       console.warn('[hostimg] ctor failed:', e && e.message ? e.message : e);
       finish(2);
@@ -57,6 +67,8 @@ mergeInto(LibraryManager.library, {
 
     dec.decode({ frameIndex: 0, completeFramesOnly: true }).then(function (res) {
       var frame = res.image;
+      if (Module.geckoDisposed) { frame.close(); return; }
+      Module.geckoImages.add(frame);
       var w = frame.displayWidth | 0;
       var h = frame.displayHeight | 0;
       var stride = w * 4;
@@ -73,24 +85,30 @@ mergeInto(LibraryManager.library, {
       frame.copyTo(HEAPU8.subarray(ptr, ptr + size),
                    { format: 'BGRA', layout: [{ offset: 0, stride: stride }] })
         .then(function () {
+          if (Module.geckoDisposed) return;
           HEAP32[c + 1 /* IMG_W */] = w;
           HEAP32[c + 2 /* IMG_H */] = h;
           HEAP32[c + 3 /* IMG_STRIDE */] = stride;
           HEAP32[c + 4 /* IMG_PTR */] = ptr;
           HEAP32[c + 5 /* IMG_FRAMES */] = frames;
           finish(1);
+          Module.geckoImages.delete(frame);
           try { frame.close(); } catch (_) {}
+          Module.geckoImages.delete(dec);
           try { dec.close(); } catch (_) {}
         })
         .catch(function (e) {
           console.warn('[hostimg] copyTo failed:', e && e.message ? e.message : e);
-          Module._free(ptr);
+          if (!Module.geckoDisposed) Module._free(ptr);
+          Module.geckoImages.delete(frame);
           try { frame.close(); } catch (_) {}
+          Module.geckoImages.delete(dec);
           try { dec.close(); } catch (_) {}
           finish(2);
         });
     }).catch(function (e) {
       console.warn('[hostimg] decode failed:', e && e.message ? e.message : e);
+      Module.geckoImages.delete(dec);
       try { dec.close(); } catch (_) {}
       finish(2);
     });
@@ -105,8 +123,10 @@ mergeInto(LibraryManager.library, {
   hostimg_gpu_decode__proxy: 'sync',
   hostimg_gpu_decode__deps: ['$UTF8ToString'],
   hostimg_gpu_decode: function (ctrl, idLo, idHi, mimePtr, dataPtr, dataLen) {
+    if (Module.geckoDisposed) return;
     var c = ctrl >> 2;
     function fail() {
+      if (Module.geckoDisposed) return;
       Atomics.store(HEAP32, c + 0 /* IMG_STATUS */, 2);
       Atomics.notify(HEAP32, c + 0);
     }
@@ -128,6 +148,14 @@ mergeInto(LibraryManager.library, {
     var dec;
     try {
       dec = new ImageDecoder({ data: enc, type: mime });
+      if (!Module.geckoImages) {
+        Module.geckoImages = new Set();
+        Module.geckoCleanup.push(function () {
+          for (var resource of Module.geckoImages) { try { resource.close(); } catch (_) {} }
+          Module.geckoImages.clear();
+        });
+      }
+      Module.geckoImages.add(dec);
     } catch (e) {
       console.warn('[hostimg-gpu] ctor failed:', e && e.message ? e.message : e);
       fail();
@@ -135,20 +163,26 @@ mergeInto(LibraryManager.library, {
     }
     dec.decode({ frameIndex: 0, completeFramesOnly: true }).then(function (res) {
       var frame = res.image;
+      if (Module.geckoDisposed) { frame.close(); return; }
+      Module.geckoImages.add(frame);
       try {
         // The Renderer worker finishes the control block after the GL upload.
         rworker.postMessage({
           __hostimg: 1, ctrl: ctrl, idLo: idLo, idHi: idHi,
           w: frame.displayWidth | 0, h: frame.displayHeight | 0, frame: frame
         }, [frame]);
+        Module.geckoImages.delete(frame);
       } catch (e) {
         console.warn('[hostimg-gpu] transfer failed:', e && e.message ? e.message : e);
-        try { frame.close(); } catch (_) {}
+        Module.geckoImages.delete(frame);
+          try { frame.close(); } catch (_) {}
         fail();
       }
+      Module.geckoImages.delete(dec);
       try { dec.close(); } catch (_) {}
     }).catch(function (e) {
       console.warn('[hostimg-gpu] decode failed:', e && e.message ? e.message : e);
+      Module.geckoImages.delete(dec);
       try { dec.close(); } catch (_) {}
       fail();
     });
@@ -190,11 +224,13 @@ mergeInto(LibraryManager.library, {
         GLctx.texParameteri(GLctx.TEXTURE_2D, GLctx.TEXTURE_WRAP_T, GLctx.CLAMP_TO_EDGE);
         var id64 = d.idHi * 4294967296 + (d.idLo >>> 0);
         globalThis.geckoHostImgTex.set(id64, { tex: id, w: d.w, h: d.h, ready: true });
-        try { frame.close(); } catch (_) {}
+        Module.geckoImages.delete(frame);
+          try { frame.close(); } catch (_) {}
         done(1);
       } catch (err) {
         console.warn('[hostimg-gpu] upload failed:', err && err.message ? err.message : err);
-        try { frame.close(); } catch (_) {}
+        Module.geckoImages.delete(frame);
+          try { frame.close(); } catch (_) {}
         done(2);
       }
     });

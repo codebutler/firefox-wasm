@@ -21,11 +21,22 @@ mergeInto(LibraryManager.library, {
   emaudio_get_rate__proxy: 'sync',
   emaudio_get_rate: function () {
     try {
-      var A = globalThis.__emAudio || (globalThis.__emAudio = {});
+      var A = Module.geckoAudio || (Module.geckoAudio = {});
       if (!A.ctx) {
         var AC = globalThis.AudioContext || globalThis.webkitAudioContext;
         if (!AC) return 0;
         A.ctx = new AC();
+        Module.geckoCleanup.push(function () {
+          A.dead = true;
+          if (A.node) { A.node.port.postMessage({ stop: true }); A.node.disconnect(); A.node.port.close(); }
+          A.pending = null;
+          URL.revokeObjectURL(url);
+          ['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) {
+            removeEventListener(ev, resume, { capture: true });
+          });
+          A.ctx.close().catch(function () {});
+          Module.geckoAudio = null;
+        });
         var src = [
           'class GeckoOut extends AudioWorkletProcessor {',
           '  constructor() {',
@@ -65,6 +76,8 @@ mergeInto(LibraryManager.library, {
         ].join('\n');
         var url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
         A.ctx.audioWorklet.addModule(url).then(function () {
+          URL.revokeObjectURL(url);
+          if (A.dead) return;
           A.node = new AudioWorkletNode(A.ctx, 'gecko-out', {
             numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
           });
@@ -72,6 +85,8 @@ mergeInto(LibraryManager.library, {
           A.ready = true;
           if (A.pending) A.node.port.postMessage(A.pending);
         }).catch(function (e) {
+          URL.revokeObjectURL(url);
+          if (A.dead) return;
           console.error('[emaudio] worklet addModule failed:', e && e.message ? e.message : e);
         });
         // Autoplay policy: an AudioContext stays suspended until a user gesture.
@@ -91,7 +106,7 @@ mergeInto(LibraryManager.library, {
   emaudio_start__proxy: 'sync',
   emaudio_start: function (ring, capFrames, channels, rate) {
     try {
-      var A = globalThis.__emAudio;
+      var A = Module.geckoAudio;
       if (!A || !A.ctx) return -1;
       var msg = { sab: wasmMemory.buffer, ring: ring, cap: capFrames, channels: channels };
       A.pending = msg;
@@ -107,7 +122,7 @@ mergeInto(LibraryManager.library, {
   emaudio_stop__proxy: 'sync',
   emaudio_stop: function () {
     try {
-      var A = globalThis.__emAudio;
+      var A = Module.geckoAudio;
       if (A && A.node) A.node.port.postMessage({ stop: true });
       if (A) A.pending = null;
     } catch (e) {}

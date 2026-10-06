@@ -44,6 +44,30 @@ mergeInto(LibraryManager.library, {
   $WISP__deps: ['$DNS'],
   $WISP: {
     conn: null,
+    disposed: false,
+    dispose: function () {
+      WISP.disposed = true;
+      var streams = WISP.customStreams;
+      WISP.customStreams = null;
+      if (streams) {
+        var handles = Array.from(streams.values());
+        streams.clear(); // Late/synchronous callbacks must not enter the dead heap.
+        for (var handle of handles) { try { handle.close(); } catch (e) {} }
+      }
+      var conn = WISP.conn;
+      WISP.conn = null;
+      if (conn) {
+        conn.ready = false;
+        conn.pending = [];
+        for (var stream of Object.values(conn.streams)) {
+          stream.onmessage = stream.onclose = function () {};
+          try { stream.close(); } catch (e) {}
+        }
+        conn.streams = {};
+        conn.client.onopen = conn.client.onclose = conn.client.onerror = function () {};
+        try { conn.client.close(); } catch (e) {}
+      }
+    },
     // Streams opened via Module.tcpTransport — keyed by C++ socket id, same as
     // WISP stream ids. Kept separate so a custom-transport connect never opens
     // the WISP WebSocket (and a WISP connect never looks here).
@@ -63,6 +87,7 @@ mergeInto(LibraryManager.library, {
     // `streams` maps C++ socket id -> wisp-js ClientStream; `pending` holds
     // connects issued before the handshake completed.
     ensureConn: function () {
+      if (WISP.disposed) return null;
       if (WISP.conn) return WISP.conn;
       var url = (typeof Module !== 'undefined') && Module.wispUrl;
       if (!url) { err('[wisp] Module.wispUrl unset; networking disabled'); return null; }
@@ -148,6 +173,7 @@ mergeInto(LibraryManager.library, {
       }
     },
     doConnect: function (id, host, port) {
+      if (WISP.disposed) return;
       // Synthetic DNS addresses (including IPv4-mapped IPv6, normalized by
       // C++) resolve back to hostnames; real IP literals pass through unchanged.
       try { if (DNS.lookup_addr) { var nm = DNS.lookup_addr(host); if (nm) host = nm; } } catch (e) {}
@@ -165,6 +191,7 @@ mergeInto(LibraryManager.library, {
         catch (e) { err('[wisp] create_stream failed: ' + e); try { _wisp_set_error(id, 111); } catch (e2) {} return; }
         conn.streams[id] = stream;
         stream.onmessage = function (bytes) {
+          if (WISP.disposed) return;
           var u8 = (bytes instanceof Uint8Array) ? bytes : new Uint8Array(bytes);
           var n = u8.length;
           if (n > 0) {

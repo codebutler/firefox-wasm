@@ -239,6 +239,7 @@ const CURSORS = ['none', 'default', 'pointer', 'context-menu', 'help', 'progress
   'all-scroll', 'zoom-in', 'zoom-out', 'auto'];
 
 interface GeckoModule {
+  geckoDispose(): void;
   HEAPU8: Uint8Array;
   HEAP32: Int32Array;
   ENV: Record<string, string>;
@@ -261,8 +262,7 @@ type GeckoFactory = (opts: Record<string, unknown>) => Promise<GeckoModule>;
 // unreliable in this emsdk). Both it and the pthread worker are inlined as source
 // (asset/source) and run from Blob URLs, so nothing has to be served for them.
 const toBlobUrl = (src: string) => URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
-let _geckoUrl: string | undefined;
-const geckoBlobUrl = () => (_geckoUrl ??= toBlobUrl(geckoSource));
+
 
 let _engine: Promise<GeckoFactory> | undefined;
 function loadEngine(): Promise<GeckoFactory> {
@@ -306,6 +306,28 @@ export class Gecko {
   private running = false;
   private pickers = new Map<string, AbortController>();
   private destroyed = false;
+  private lifetime = new AbortController();
+  private initializing: Promise<void> | null = null;
+  private startingModule: Partial<GeckoModule> | null = null;
+  private engineUrl: string | null = null;
+  private paintFrame: number | null = null;
+  private gpuWrap: HTMLElement | null = null;
+
+  private alive(): void {
+    this.lifetime.signal.throwIfAborted();
+  }
+
+  private async untilClosed<T>(work: Promise<T>): Promise<T> {
+    this.alive();
+    const signal = this.lifetime.signal;
+    let abort!: () => void;
+    const closed = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    try { return await Promise.race([work, closed]); }
+    finally { signal.removeEventListener('abort', abort); }
+  }
   private painting = false;
   private enc = new TextEncoder();
   private dec = new TextDecoder();
@@ -375,6 +397,7 @@ export class Gecko {
     // reporting there. Resolving at the cap means a pathologically long first
     // load degrades to "uncover anyway" instead of leaving firstPaint pending
     // forever, which would wedge an embedder that waits on it.
+    if (this.destroyed) return;
     if ((this.loadSettled && n >= 2) || n >= 600) this.resolveFirstPaint();
   }
 
@@ -404,7 +427,15 @@ export class Gecko {
   }
 
   /** Instantiate the engine, mount GRE files, and wait until it is ready. */
-  async init(): Promise<void> {
+  init(): Promise<void> {
+    if (this.destroyed) return Promise.reject(this.lifetime.signal.reason);
+    return this.initializing ??= this.untilClosed(this.initialize()).catch(error => {
+      this.destroy();
+      throw error;
+    });
+  }
+
+  private async initialize(): Promise<void> {
     if (this.gpu) this.setupGpuPresent();
     const print = this.opts.print ?? ((s) => console.log(s));
     const printErr = this.opts.printErr ?? ((s) => console.warn(s));
@@ -417,7 +448,8 @@ export class Gecko {
     const wasmUrl = this.opts.wasm.url;
     const wasmCompressed = this.opts.wasm.compressed ?? false;
 
-    const createGecko = await loadEngine();
+    const createGecko = await this.untilClosed(loadEngine());
+    this.alive();
 
     let resolveReady!: () => void;
     const ready = new Promise<void>((r) => (resolveReady = r));
@@ -450,7 +482,10 @@ export class Gecko {
         print(t);
       },
       printErr,
-      onAbort: (w: unknown) => printErr('[libxul] abort: ' + w),
+      onAbort: (w: unknown) => {
+        printErr('[libxul] abort: ' + w);
+        this.destroy();
+      },
       // Called from the Renderer worker via CMD_CALL_HANDLER for the first few
       // presents (lib/gl-present.js). MUST exist before any thread starts:
       // emscripten's dispatch does a bare `Module[d.handler](...)`, no null check.
@@ -459,7 +494,7 @@ export class Gecko {
       // the browser main thread via MAIN_THREAD_EM_ASM. Optional on older discs.
       geckoOnLocationChange: (url: string) => {
         try {
-          this.opts.onLocationChange?.(url);
+          if (!this.destroyed) this.opts.onLocationChange?.(url);
         } catch {
           /* embedder bugs must not tear the engine */
         }
@@ -468,7 +503,7 @@ export class Gecko {
       // callbacks are not copied into Gecko's pthread runtime.
       geckoOnContextMenu: (info: GeckoContextMenuInfo) => {
         try {
-          this.opts.onContextMenu?.(info);
+          if (!this.destroyed) this.opts.onContextMenu?.(info);
         } catch {
           /* embedder bugs must not tear the engine */
         }
@@ -526,7 +561,7 @@ export class Gecko {
     // them from the main module, no separate *.worker.js). The wasm is supplied directly
     // via instantiateWasm (below) and gecko.data via getPreloadedPackage, so emscripten
     // never fetches by filename -- locateFile is only honored if the consumer overrides it.
-    moduleOpts.mainScriptUrlOrBlob = geckoBlobUrl();
+    moduleOpts.mainScriptUrlOrBlob = this.engineUrl = toBlobUrl(geckoSource);
     if (this.opts.locateFile) moduleOpts.locateFile = this.opts.locateFile;
     // Hand the runtime our canvas as Module.canvas — emscripten's canonical
     // "this is the app's canvas" slot. The OffscreenCanvas transfer path checks
@@ -544,8 +579,10 @@ export class Gecko {
     // from the inlined manifest); otherwise it's stream-compiled directly.
     {
       const decoder = new ZSTDDecoder();
-      await decoder.init();
-      const dataZst = new Uint8Array(await (await fetch(geckoDataZst)).arrayBuffer());
+      await this.untilClosed(decoder.init());
+      this.alive();
+      const dataZst = new Uint8Array(await (await fetch(geckoDataZst, { signal: this.lifetime.signal })).arrayBuffer());
+      this.alive();
       // emscripten passes the uncompressed package size; decode is synchronous.
       moduleOpts.getPreloadedPackage = (_name: string, size: number): ArrayBuffer => {
         const u = decoder.decode(dataZst, size);
@@ -557,20 +594,23 @@ export class Gecko {
         (async () => {
           let r: WebAssembly.WebAssemblyInstantiatedSource;
           if (wasmCompressed) {
-            const zst = new Uint8Array(await (await fetch(wasmUrl)).arrayBuffer());
+            const zst = new Uint8Array(await (await fetch(wasmUrl, { signal: this.lifetime.signal })).arrayBuffer());
             const bytes = decoder.decode(zst, assets.wasmSize);
             r = await WebAssembly.instantiate(bytes as BufferSource, imports);
           } else {
             try {
-              r = await WebAssembly.instantiateStreaming(fetch(wasmUrl), imports);
+              r = await WebAssembly.instantiateStreaming(fetch(wasmUrl, { signal: this.lifetime.signal }), imports);
             } catch {
               // streaming needs an application/wasm response; fall back to a buffer fetch.
-              const bytes = await (await fetch(wasmUrl)).arrayBuffer();
+              const bytes = await (await fetch(wasmUrl, { signal: this.lifetime.signal })).arrayBuffer();
               r = await WebAssembly.instantiate(bytes, imports);
             }
           }
+          this.alive();
           success(r.instance, r.module);
-        })().catch((e) => printErr('[libxul] wasm instantiate failed: ' + e));
+        })().catch((e) => {
+          if (!this.destroyed) { printErr('[libxul] wasm instantiate failed: ' + e); this.destroy(); }
+        });
         return {};
       };
     }
@@ -582,13 +622,14 @@ export class Gecko {
     }
     if (this.opts.onNewWindow) {
       moduleOpts.geckoOnNewWindow = (info: { url: string; features?: string }) => {
-        try { this.opts.onNewWindow?.(info); } catch { /* embedder bugs */ }
+        try { if (!this.destroyed) this.opts.onNewWindow?.(info); } catch { /* embedder bugs */ }
       };
     }
     if (this.opts.onPrompt) {
       moduleOpts.geckoOnPrompt = (req: Record<string, unknown>) => {
         try {
-          return Promise.resolve(this.opts.onPrompt!(req));
+          if (this.destroyed) return Promise.resolve({ ok: false });
+          return this.untilClosed(Promise.resolve(this.opts.onPrompt!(req))).catch(() => ({ ok: false }));
         } catch {
           return Promise.resolve({ ok: false });
         }
@@ -619,8 +660,15 @@ export class Gecko {
         this.pickers.delete(id);
       }
     };
-    this.mod = await createGecko(moduleOpts);
-    await ready;
+    this.alive();
+    // The factory mutates this exact object before allocating its first worker.
+    // Own it now, so destroy can stop a boot whose factory/READY never settles.
+    this.startingModule = moduleOpts as Partial<GeckoModule>;
+    this.mod = await this.untilClosed(createGecko(moduleOpts));
+    this.startingModule = null;
+    this.alive();
+    await this.untilClosed(ready);
+    this.alive();
     this.cmd = this.mod._xul_cmd_ptr();
 
     // Software mode never calls gl_present_yield (no compositor present to wait
@@ -638,7 +686,9 @@ export class Gecko {
     // Native pickers can hold a nested Gecko event loop. Withdraw their host
     // UI before queuing navigation, so load never waits for a stale selection.
     for (const controller of this.pickers.values()) controller.abort();
+    this.alive();
     await this.run({ op: OP_LOAD, url });
+    this.alive();
     // Arms firstPaint: from here, the next present is one that can carry this
     // document. (Presents that already happened may predate it.)
     this.loadSettled = true;
@@ -720,13 +770,36 @@ export class Gecko {
     });
   }
 
-  /** Stop loops, detach input handlers. (The wasm module is not torn down.) */
+  /** Cancel pending work and release this instance's runtime and host resources. */
   destroy(): void {
+    if (this.destroyed) return;
     this.destroyed = true;
+    this.lifetime.abort(new DOMException('Gecko was destroyed', 'AbortError'));
     for (const controller of this.pickers.values()) controller.abort();
-    this.running = false;
-    for (const d of this.detach) d();
-    this.detach = [];
+    this.pickers.clear();
+    if (this.paintFrame !== null) cancelAnimationFrame(this.paintFrame);
+    this.paintFrame = null;
+    for (const item of this.queue.splice(0)) item.resolve?.(null);
+    for (const d of this.detach.splice(0)) d();
+    const runtime = this.mod ?? this.startingModule;
+    this.mod = this.startingModule = null;
+    runtime?.geckoDispose?.();
+    if (this.engineUrl) URL.revokeObjectURL(this.engineUrl);
+    this.engineUrl = null;
+    this.cmd = 0;
+    this.popupCanvas?.remove();
+    this.popupCanvas = null;
+    this.popupCtx = this.ctx = null;
+    this.popupImg = this.blitImg = null;
+    this.popupDst32 = this.blitDst32 = null;
+    if (this.gpuWrap) {
+      this.gpuWrap.replaceWith(this.canvas);
+      this.gpuWrap = null;
+    }
+    this.opts.onPopups?.([]);
+    // Cancellation ends the wait, without inventing a painted frame or leaving
+    // an embedder's firstPaint await permanently retained.
+    this.resolveFirstPaint();
   }
 
   // Register our canvas in emscripten's selector override map, so the engine's
@@ -764,12 +837,14 @@ export class Gecko {
   // ---- command protocol --------------------------------------------------
 
   private run(item: Cmd): Promise<number | string | null> {
+    if (this.destroyed || !this.mod) return Promise.resolve(null);
     return new Promise((resolve) => {
       item.resolve = resolve;
       // coalesce consecutive mouse-moves so fast motion can't back up the queue.
       const last = this.queue[this.queue.length - 1];
       if (item.op === OP_MOUSE && item.evType === 0 && last &&
           last.op === OP_MOUSE && last.evType === 0) {
+        last.resolve?.(null);
         this.queue[this.queue.length - 1] = item;
       } else {
         this.queue.push(item);
@@ -779,12 +854,15 @@ export class Gecko {
   }
 
   private async pump(): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.destroyed) return;
     this.running = true;
-    while (this.queue.length) {
+    while (this.queue.length && !this.destroyed) {
       const item = this.queue.shift()!;
-      const r = await this.runCmd(item);
-      item.resolve?.(r);
+      try { item.resolve?.(await this.runCmd(item)); }
+      catch (error) {
+        item.resolve?.(null);
+        if (!this.destroyed) console.error('[gecko-command]', error);
+      }
     }
     this.running = false;
   }
@@ -827,11 +905,12 @@ export class Gecko {
     const start = performance.now();
     let st = 1;
     while (performance.now() - start < 120000) {
+      if (this.destroyed) return null;
       st = Atomics.load(i32(), (this.cmd + ST) >> 2);
       if (st === 3 || st === -1) break;
       await new Promise((r) => setTimeout(r, item.op === OP_LOAD ? 20 : 4));
     }
-    if (st !== 3) return null;
+    if (this.destroyed || st !== 3) return null;
     if (item.op >= 5 && item.op <= 8) {
       const resPtr = i32()[(this.cmd + RES) >> 2], len = i32()[(this.cmd + LEN) >> 2];
       return (resPtr && len)
@@ -952,9 +1031,9 @@ export class Gecko {
       const tick = async () => {
         if (!this.mod) return;
         await this.run({ op: OP_PAINT });
-        if (this.mod) requestAnimationFrame(tick);
+        if (this.mod) this.paintFrame = requestAnimationFrame(tick);
       };
-      requestAnimationFrame(tick);
+      this.paintFrame = requestAnimationFrame(tick);
       return;
     }
     // GPU mode: the main scene presents autonomously -- the refresh driver composites
@@ -976,9 +1055,9 @@ export class Gecko {
         lastPull = now;
         await this.run({ op: OP_PAINT });
       }
-      if (this.mod) requestAnimationFrame(tick);
+      if (this.mod) this.paintFrame = requestAnimationFrame(tick);
     };
-    requestAnimationFrame(tick);
+    this.paintFrame = requestAnimationFrame(tick);
   }
 
   // ---- input -------------------------------------------------------------
@@ -994,6 +1073,7 @@ export class Gecko {
     if (!wrap || wrap.dataset.libxulGlwrap !== '1') {
       wrap = document.createElement('div');
       wrap.dataset.libxulGlwrap = '1';
+      this.gpuWrap = wrap;
       c.parentNode!.insertBefore(wrap, c);
       wrap.appendChild(c);
     }
