@@ -94,6 +94,13 @@ Optional `selection: { background: '#rrggbb', text: '#rrggbb' }` supplies native
 selection system colors, including listboxes whose UA rules intentionally use
 `!important`. Omitting it on a later call restores the default selection palette.
 
+The embedding uses persistent 16px desktop scrollbars with one arrow button at
+each end. Headless Gecko's Android default otherwise produces narrow tracks
+without desktop controls. Native scrolling, sizing, and hit testing remain in
+Gecko, including page-authored `scrollbar-width` and overflow behavior. A host UA
+sheet can style anonymous XUL `thumb`, `scrollbarbutton`, and `scrollcorner`
+parts; keep the outer `scrollbar`'s native appearance to preserve its gutter.
+
 ## Building
 
 `gecko.*` is produced by `build-lib.sh` (stages the engine libs + a minimal
