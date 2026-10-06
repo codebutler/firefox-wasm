@@ -1,0 +1,21 @@
+gecko.js/src/embed-init.cpp
+  s_6e03fa3fb4523e::t_58055e497951c6 469-477
+gecko.js/README.md
+  s_6e03fa3fb4523e::t_bce1ecab22d20d 97-103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2c370e93129aec638bab7f0b3c13638c3e745b14",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
