@@ -29,3 +29,9 @@ Custom filesystem-provider operations race their host promise against disposal.
 Closing does not wait for a hung provider. Late completions cannot allocate,
 write results, or finish a proxy call into terminated Gecko threads; the host
 provider may still complete its own I/O independently.
+
+The mutable Emscripten Module uses dictionary storage with Object methods. A Chromium
+heap snapshot after the third open/close found an ordinary object literal's
+allocation-site feedback retaining a shape descriptor, an export getter, and
+its runtime/heap. A dictionary avoids that shared shape; the browser lifecycle
+probe checks repeated heap collection, not just terminated worker counts.

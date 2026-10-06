@@ -476,7 +476,11 @@ export class Gecko {
     else if (this.opts.fs) greProv = this.opts.fs;
     // else: no `fs` -> the baked gecko.data only.
 
-    const moduleOpts: Record<string, unknown> = {
+    // Emscripten installs per-runtime export getters on this object. A normal
+    // object literal lets V8's allocation-site/shape cache retain those getters
+    // (and their Wasm heap) after repeated initialization. Use a dictionary with
+    // no shared literal shape; it remains owned only by this runtime.
+    const moduleOpts: Record<string, unknown> = Object.assign(Object.create(null), {
       print: (t: string) => {
         if (typeof t === 'string' && t.includes('READY cmd=')) resolveReady();
         print(t);
@@ -556,7 +560,10 @@ export class Gecko {
         if (profProv) { mm.geckoProviders[PROFILE_MOUNT] = profProv; m.ENV['GECKO_PROFILE_PROVIDER'] = '1'; }
         if (greProv) { mm.geckoProviders[GRE_MOUNT] = greProv; m.ENV['GECKO_GRE_PROVIDER'] = '1'; }
       }],
-    };
+    });
+    // Keep dictionary storage, but restore Object methods: the generated
+    // pthread loader calls Module.propertyIsEnumerable when copying handlers.
+    Object.setPrototypeOf(moduleOpts, Object.prototype);
     // pthread workers load the (bundled) runtime from this Blob (emscripten 6.0.x spawns
     // them from the main module, no separate *.worker.js). The wasm is supplied directly
     // via instantiateWasm (below) and gecko.data via getPreloadedPackage, so emscripten
