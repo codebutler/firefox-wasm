@@ -24,7 +24,7 @@ if (!ENVIRONMENT_IS_PTHREAD) {
     if (typeof WISP !== 'undefined') attempt(function () { WISP.dispose(); });
     if (typeof JSEvents !== 'undefined') attempt(function () { JSEvents.removeAllEventListeners(); });
     if (typeof GL !== 'undefined') {
-      for (var context of GL.contexts || []) {
+      for (var context of Object.values(GL.contexts || {})) {
         if (context) attempt(function () { GL.deleteContext(context.handle); });
       }
       GL.offscreenCanvases = {};

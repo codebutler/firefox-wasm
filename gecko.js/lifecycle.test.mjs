@@ -9,10 +9,10 @@ const source = stripTypeScriptTypes(readFileSync(new URL('./js/index.ts', import
   .replace(/^import .*;$/gm, '').replace('export class Gecko', 'class Gecko').replace('export default Gecko;', '')) + '\nglobalThis.Gecko = Gecko;';
 const never = () => new Promise(() => {});
 function wrapper(factory = never) {
-  const revoked = [], frames = new Map();
+  const revoked = [], warnings = [], frames = new Map();
   let nextFrame = 0;
   const context = vm.createContext({
-    console, Blob, AbortController, DOMException, TextEncoder, TextDecoder,
+    console: {...console, warn(...args) {warnings.push(args);}}, Blob, AbortController, DOMException, TextEncoder, TextDecoder,
     Uint8Array, Int32Array, Atomics, performance, setTimeout, clearTimeout,
     URL: { createObjectURL() { return 'blob:engine'; }, revokeObjectURL(url) { revoked.push(url); } },
     requestAnimationFrame(fn) { frames.set(++nextFrame, fn); return nextFrame; },
@@ -25,8 +25,19 @@ function wrapper(factory = never) {
   context.factory = factory;
   vm.runInContext('loadEngine = async () => factory', context);
   const canvas = { width: 20, height: 20, getContext() { return {}; }, style: {} };
-  return { g: new context.Gecko({canvas, wasm: {url: '/engine.wasm'}, forwardInput: false}), revoked, frames };
+  return { g: new context.Gecko({canvas, wasm: {url: '/engine.wasm'}, forwardInput: false}), revoked, frames, warnings };
 }
+
+test('a runtime hook failure cannot interrupt wrapper resource release', () => {
+  const {g, revoked, warnings} = wrapper();
+  g.mod = {geckoDispose() {throw Error('bad runtime hook');}};
+  g.engineUrl = 'blob:engine';
+  g.destroy();
+  assert.equal(g.mod, null);
+  assert.equal(g.engineUrl, null);
+  assert.deepEqual(revoked, ['blob:engine']);
+  assert.equal(warnings.length, 1);
+});
 
 test('destroy during unresolved factory cancels init and releases early runtime', async () => {
   let module, stopped = 0, started;
@@ -70,12 +81,12 @@ test('destroy settles in-flight commands, coalesced commands, and paint wait', a
   assert.equal(g.queue.length, 0); assert.equal(g.mod, null);
 });
 
-for (const initialized of [false, true]) test(`runtime cleanup owns only its resources, initialized=${initialized}`, () => {
+for (const initialized of [false, true]) for (const pthreads of [false, true]) test(`runtime cleanup owns only its resources, initialized=${initialized}, pthreads=${pthreads}`, () => {
   const calls = [];
   const context = { ENVIRONMENT_IS_PTHREAD: false, Module: {}, runtimeInitialized: initialized, ABORT: false,
     PThread: {pthreads: {}, unusedWorkers: [], terminateRuntime() {calls.push('runtime');}, terminateAllThreads() {calls.push('workers');}},
     WISP: {dispose() {calls.push('sockets');}}, JSEvents: {removeAllEventListeners() {calls.push('listeners');}},
-    GL: {contexts: [null,{handle:1}], deleteContext(h) {calls.push('gl'+h);}},
+    GL: {contexts: pthreads ? {1:{handle:1}} : [null,{handle:1}], deleteContext(h) {calls.push('gl'+h);}},
     specialHTMLTargets: {'#screen':{},screen:{}}, console: {warn() {calls.push('warning');}} };
   vm.runInNewContext(runtimeSource, context);
   context.Module.geckoCleanup.push(() => calls.push('timer'), () => {throw Error('bad cleanup');});

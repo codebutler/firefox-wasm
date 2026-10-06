@@ -783,7 +783,8 @@ export class Gecko {
     for (const d of this.detach.splice(0)) d();
     const runtime = this.mod ?? this.startingModule;
     this.mod = this.startingModule = null;
-    runtime?.geckoDispose?.();
+    try { runtime?.geckoDispose?.(); }
+    catch (error) { console.warn('[gecko-lifecycle] cleanup failed', error); }
     if (this.engineUrl) URL.revokeObjectURL(this.engineUrl);
     this.engineUrl = null;
     this.cmd = 0;
