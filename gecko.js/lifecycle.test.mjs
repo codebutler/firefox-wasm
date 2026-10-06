@@ -43,6 +43,8 @@ test('destroy during unresolved factory cancels init and releases early runtime'
   let module, stopped = 0, started;
   const reached = new Promise(r => started = r);
   const {g, revoked} = wrapper(options => {
+    // The generated pthread loader uses this method to forward print handlers.
+    assert.equal(options.propertyIsEnumerable('print'), true);
     module = options; options.geckoDispose = () => stopped++;
     started(); return never();
   });
