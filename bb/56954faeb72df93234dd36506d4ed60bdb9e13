@@ -1,0 +1,21 @@
+gecko.js/lib/provider-fs.js
+  s_6e03fa3fb4523e::t_c4961e6e552089 16-30,32,35,38,46,48,51-52,56,63,65,69,71,76,78,83-84,87-88,94,99,101,103-104,109,111,113-114,119,121,123-124
+gecko.js/provider-fs.test.mjs
+  s_6e03fa3fb4523e::t_809e04441ee5cf 1-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bb56954faeb72df93234dd36506d4ed60bdb9e13",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
