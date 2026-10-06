@@ -103,3 +103,23 @@ test('coarse clock is owned per runtime and stops retaining each heap', () => {
   assert.equal(Atomics.load(new BigInt64Array(b.wasmMemory.buffer),1),123000000n);
   b.Module.geckoCleanup[0](); assert.equal(timers.size,0);
 });
+
+test('late native prompt/picker completion never allocates or wakes a terminated runtime', async () => {
+  const cpp = readFileSync(new URL('./src/embed-chrome.cpp', import.meta.url), 'utf8');
+  const body = cpp.slice(cpp.indexOf('  MAIN_THREAD_EM_ASM({') + '  MAIN_THREAD_EM_ASM({'.length,
+    cpp.indexOf('  }, json.BeginReading()'));
+  for (const rejects of [false, true]) {
+    let resolve, reject;
+    const pending = new Promise((a,b) => {resolve=a;reject=b;});
+    const heap = new Int32Array(new SharedArrayBuffer(128));
+    const module = {geckoOnPicker: () => pending, _malloc() {assert.fail('allocation after close');},
+      _gecko_prompt_wake() {assert.fail('wake after close');}};
+    vm.runInNewContext(body, {Module:module, $0:'{}', $1:0, $2:16, $3:'geckoOnPicker',
+      UTF8ToString: value=>value, HEAP32:heap, HEAPU32:heap, HEAPU8:heap, Atomics, TextEncoder, Uint8Array});
+    await new Promise(r=>setTimeout(r,0));
+    module.geckoDisposed=true;
+    if(rejects)reject(Error('cancelled'));else resolve({ok:true,value:'late'});
+    await new Promise(r=>setTimeout(r,0));
+    assert.equal(heap.some(value=>value!==0),false);
+  }
+});

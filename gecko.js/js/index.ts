@@ -796,7 +796,7 @@ export class Gecko {
       this.gpuWrap.replaceWith(this.canvas);
       this.gpuWrap = null;
     }
-    this.opts.onPopups?.([]);
+    try { this.opts.onPopups?.([]); } catch { /* embedder cleanup must not interrupt teardown */ }
     // Cancellation ends the wait, without inventing a painted frame or leaving
     // an embedder's firstPaint await permanently retained.
     this.resolveFirstPaint();
