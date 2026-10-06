@@ -1,0 +1,33 @@
+.github/workflows/build-release.yml
+  s_6e03fa3fb4523e::t_dec9bf4aeefd4b 273-278
+gecko.js/check-nspr-sockets.py
+  s_6e03fa3fb4523e::t_d669c08b13bf4b 1-71
+gecko.js/nspr-socket.test.c
+  s_6e03fa3fb4523e::t_103d1e4993245e 1-75
+patches/0014-emscripten-nspr-ipv6.patch
+  s_a6fa0e0a38c9d4::t_13f745b31505c1 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0d638b2c2b142c86a2e3955f70abf0575f80d1ef",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_a6fa0e0a38c9d4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1098d-5b59-79b0-ba55-f8788f3beffc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
