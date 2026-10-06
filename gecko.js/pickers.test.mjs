@@ -16,7 +16,7 @@ function bridge() {
   }
   class NativeDateTimePickerChild { openPickerImpl() { return {}; } }
   const global = vm.createContext({
-    console, File, Uint8Array, atob, JSWindowActorParent, NativeDateTimePickerChild,
+    console, File, Uint8Array, atob, JSWindowActorParent, NativeDateTimePickerChild, chooseSave: () => null,
     Cu: { importGlobalProperties() {} },
     Ci: { nsIFilePicker: { returnOK: 0, returnCancel: 1, filterAll: 1 } },
     Cr: { NS_ERROR_FAILURE: 1 },
@@ -39,6 +39,7 @@ function bridge() {
   });
   const source = readFileSync(new URL('./chrome/EmbedPickers.sys.mjs', import.meta.url), 'utf8')
     .replace(/import \{ DateTimePickerChild[\s\S]*?;/, '')
+    .replace(/import \{ chooseSave \}[^;]*;/, '')
     .replace(/export class (DateTimePickerChild|DateTimePickerParent)/g, 'globalThis.$1 = class $1');
   vm.runInContext(source, global);
   return { calls, cancelled, sent, context, page, actors, observers,

@@ -3,6 +3,7 @@
 // only the UI and the bytes of files the user explicitly selected.
 import { DateTimePickerChild as NativeDateTimePickerChild } from
   "moz-src:///toolkit/actors/DateTimePickerChild.sys.mjs";
+import { chooseSave } from "resource://gre/modules/EmbedSaves.sys.mjs";
 
 Cu.importGlobalProperties(["File", "atob"]);
 let nextId = 0;
@@ -53,13 +54,14 @@ class FilePicker {
   init(context, title, mode, global) {
     Object.assign(this, { context, title, mode, window: global || context?.window || globalThis });
   }
-  isModeSupported(mode) { return Promise.resolve(mode === 0 || mode === 3); }
+  isModeSupported(mode) { return Promise.resolve(mode === 0 || mode === 1 || mode === 3); }
   appendFilters(mask) { if (mask & Ci.nsIFilePicker.filterAll) this.filters.push({ title: "All files", pattern: "*" }); }
   appendFilter(title, pattern) { this.filters.push({ title, pattern }); }
   appendRawFilter(filter) { this.rawFilters.push(filter); }
-  get file() { return null; }
-  get fileURL() { return null; }
-  get files() { return enumerator([]); }
+  saveFile = null;
+  get file() { return this.saveFile; }
+  get fileURL() { return this.saveFile ? Services.io.newFileURI(this.saveFile) : null; }
+  get files() { return enumerator(this.saveFile ? [this.saveFile] : []); }
   get domFileOrDirectory() { return this.selected[0] || null; }
   get domFileOrDirectoryEnumerator() { return enumerator(this.selected); }
   get domFilesInWebKitDirectory() { return enumerator([]); }
@@ -69,6 +71,12 @@ class FilePicker {
     Services.tm.dispatchToMainThread(() => {
       let code = Ci.nsIFilePicker.returnCancel;
       try {
+        if (this.mode === 1) {
+          this.saveFile = chooseSave(this.context, { title: this.title, name: this.defaultString,
+            extension: this.defaultExtension });
+          if (this.saveFile) code = Ci.nsIFilePicker.returnOK;
+          return;
+        }
         if (this.mode !== 0 && this.mode !== 3) return;
         const result = request({ kind: "file", title: this.title,
           multiple: this.mode === 3, filters: this.filters, filterIndex: this.filterIndex,

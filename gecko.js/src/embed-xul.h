@@ -183,6 +183,7 @@ bool xul_load(const char* url, int width, int height);       // embed-browser.cp
 void EnsureSize(int width, int height);                      // embed-browser.cpp
 bool RunChromeScript(const nsACString& aScript, char** aOutResult = nullptr);
 bool SetEmbedTheme(const char* json);
+bool SaveEmbedURL(const char* json);
 
 uint8_t* xul_paint(int width, int height);                   // embed-paint.cpp
 void gpu_ensure_active(int width, int height);               // embed-paint.cpp

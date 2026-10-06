@@ -161,7 +161,8 @@ static bool RegisterSelectActor() {
   options.setFileAndLine("embed-select-init", 1);
   constexpr char script[] =
       "ChromeUtils.importESModule('resource://gre/modules/EmbedSelect.sys.mjs');"
-      "ChromeUtils.importESModule('resource://gre/modules/EmbedPickers.sys.mjs');";
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedPickers.sys.mjs');"
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedSaves.sys.mjs');";
   JS::SourceText<mozilla::Utf8Unit> source;
   if (!source.init(cx, script, sizeof(script) - 1, JS::SourceOwnership::Borrowed))
     return false;
@@ -187,6 +188,32 @@ bool SetEmbedTheme(const char* json) {
   JS::Rooted<JS::Value> value(cx, JS::StringValue(argument));
   return JS::Call(cx, JS::UndefinedHandleValue, function,
                   JS::HandleValueArray(value), &result);
+}
+
+bool SaveEmbedURL(const char* json) {
+  nsCOMPtr<mozIDOMWindowProxy> proxy = do_GetInterface(g_docShell);
+  auto* outer = proxy ? nsPIDOMWindowOuter::From(proxy) : nullptr;
+  auto* inner = outer ? outer->GetCurrentInnerWindow() : nullptr;
+  JSObject* window = inner ? inner->AsGlobal()->GetGlobalJSObject() : nullptr;
+  if (!window) return false;
+  mozilla::dom::AutoJSAPI jsapi;
+  if (!jsapi.Init(xpc::PrivilegedJunkScope())) return false;
+  JSContext* cx = jsapi.cx();
+  JS::CompileOptions options(cx);
+  options.setFileAndLine("embed-save", 1);
+  constexpr char script[] =
+      "ChromeUtils.importESModule('resource://gre/modules/EmbedSaves.sys.mjs').saveURL";
+  JS::SourceText<mozilla::Utf8Unit> source;
+  if (!source.init(cx, script, sizeof(script) - 1, JS::SourceOwnership::Borrowed)) return false;
+  JS::Rooted<JS::Value> function(cx), result(cx);
+  if (!JS::Evaluate(cx, options, source, &function)) return false;
+  JS::RootedValueArray<2> args(cx);
+  JS::Rooted<JSString*> argument(cx, JS_NewStringCopyUTF8Z(cx, JS::ConstUTF8CharsZ(json, strlen(json))));
+  if (!argument) return false;
+  args[0].setString(argument);
+  args[1].setObject(*window);
+  if (!JS_WrapValue(cx, args[1])) return false;
+  return JS::Call(cx, JS::UndefinedHandleValue, function, args, &result);
 }
 
 static nsIDocShell* EnsureBrowser(int width, int height) {

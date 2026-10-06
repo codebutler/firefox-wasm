@@ -11,6 +11,7 @@
 // artifact the consumer serves is the wasm (GeckoOptions.wasm). emscripten 6.0.x no longer emits a separate
 // *.worker.js; pthread workers spawn from the main module via mainScriptUrlOrBlob.
 import { encodePickerReply } from './picker-encoding';
+import { assembleSave } from './save-assembly';
 import geckoSource from '../wasm/gecko.js?source';
 import { ZSTDDecoder } from 'zstddec';
 // gecko.data is baked into this bundle, zstd-compressed (decoded at load with
@@ -176,6 +177,13 @@ export interface GeckoOptions {
    */
   /** Native file/color/date picker. null cancels; signal aborts on navigation or destruction. */
   onPicker?: (req: Record<string, unknown>, options: { signal: AbortSignal }) => Promise<unknown>;
+  /** Choose a host destination; no host path is returned to Gecko. */
+  onSave?: (req: { name: string; title?: string; type?: string; url?: string },
+    options: { signal: AbortSignal }) => Promise<{
+      name: string;
+      write(data: Blob): Promise<void>;
+      error(message: string): Promise<void>;
+    } | null>;
   onPrompt?: (req: Record<string, unknown>) => Promise<{
     ok: boolean; value?: string; button?: number; user?: string; pass?: string;
   }>;
@@ -217,7 +225,7 @@ const OP = URLOFF + URL_CAPACITY,
   DX = OP + 40, DY = OP + 44, KEYVAL = OP + 48, CURSOR = KEYVAL + 64;
 
 const OP_LOAD = 0, OP_MOUSE = 1, OP_KEY = 2, OP_WHEEL = 3, OP_PAINT = 4, OP_EVAL = 5;
-const OP_CLIP_SET = 9, OP_ROLLUP = 10, OP_THEME = 11;
+const OP_CLIP_SET = 9, OP_ROLLUP = 10, OP_THEME = 11, OP_SAVE = 12;
 const MOD_ALT = 0x1, MOD_CTRL = 0x2, MOD_SHIFT = 0x4, MOD_META = 0x8;
 
 // Wheel deltas arrive in one of three units (WheelEvent.deltaMode): PIXEL (0),
@@ -309,6 +317,14 @@ export class Gecko {
   private queue: Cmd[] = [];
   private running = false;
   private pickers = new Map<string, AbortController>();
+  private saves = new Map<string, {
+    controller: AbortController;
+    target?: NonNullable<Awaited<ReturnType<NonNullable<GeckoOptions['onSave']>>>>;
+    chunks: Uint8Array<ArrayBuffer>[];
+    type: string;
+    error?: string;
+    finishing?: boolean;
+  }>();
   private destroyed = false;
   private lifetime = new AbortController();
   private initializing: Promise<void> | null = null;
@@ -679,6 +695,58 @@ export class Gecko {
         this.pickers.delete(id);
       }
     };
+    const cancelSave = moduleOpts.geckoCancelSave = (id: string) => {
+      this.saves.get(id)?.controller.abort();
+      this.saves.delete(id);
+    };
+    moduleOpts.geckoChooseSave = async (req: { id: string; name: string; type?: string }) => {
+      if (this.destroyed || !this.opts.onSave) return { ok: false };
+      const controller = new AbortController();
+      const state = { controller, chunks: [] as Uint8Array<ArrayBuffer>[], type: req.type || '' };
+      this.saves.set(req.id, state);
+      try {
+        const target = await Promise.race([
+          Promise.resolve().then(() => this.opts.onSave!(req, { signal: controller.signal })),
+          new Promise<null>(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true })),
+        ]);
+        if (!target || controller.signal.aborted) {
+          cancelSave(req.id);
+          return { ok: false };
+        }
+        this.saves.get(req.id)!.target = target;
+        return { ok: true, value: JSON.stringify({ name: target.name }) };
+      } catch (error) {
+        console.error('[gecko-save]', error);
+        cancelSave(req.id);
+        return { ok: false };
+      }
+    };
+    moduleOpts.geckoSaveChunk = (id: string, chunk: Uint8Array<ArrayBuffer>) => {
+      const state = this.saves.get(id);
+      if (state && !state.controller.signal.aborted) state.chunks.push(chunk);
+    };
+    moduleOpts.geckoSaveError = (id: string, message: string) => {
+      const state = this.saves.get(id);
+      if (state) state.error = message;
+    };
+    moduleOpts.geckoFinishSave = async (req: { id: string; error?: string }) => {
+      const state = this.saves.get(req.id);
+      if (!state?.target || state.finishing || state.controller.signal.aborted) return { ok: false };
+      state.finishing = true;
+      try {
+        const error = req.error || state.error;
+        if (error) await state.target.error(error);
+        else {
+          const blob = await assembleSave(state.chunks, state.type, state.controller.signal);
+          if (state.controller.signal.aborted) return { ok: false };
+          await state.target.write(blob);
+        }
+        return { ok: !error };
+      } catch (error) {
+        if (!state.controller.signal.aborted) await state.target.error(String(error));
+        return { ok: false };
+      } finally { cancelSave(req.id); }
+    };
     this.alive();
     // The factory mutates this exact object before allocating its first worker.
     // Own it now, so destroy can stop a boot whose factory/READY never settles.
@@ -705,6 +773,8 @@ export class Gecko {
     // Native pickers can hold a nested Gecko event loop. Withdraw their host
     // UI before queuing navigation, so load never waits for a stale selection.
     for (const controller of this.pickers.values()) controller.abort();
+    for (const state of this.saves.values()) state.controller.abort();
+    this.saves.clear();
     this.alive();
     await this.run({ op: OP_LOAD, url });
     this.alive();
@@ -746,6 +816,13 @@ export class Gecko {
   async evalChrome(js: string): Promise<string> {
     const r = await this.run({ op: OP_EVAL, url: js });
     return typeof r === 'string' ? r : '';
+  }
+
+  /** Save through the privileged engine, preserving its cookies and principals. */
+  async save(url: string, options: { document?: boolean } = {}): Promise<void> {
+    const json = JSON.stringify({ url, document: !!options.document });
+    if (this.enc.encode(json).length >= URL_CAPACITY) throw new RangeError('Save URL is too large');
+    if (await this.run({ op: OP_SAVE, url: json }) === null) throw new Error('Could not start save');
   }
 
   /** Session history back (content `history.back()`). */
@@ -796,6 +873,8 @@ export class Gecko {
     this.lifetime.abort(new DOMException('Gecko was destroyed', 'AbortError'));
     for (const controller of this.pickers.values()) controller.abort();
     this.pickers.clear();
+    for (const state of this.saves.values()) state.controller.abort();
+    this.saves.clear();
     if (this.paintFrame !== null) cancelAnimationFrame(this.paintFrame);
     this.paintFrame = null;
     for (const item of this.queue.splice(0)) item.resolve?.(null);
@@ -908,7 +987,7 @@ export class Gecko {
     set(KEYCODE, item.keyCode || 0);
     set(CHARCODE, item.charCode || 0);
     set(DX, item.deltaX || 0); set(DY, item.deltaY || 0);
-    if (item.op === OP_LOAD || item.op === OP_EVAL || item.op === OP_CLIP_SET || item.op === OP_THEME) {
+    if (item.op === OP_LOAD || item.op === OP_EVAL || item.op === OP_CLIP_SET || item.op === OP_THEME || item.op === OP_SAVE) {
       const bytes = this.enc.encode(item.url || '');
       if (bytes.length >= URL_CAPACITY) return null;
       u8().set(bytes, this.cmd + URLOFF); u8()[this.cmd + URLOFF + bytes.length] = 0;
@@ -937,7 +1016,7 @@ export class Gecko {
         ? this.dec.decode(new Uint8Array(u8().subarray(resPtr, resPtr + len)))
         : '';
     }
-    if (item.op === OP_THEME) return 0;
+    if (item.op === OP_THEME || item.op === OP_SAVE) return 0;
     const n = this.blit();
     if (item.op === OP_MOUSE) {
       const ck = i32()[(this.cmd + CURSOR) >> 2];

@@ -304,12 +304,68 @@ class EmbedPickerObserver final : public nsIObserver {
 };
 NS_IMPL_ISUPPORTS(EmbedPickerObserver, nsIObserver)
 
+// A save destination is represented by an opaque request ID. Only completed
+// temporary guest files cross to the host, in bounded binary copies (no JSON
+// encoding of the payload and no host filesystem paths in Gecko).
+class EmbedSaveObserver final : public nsIObserver {
+ public:
+  NS_DECL_ISUPPORTS
+  NS_IMETHOD Observe(nsISupports* subject, const char* topic,
+                     const char16_t* data) override {
+    NS_ConvertUTF16toUTF8 json(data);
+    if (!strcmp(topic, "gecko-embed-save-cancel")) {
+      MAIN_THREAD_EM_ASM({ Module['geckoCancelSave']?.(JSON.parse(UTF8ToString($0)).id); }, json.get());
+      return NS_OK;
+    }
+    if (!strcmp(topic, "gecko-embed-save-choose")) {
+      nsCOMPtr<nsISupportsString> result = do_QueryInterface(subject);
+      if (!result) return NS_ERROR_INVALID_ARG;
+      PromptReply reply;
+      HostPromptJson(json, reply, "geckoChooseSave");
+      return result->SetData(NS_ConvertUTF8toUTF16(reply.ok && reply.value ? reply.value : "null"));
+    }
+    nsCOMPtr<nsIFile> file = do_QueryInterface(subject);
+    if (file) {
+      nsAutoCString path;
+      nsresult rv = file->GetNativePath(path);
+      FILE* input = NS_SUCCEEDED(rv) ? fopen(path.get(), "rb") : nullptr;
+      bool failed = !input;
+      if (input) {
+        uint8_t chunk[65536];
+        size_t count;
+        while ((count = fread(chunk, 1, sizeof(chunk), input))) {
+          MAIN_THREAD_EM_ASM({
+            Module['geckoSaveChunk']?.(JSON.parse(UTF8ToString($0)).id, HEAPU8.slice($1, $1 + $2));
+          }, json.get(), chunk, count);
+        }
+        failed = ferror(input);
+        fclose(input);
+      }
+      if (failed) {
+        MAIN_THREAD_EM_ASM({
+          Module['geckoSaveError']?.(JSON.parse(UTF8ToString($0)).id, 'Could not read the completed download.');
+        }, json.get());
+      }
+    }
+    PromptReply reply;
+    HostPromptJson(json, reply, "geckoFinishSave");
+    return NS_OK;
+  }
+ private:
+  ~EmbedSaveObserver() = default;
+};
+NS_IMPL_ISUPPORTS(EmbedSaveObserver, nsIObserver)
+
 void RegisterEmbedChrome() {
   nsCOMPtr<nsIObserverService> observers = mozilla::services::GetObserverService();
   if (observers) {
     RefPtr<EmbedPickerObserver> picker = new EmbedPickerObserver();
     observers->AddObserver(picker, "gecko-embed-picker", false);
     observers->AddObserver(picker, "gecko-embed-picker-cancel", false);
+    RefPtr<EmbedSaveObserver> save = new EmbedSaveObserver();
+    observers->AddObserver(save, "gecko-embed-save-choose", false);
+    observers->AddObserver(save, "gecko-embed-save-cancel", false);
+    observers->AddObserver(save, "gecko-embed-save-finish", false);
   }
   nsCOMPtr<nsIComponentRegistrar> reg;
   NS_GetComponentRegistrar(getter_AddRefs(reg));
