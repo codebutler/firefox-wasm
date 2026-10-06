@@ -24,3 +24,8 @@ URLs or page content. `node --test gecko.js/*.test.mjs` includes cancellation,
 command settlement, per-instance clock ownership and late socket callbacks.
 The Surf integration also runs real-engine close/reopen and close-during-boot
 checks against the exact packaged image.
+
+Custom filesystem-provider operations race their host promise against disposal.
+Closing does not wait for a hung provider. Late completions cannot allocate,
+write results, or finish a proxy call into terminated Gecko threads; the host
+provider may still complete its own I/O independently.
