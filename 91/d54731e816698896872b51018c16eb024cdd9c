@@ -1,0 +1,33 @@
+gecko.js/lifecycle.test.mjs
+  s_6e03fa3fb4523e::t_ef37fa20484ddd 12,15,28,31-40
+  s_6e03fa3fb4523e::t_4a5bdf9875048a 84,89
+  s_c4b48ba8b8282d::t_35b326a5d4be29 41
+gecko.js/js/index.ts
+  s_6e03fa3fb4523e::t_028b55bfe3c8ca 786-787
+gecko.js/runtime-lifecycle.js
+  s_6e03fa3fb4523e::t_028b55bfe3c8ca 27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "91d54731e816698896872b51018c16eb024cdd9c",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_c4b48ba8b8282d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "35ce4a2d-c7af-4e97-af81-8e1ad377de96",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
