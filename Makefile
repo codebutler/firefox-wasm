@@ -33,7 +33,7 @@ FIREFOX_REF := f08e4aa189eb02015568aea1085dab77a187c330
 EMSDK          ?= $(ROOT)/emsdk
 EMSDK_VERSION  ?= 6.0.1
 EMSDK_STAMP    := $(EMSDK)/.wisp-patched
-WISP_PATCH_SRC := gecko.js/patch-emsdk-webgl.mjs gecko.js/patch-emsdk-wasmfs.mjs gecko.js/emsdk-patches/wisp_socket.h
+WISP_PATCH_SRC := gecko.js/patch-emsdk-webgl.mjs gecko.js/patch-emsdk-wasmfs.mjs $(wildcard gecko.js/emsdk-patches/*.h)
 
 # Engine patches: the JS->WASM JIT work lives in the pinned fork's
 # js/src/wasm/WasmJit*.{h,cpp} + config/run_spidermonkey_checks.py and is versioned HERE

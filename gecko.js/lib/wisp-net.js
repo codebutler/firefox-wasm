@@ -147,12 +147,10 @@ mergeInto(LibraryManager.library, {
         try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e2) {}
       }
     },
-    doConnect: function (id, ipBe, port) {
-      // ipBe is network order; on little-endian wasm byte 0 is the first octet.
-      var dotted = (ipBe & 0xff) + '.' + ((ipBe >>> 8) & 0xff) + '.' +
-                   ((ipBe >>> 16) & 0xff) + '.' + ((ipBe >>> 24) & 0xff);
-      var host = dotted;
-      try { if (DNS.lookup_addr) { var nm = DNS.lookup_addr(dotted); if (nm) host = nm; } } catch (e) {}
+    doConnect: function (id, host, port) {
+      // Synthetic DNS addresses (including IPv4-mapped IPv6, normalized by
+      // C++) resolve back to hostnames; real IP literals pass through unchanged.
+      try { if (DNS.lookup_addr) { var nm = DNS.lookup_addr(host); if (nm) host = nm; } } catch (e) {}
 
       var factory = WISP.customFactory();
       if (factory) { WISP.doConnectCustom(id, host, port, factory); return; }
@@ -231,8 +229,8 @@ mergeInto(LibraryManager.library, {
   wisp_open: function (id) { if (!WISP.customFactory()) WISP.ensureConn(); },
 
   wisp_connect__proxy: 'sync',
-  wisp_connect__deps: ['$WISP'],
-  wisp_connect: function (id, ipBe, port) { WISP.doConnect(id >>> 0, ipBe >>> 0, port >>> 0); },
+  wisp_connect__deps: ['$WISP', '$UTF8ToString'],
+  wisp_connect: function (id, host, port) { WISP.doConnect(id >>> 0, UTF8ToString(host), port >>> 0); },
 
   wisp_send__proxy: 'sync',
   wisp_send__deps: ['$WISP'],

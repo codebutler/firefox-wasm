@@ -1,0 +1,21 @@
+diff --git a/config/external/nspr/pr/moz.build b/config/external/nspr/pr/moz.build
+--- a/config/external/nspr/pr/moz.build
++++ b/config/external/nspr/pr/moz.build
+@@ -76,8 +76,15 @@
+         ASFLAGS += ["-x", "assembler-with-cpp"]
+         SOURCES += ["/nsprpub/pr/src/md/unix/os_SunOS_sparcv9.s"]
+ elif CONFIG["OS_TARGET"] == "EMSCRIPTEN":
+-    # emscripten presents a Linux-like POSIX environment. Single-threaded wasm,
+-    # so no thread-context-switch assembly; use the generic unix md source.
++    # Emscripten uses pthreads without thread-context-switch assembly.
++    # Its musl headers do not meet _linux.h's glibc/Android IPv6 test. The
++    # WasmFS socket bridge supports AF_INET6 directly; otherwise NSPR inserts
++    # an IPv6-to-IPv4 layer which rejects non-mapped addresses before connect.
++    DEFINES["_PR_INET6"] = True
++    DEFINES["_PR_HAVE_GETHOSTBYNAME2"] = True
++    # Keep the existing gethostbyname DNS fallback: Emscripten getaddrinfo
++    # rejects AI_ADDRCONFIG, which NSPR always requests. Hostname resolution
++    # remains delegated to the transport through synthetic IPv4 addresses.
+     DEFINES["LINUX"] = True
+     DEFINES["HAVE_FCNTL_FILE_LOCKING"] = True
+     DEFINES["HAVE_POINTER_LOCALTIME_R"] = True

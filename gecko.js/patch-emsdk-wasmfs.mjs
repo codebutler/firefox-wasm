@@ -50,7 +50,9 @@ function must(haystack, needle, label) {
 }
 
 // --- 1. install the backend headers ---------------------------------------
-copyFileSync(join(HERE, 'emsdk-patches', 'wisp_socket.h'), join(WASMFS, 'wisp_socket.h'));
+for (const header of ['wisp_socket.h', 'wisp_address.h']) {
+  copyFileSync(join(HERE, 'emsdk-patches', header), join(WASMFS, header));
+}
 copyFileSync(join(HERE, 'emsdk-patches', 'provider_backend.h'), join(WASMFS, 'provider_backend.h'));
 console.log('patch-emsdk-wasmfs: installed wisp_socket.h + provider_backend.h');
 

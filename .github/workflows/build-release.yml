@@ -261,7 +261,7 @@ jobs:
       # emsdk's bundled $EMSDK/upstream), so no shim or config generation is needed.
 
       - name: Check embedding transport behavior
-        run: node --test gecko.js/wisp-net.test.mjs gecko.js/engine-loader.test.mjs gecko.js/select-bridge.test.mjs gecko.js/theme-bridge.test.mjs
+        run: node --test gecko.js/*.test.mjs
 
       # Cached dist/include contains source symlinks. The fresh source checkout
       # must have the same verified patch series even when compilation is skipped.
@@ -269,6 +269,12 @@ jobs:
         run: |
           make firefox
           make firefox/.wj-patched
+
+      - name: Check WasmFS and NSPR socket behavior
+        run: |
+          make emsdk
+          bash gecko.js/check-wisp-sockets.sh
+          python3 gecko.js/check-nspr-sockets.py
 
       # Memory headroom safety net. Engine LTO is OFF by default (it needs >54 GiB and
       # OOM-killed this 8-core/~31 GiB runner), so the big remaining spike is wasm-opt

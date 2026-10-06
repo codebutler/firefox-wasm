@@ -41,6 +41,32 @@ trees that a basic embed doesn't need — notably the Firefox front-end (`browse
 | `onPopups` | optional; tight BGRA frames for `<select>` / autocomplete (`nsMenuPopupFrame`). Empty array = closed. Unset → canvas overlay |
 | `locateFile`, `print`, `printErr`, `width`, `height`, `forwardInput` | as named |
 
+### TCP destinations
+
+The socket bridge supports IPv4 and IPv6 for both `tcpTransport` and WISP.
+Transport callbacks receive a hostname or an unbracketed IP literal, plus a
+separate port. IPv4-mapped IPv6 addresses normalize to IPv4 at this boundary;
+Emscripten's synthetic addresses still resolve back to their original hostname.
+Socket address queries retain the original family. Scoped IPv6 destinations
+return `EOPNOTSUPP`: neither transport API supports choosing a network interface.
+
+### NSPR IPv6 configuration
+
+NSPR's Emscripten target uses the Linux platform headers, but their IPv6
+feature detection requires glibc or Android. Without `_PR_INET6`, NSPR wraps
+IPv6 sockets in an IPv6-to-IPv4 layer and rejects non-mapped destinations
+with `PR_NETWORK_UNREACHABLE_ERROR` before WasmFS receives `connect()`.
+Enable native IPv6 and the available `gethostbyname2` API for this target.
+Keep the established synthetic DNS path: Emscripten's `getaddrinfo` rejects
+`AI_ADDRCONFIG`, which NSPR always requests.
+
+The patch depends on this wrapper's family-aware WasmFS WISP backend.
+`gecko.js/check-nspr-sockets.py` compiles the pinned NSPR sources using the
+actual Emscripten `moz.build` declarations and tests both blocking and
+nonblocking connections through the production JavaScript bridge. It fails
+with the original platform configuration and passes with this patch. CI runs
+it and `gecko.js/check-wisp-sockets.sh` before compiling the complete engine.
+
 ### The `fs` provider
 
 `readdir(path)` returns child names (directories **suffixed with `/`**); `readFile(path)`

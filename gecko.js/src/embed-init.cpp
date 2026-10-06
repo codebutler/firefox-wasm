@@ -498,11 +498,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
         "security.data_uri.block_toplevel_data_uri_navigations", false);
     printf("xul_init: allowed top-level data: navigations\n");
 
-    // Force IPv4: emscripten SOCKFS builds its WebSocket URL as ws://addr:port and
-    // parses it with a regex that can't handle the colons in an IPv6 literal, so an
-    // AAAA/IPv6 connect attempt is unusable. WISP carries IPv4 fine.
-    mozilla::Preferences::SetBool("network.dns.disableIPv6", true);
-    printf("xul_init: disabled IPv6 (SOCKFS ws:// url can't encode IPv6 literals)\n");
+    // WasmFS forwards both address families to WISP / the embedder transport.
+    mozilla::Preferences::SetBool("network.dns.disableIPv6", false);
 
     // Disable browser services not needed for rendering that stall/crash in this
     // minimal embedding. The big one: Safe Browsing / tracking protection run the

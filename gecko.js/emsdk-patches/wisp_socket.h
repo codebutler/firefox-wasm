@@ -49,6 +49,7 @@
 #include "file.h"
 #include "file_table.h"
 #include "wasmfs.h"
+#include "wisp_address.h"
 
 namespace wasmfs {
 namespace wisp {
@@ -56,12 +57,12 @@ namespace wisp {
 // ---------------------------------------------------------------------------
 // JS hooks (defined in build/wisp-net.js). Called from C++ on the calling
 // thread; the js-library marks them proxied to the thread that owns the WISP
-// WebSocket, so they behave as fire-and-forget posts. `ip` is big-endian
-// (network order) IPv4; `port` is host order.
+// WebSocket. The host string is copied during the synchronous proxy call;
+// it is an IPv4/IPv6 literal without URL brackets. `port` is host order.
 // ---------------------------------------------------------------------------
 extern "C" {
 void wisp_open(uint32_t id);
-void wisp_connect(uint32_t id, uint32_t ip_be, uint32_t port);
+void wisp_connect(uint32_t id, const char* host, uint32_t port);
 void wisp_send(uint32_t id, const uint8_t* buf, uint32_t len);
 void wisp_close(uint32_t id);
 }
@@ -123,11 +124,10 @@ public:
     std::lock_guard<std::recursive_mutex> g(mutex);
     return sendLocked(buf, len);
   }
-  void startConnect(uint32_t ipBe, uint16_t port) {
+  void startConnect(const SocketAddress& address) {
     {
       std::lock_guard<std::recursive_mutex> g(mutex);
-      peerIpBe = ipBe;
-      peerPort = port;
+      peer = address;
       connecting = true;
     }
     // CRITICAL: release the mutex before proxying. wisp_connect is sync-proxied
@@ -138,7 +138,8 @@ public:
     // -- and the main browser thread cannot Atomics.wait, so it busy-spins
     // forever: a hard deadlock. (The send/recv paths are safe: doSend/doClose on
     // the main thread never re-lock this mutex.)
-    wisp_connect(id, ipBe, port);
+    char host[INET6_ADDRSTRLEN];
+    wisp_connect(id, address.transportHost(host), address.port());
   }
   int takeError() { // SO_ERROR: read-and-clear
     std::lock_guard<std::recursive_mutex> g(mutex);
@@ -146,10 +147,9 @@ public:
     soError = 0;
     return e;
   }
-  void getPeer(uint32_t* ipBe, uint16_t* port) {
+  SocketAddress getPeer() {
     std::lock_guard<std::recursive_mutex> g(mutex);
-    *ipBe = peerIpBe;
-    *port = peerPort;
+    return peer;
   }
 
   // ---- poll readiness (locks internally) ----
@@ -221,8 +221,7 @@ private:
   bool connected = false;
   bool eof = false; // peer sent FIN / stream closed
   int soError = 0;  // pending SO_ERROR
-  uint32_t peerIpBe = 0;
-  uint16_t peerPort = 0;
+  SocketAddress peer;
 
   // Both assume the File mutex is held.
   ssize_t drainLocked(uint8_t* buf, size_t len) {
@@ -287,11 +286,10 @@ inline int do_socket(int domain, int type, int protocol) {
 inline int do_connect(int fd, intptr_t addr, socklen_t len) {
   auto s = socketFromFd(fd);
   if (!s) return -ENOTSOCK;
-  if (!addr || (size_t)len < sizeof(sockaddr_in)) return -EINVAL;
-  auto* sa = (sockaddr_in*)addr;
-  uint32_t ipBe = (uint32_t)sa->sin_addr.s_addr; // network order
-  uint16_t port = ntohs(sa->sin_port);
-  s->startConnect(ipBe, port);
+  SocketAddress address;
+  int error = address.parse(s->domain, (const sockaddr*)addr, len);
+  if (error) return error;
+  s->startConnect(address);
   // Non-blocking connect: Necko polls for POLLOUT, which we raise once the WISP
   // stream is established (markConnected from the JS side).
   return -EINPROGRESS;
@@ -308,16 +306,11 @@ inline ssize_t do_recvfrom(int fd, intptr_t buf, size_t len, int /*flags*/,
                            intptr_t addr, intptr_t alen) {
   auto s = socketFromFd(fd);
   if (!s) return -ENOTSOCK;
+  if (addr && !alen) return -EFAULT;
   ssize_t r = s->recvLocking((uint8_t*)buf, len);
   if (r >= 0 && addr) {
-    uint32_t ipBe;
-    uint16_t port;
-    s->getPeer(&ipBe, &port);
-    auto* sa = (sockaddr_in*)addr;
-    sa->sin_family = AF_INET;
-    sa->sin_port = htons(port);
-    sa->sin_addr.s_addr = ipBe;
-    if (alen) *(socklen_t*)alen = sizeof(sockaddr_in);
+    int error = s->getPeer().copyTo((sockaddr*)addr, (socklen_t*)alen);
+    if (error) return error;
   }
   return r;
 }
@@ -384,29 +377,14 @@ inline int do_setsockopt(int /*fd*/, int /*level*/, int /*optname*/,
 inline int do_getpeername(int fd, intptr_t addr, intptr_t len) {
   auto s = socketFromFd(fd);
   if (!s) return -ENOTSOCK;
-  if (!addr || !len || *(socklen_t*)len < sizeof(sockaddr_in)) return -EINVAL;
-  uint32_t ipBe;
-  uint16_t port;
-  s->getPeer(&ipBe, &port);
-  auto* sa = (sockaddr_in*)addr;
-  sa->sin_family = AF_INET;
-  sa->sin_port = htons(port);
-  sa->sin_addr.s_addr = ipBe;
-  *(socklen_t*)len = sizeof(sockaddr_in);
-  return 0;
+  return s->getPeer().copyTo((sockaddr*)addr, (socklen_t*)len);
 }
 
-// getsockname: we have no local bind; report 0.0.0.0:0.
+// No local bind is modeled; report the wildcard in the socket's family.
 inline int do_getsockname(int fd, intptr_t addr, intptr_t len) {
   auto s = socketFromFd(fd);
   if (!s) return -ENOTSOCK;
-  if (!addr || !len || *(socklen_t*)len < sizeof(sockaddr_in)) return -EINVAL;
-  auto* sa = (sockaddr_in*)addr;
-  sa->sin_family = AF_INET;
-  sa->sin_port = 0;
-  sa->sin_addr.s_addr = 0;
-  *(socklen_t*)len = sizeof(sockaddr_in);
-  return 0;
+  return SocketAddress::wildcard(s->domain).copyTo((sockaddr*)addr, (socklen_t*)len);
 }
 
 // ---------------------------------------------------------------------------
