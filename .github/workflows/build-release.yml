@@ -270,6 +270,12 @@ jobs:
           make firefox
           make firefox/.wj-patched
 
+      - name: Check WasmFS and NSPR socket behavior
+        run: |
+          make emsdk
+          bash gecko.js/check-wisp-sockets.sh
+          python3 gecko.js/check-nspr-sockets.py
+
       # Memory headroom safety net. Engine LTO is OFF by default (it needs >54 GiB and
       # OOM-killed this 8-core/~31 GiB runner), so the big remaining spike is wasm-opt
       # -O3 over the ~250 MB module at the final relink. Adding swap lets a peak above
@@ -345,7 +351,6 @@ jobs:
       - name: "Build the gecko.js package (emcc link + wasm-opt + rspack)"
         run: |
           make emsdk
-          bash gecko.js/check-wisp-sockets.sh
           node gecko.js/check-webgl-contexts.mjs
           RELEASE=1 bash gecko.js/check-embedder.sh
           make libxul RELEASE=1
