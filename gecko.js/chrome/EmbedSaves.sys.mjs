@@ -6,6 +6,9 @@ const saves = new Map();
 const byPath = new Map();
 const abortCode = Cr.NS_BINDING_ABORTED;
 Services.prefs.setBoolPref("browser.download.useDownloadDir", false);
+const debug = (...detail) => {
+  if (Services.env.get("GECKO_SAVE_DEBUG") === "1") console.log("[embed-save]", ...detail);
+};
 
 function host(topic, data, subject = null) {
   Services.obs.notifyObservers(subject, topic, JSON.stringify(data));
@@ -15,16 +18,24 @@ function nameOnly(value) {
   return name && name !== "." && name !== ".." ? name : "download";
 }
 function remove(state) {
+  debug("release", state.id, state.file.path, state.payload?.path);
   saves.delete(state.id);
   byPath.delete(state.file.path);
   state.window?.removeEventListener("pagehide", state.cancel);
+  // Helper-app downloads can finish before a destination is chosen; their
+  // completed .part file may still live outside our destination directory.
+  if (state.payload && state.payload.path !== state.file.path) {
+    try { state.payload.remove(false); } catch {}
+  }
   try { state.file.parent.remove(true); } catch {}
 }
 export function chooseSave(context, options = {}) {
   const id = String(++sequence);
+  debug("choose", id, options.name, options.url);
   const window = context?.window;
   let cancelled = false;
   const cancel = () => {
+    debug("cancel", id);
     cancelled = true;
     host("gecko-embed-save-cancel", { id });
     const state = saves.get(id);
@@ -52,6 +63,7 @@ export function chooseSave(context, options = {}) {
     const state = { id, file, window, cancel, cancelled: false, cancelable: null };
     saves.set(id, state);
     byPath.set(file.path, state);
+    debug("destination", id, file.path);
     return file;
   } catch (error) {
     window?.removeEventListener("pagehide", cancel);
@@ -61,26 +73,32 @@ export function chooseSave(context, options = {}) {
 }
 function finish(state, status) {
   if (!state || state.cancelled || !saves.has(state.id)) return;
+  debug("finish", state.id, status, (state.payload || state.file).path);
   try {
     host("gecko-embed-save-finish", {
       id: state.id,
       ...(Components.isSuccessCode(status) ? {} : { error: `Download failed (0x${(status >>> 0).toString(16)}).` }),
-    }, Components.isSuccessCode(status) ? state.file : null);
+    }, Components.isSuccessCode(status) ? state.payload || state.file : null);
   } finally { remove(state); }
 }
 
 class Transfer {
   QueryInterface = ChromeUtils.generateQI(["nsITransfer", "nsIWebProgressListener", "nsIWebProgressListener2"]);
   state = null;
-  init(_source, _original, target, _name, _mime, _time, _temp, cancelable) {
+  init(_source, _original, target, _name, _mime, _time, temp, cancelable) {
     this.state = byPath.get(target.QueryInterface(Ci.nsIFileURL).file.path);
     if (!this.state) { cancelable.cancel(abortCode); return; }
     this.state.cancelable = cancelable;
+    // The legacy download frontend normally moves this completed part file
+    // to target. Embedders export it directly once STATE_STOP is delivered.
+    this.state.payload = temp;
+    debug("transfer", this.state.id, this.state.file.path, temp?.path);
   }
   initWithBrowsingContext(source, target, name, mime, time, temp, cancelable) {
     this.init(source, null, target, name, mime, time, temp, cancelable);
   }
   onStateChange(_progress, _request, flags, status) {
+    debug("state", this.state?.id, flags, status);
     if ((flags & Ci.nsIWebProgressListener.STATE_STOP) && (flags & Ci.nsIWebProgressListener.STATE_IS_NETWORK)) {
       const state = this.state;
       this.state = null;

@@ -21,6 +21,7 @@ function bridge() {
   }
   const uri = spec => ({ spec, fileName: 'file.bin', QueryInterface() { return this; } });
   const scope = vm.createContext({ console, Promise, Map, JSON, Services: {
+    env: { get() { return ''; } },
     prefs: { setBoolPref() {} },
     tm: { dispatchToMainThread(fn) { deferred.push(fn); } },
     io: { newURI: uri },
@@ -85,14 +86,16 @@ test('helper launcher retains original download and completed transfer reaches h
   dialog.show(launcher); b.flush();
   assert.ok(launcher.file);
   const transfer = b.component('transfer');
-  transfer.initWithBrowsingContext(launcher.source, { QueryInterface() { return { file: launcher.file }; } }, '', null, 0, null, launcher);
+  const partFile = { path: '/tmp/native-download.part', remove() { this.removed = true; } };
+  transfer.initWithBrowsingContext(launcher.source, { QueryInterface() { return { file: launcher.file }; } }, '', null, 0, partFile, launcher);
   transfer.onStateChange(null, null, 1, 0);
   assert.equal(b.calls.filter(c => c.topic.endsWith('-finish')).length, 0);
   transfer.onStateChange(null, null, 3, 0);
   transfer.onStateChange(null, null, 3, 0);
   const finishes = b.calls.filter(c => c.topic.endsWith('-finish'));
   assert.equal(finishes.length, 1);
-  assert.equal(finishes[0].subject, launcher.file);
+  assert.equal(finishes[0].subject, partFile);
+  assert.equal(partFile.removed, true);
   assert.equal(b.saves.size, 0);
   assert.equal(launcher.cancelled, undefined);
 });
