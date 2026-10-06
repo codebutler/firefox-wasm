@@ -19,6 +19,7 @@ function wrapper(factory = never) {
     cancelAnimationFrame(id) { frames.delete(id); },
     fetch: async () => ({ arrayBuffer: async () => new ArrayBuffer(8) }),
     geckoSource: '', geckoDataZst: '', assets: {},
+    assembleSave: async (chunks, type) => new Blob(chunks, {type}),
     ZSTDDecoder: class { async init() {} },
   });
   vm.runInContext(source, context);
@@ -42,7 +43,9 @@ test('save bridge writes completed binary bytes once and disposes destination au
   assert.equal(JSON.parse(selected.value).name, 'chosen.bin');
   module.geckoSaveChunk('1', new Uint8Array([0, 255, 128]));
   module.geckoSaveChunk('1', new Uint8Array([65]));
-  assert.equal((await module.geckoFinishSave({ id: '1' })).ok, true);
+  const finishing = module.geckoFinishSave({ id: '1' });
+  assert.equal((await module.geckoFinishSave({ id: '1' })).ok, false);
+  assert.equal((await finishing).ok, true);
   assert.deepEqual(data, [0, 255, 128, 65]);
   assert.equal(signal.aborted, true);
   assert.equal(g.saves.size, 0);

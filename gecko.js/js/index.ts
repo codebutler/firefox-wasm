@@ -11,6 +11,7 @@
 // artifact the consumer serves is the wasm (GeckoOptions.wasm). emscripten 6.0.x no longer emits a separate
 // *.worker.js; pthread workers spawn from the main module via mainScriptUrlOrBlob.
 import { encodePickerReply } from './picker-encoding';
+import { assembleSave } from './save-assembly';
 import geckoSource from '../wasm/gecko.js?source';
 import { ZSTDDecoder } from 'zstddec';
 // gecko.data is baked into this bundle, zstd-compressed (decoded at load with
@@ -322,6 +323,7 @@ export class Gecko {
     chunks: Uint8Array<ArrayBuffer>[];
     type: string;
     error?: string;
+    finishing?: boolean;
   }>();
   private destroyed = false;
   private lifetime = new AbortController();
@@ -729,11 +731,16 @@ export class Gecko {
     };
     moduleOpts.geckoFinishSave = async (req: { id: string; error?: string }) => {
       const state = this.saves.get(req.id);
-      if (!state?.target || state.controller.signal.aborted) return { ok: false };
+      if (!state?.target || state.finishing || state.controller.signal.aborted) return { ok: false };
+      state.finishing = true;
       try {
         const error = req.error || state.error;
         if (error) await state.target.error(error);
-        else await state.target.write(new Blob(state.chunks, { type: state.type }));
+        else {
+          const blob = await assembleSave(state.chunks, state.type, state.controller.signal);
+          if (state.controller.signal.aborted) return { ok: false };
+          await state.target.write(blob);
+        }
         return { ok: !error };
       } catch (error) {
         if (!state.controller.signal.aborted) await state.target.error(String(error));

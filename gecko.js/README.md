@@ -40,6 +40,7 @@ trees that a basic embed doesn't need — notably the Firefox front-end (`browse
 | `onLocationChange` | optional; top-level location changes (`nsIWebProgressListener`) |
 | `onContextMenu` | optional; content context-menu payload (engine rolls up XUL first). Unset → XUL menus paint on the canvas |
 | `onPopups` | optional; tight BGRA frames for `<select>` / autocomplete (`nsMenuPopupFrame`). Empty array = closed. Unset → canvas overlay |
+| `onSave` | optional; choose a host destination for native downloads and `save()`. Return a `{ name, write(blob), error(message) }` target or `null` to cancel; honor its abort signal. |
 | `locateFile`, `print`, `printErr`, `width`, `height`, `forwardInput` | as named |
 
 ### TCP destinations
@@ -114,7 +115,8 @@ navigation and `destroy()` close pending dialogs. Requests contain an opaque
 - `{ kind: "file", title, multiple, filters: [{title, pattern}], filterIndex,
   accept, okLabel }`: return `{ files: [{ name, type, lastModified, base64 }] }`.
   Only send explicitly selected file contents, never host filesystem paths.
-  Open and multiple-open modes are supported; folder/save modes are not.
+  Open and multiple-open modes are supported; folder mode is not. Save mode
+  uses the separate `onSave` contract below.
 - `{ kind: "color", title, value, colors }`: return `{ value: "#rrggbb" }`.
 - `{ kind: "date", type, value, min, max, step, stepBase }`: return `{ value }`
   using HTML's date/time/datetime-local serialization. Empty string clears it.
@@ -127,3 +129,26 @@ Offline fallback fonts are listed in `fonts.json` with source revisions,
 SHA-256 digests and license files. `stage-fonts.py` fails a build if any font is
 missing or corrupted. The bundle includes full CJK, Arabic, Hebrew, Indic and
 Southeast Asian scripts, Georgian, Armenian, Ethiopic, math/symbols and emoji.
+
+### Native saves and downloads
+
+`onSave({ id, name, title, type, url }, { signal })` chooses a destination. Return
+`null` to cancel, or `{ name, async write(blob), async error(message) }`. Retain
+the host path in that target's closure; return only its basename to Gecko.
+`write` receives the completed content once. Enforce replacement confirmation
+and honor cancellation in both the chooser and writer. Navigation and
+`destroy()` abort the signal; late chooser replies cannot grant a destination.
+
+Native attachment responses and links with `download` keep Gecko's original
+transfer, including cookies and response body. The custom helper-app dialog and
+transfer component replace the Firefox frontend omitted from the minimal GRE.
+Explicit `await gecko.save(url)` saves a resource using the current document's
+principal, referrer and cookie settings. `gecko.save(url, { document: true })`
+serializes the current document as HTML with absolute links; it does not bundle
+dependent images, scripts or stylesheets for offline use.
+
+Completed temporary guest files cross to the embedder in bounded binary chunks.
+A worker assembles the Blob; large payload encoding does not run on the browser
+main thread. Temporary files and destination authority are released after
+completion, failure or cancellation. This is a buffered download path, not a
+streaming API or download manager. Without `onSave`, saving is cancelled.
