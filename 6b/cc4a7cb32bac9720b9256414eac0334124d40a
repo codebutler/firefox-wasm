@@ -1,0 +1,37 @@
+gecko.js/build-lib.sh
+  s_6e03fa3fb4523e::t_88b32f6bc4ac37 89
+gecko.js/js/index.ts
+  s_6e03fa3fb4523e::t_92ffc54d9b6999 242,265,309-330,400,430-438,451-452,485-488,497,506,564,582-585,597,602,605,609,611-613,625,631-632,663-671,689,691,773,775,777,779-802,840,847,857,859,861-865,908,913,1034,1036,1058,1060,1076
+gecko.js/lib/audio-out.js
+  s_6e03fa3fb4523e::t_e7b19bc5d7f04d 24,29-39,79-80,88-89,109,125
+gecko.js/lib/coarse-clock.js
+  s_6e03fa3fb4523e::t_1f7a9e0cb64445 19,23,42-43
+gecko.js/lib/hostimg-bridge.js
+  s_6e03fa3fb4523e::t_2639d92d072789 31,35,54-61,70-71,88,95,97,102-103,105,111,126,129,151-158,166-167,174,177-178,181,185,227-228,232-233
+gecko.js/lib/webcodecs-bridge.js
+  s_6e03fa3fb4523e::t_b27a088e22b838 81-87,119,264,271,299,490-497,502,518-523,532,551,773,794
+gecko.js/lib/wisp-net.js
+  s_6e03fa3fb4523e::t_cac3f9f82cb123 47-70,90,176,194
+gecko.js/lifecycle.test.mjs
+  s_6e03fa3fb4523e::t_8585999a55f744 1-105
+gecko.js/runtime-lifecycle.js
+  s_6e03fa3fb4523e::t_e31a9eb38f04cb 1-44
+gecko.js/wisp-net.test.mjs
+  s_6e03fa3fb4523e::t_20ebb745d83055 115-126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6bcc4a7cb32bac9720b9256414eac0334124d40a",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
