@@ -665,20 +665,3 @@ the expected color; only the composited page swaps red and blue.
 The Emscripten WebGL source patch scopes version/extension string caches
 to each context. A WebGL1-then-WebGL2 page otherwise reports the ES2
 features for both contexts, while reversing the order breaks WebGL1.
-
-## 0014-emscripten-nspr-ipv6.patch
-
-NSPR's Emscripten target uses the Linux platform headers, but their IPv6
-feature detection requires glibc or Android. Without `_PR_INET6`, NSPR wraps
-IPv6 sockets in an IPv6-to-IPv4 layer and rejects non-mapped destinations
-with `PR_NETWORK_UNREACHABLE_ERROR` before WasmFS receives `connect()`.
-Enable native IPv6 and the available `gethostbyname2` API for this target.
-Keep the established synthetic DNS path: Emscripten's `getaddrinfo` rejects
-`AI_ADDRCONFIG`, which NSPR always requests.
-
-The patch depends on this wrapper's family-aware WasmFS WISP backend.
-`gecko.js/check-nspr-sockets.py` compiles the pinned NSPR sources using the
-actual Emscripten `moz.build` declarations and tests both blocking and
-nonblocking connections through the production JavaScript bridge. It fails
-with the original platform configuration and passes with this patch. CI runs
-it and `gecko.js/check-wisp-sockets.sh` before compiling the complete engine.
