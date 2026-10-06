@@ -32,7 +32,8 @@
 //
 // This function is the one place that knows: the browser implicit-presents during
 // the macrotask we yield for, so by the time the setTimeout callback runs, the FIRST
-// frame is on screen. Report that once, to the main thread.
+// frame is on screen. Startup reports establish firstPaint; embedders that
+// composite the canvas opt into continuing reports with GECKO_FRAME_COMMITS.
 //
 // It has to be reported cross-thread because this runs on the Renderer worker.
 // CMD_CALL_HANDLER is emscripten's own worker->main path (libpthread.js's message
@@ -42,23 +43,31 @@
 // fixed knownHandlers list, so posting explicitly is what avoids patching the
 // toolchain. gecko.js always defines the handler (that dispatch does not null-check).
 mergeInto(LibraryManager.library, {
+  gl_present_yield__deps: ['getenv', '$stringToUTF8OnStack', '$stackSave', '$stackRestore'],
   gl_present_yield: function () {
+    // ENV is a per-worker JS object, not the process environment set by the
+    // embedder. Read libc's shared environment once on this Renderer thread.
+    // Ordinary embedders still stop reporting after the startup cap.
+    if (Module['__geckoReportFrames'] === undefined) {
+      var stack = stackSave();
+      Module['__geckoReportFrames'] = !!_getenv(stringToUTF8OnStack('GECKO_FRAME_COMMITS'));
+      stackRestore(stack);
+    }
     return new Promise(function (resolve) {
       setTimeout(function () {
         // Report the first few presents (index included) rather than only the
         // very first: the compositor's opening frame can be empty, so the
         // embedder -- not this function -- decides which present counts as
-        // "there is something to look at". Capped so a long-running engine
-        // isn't posting a message every frame forever.
+        // "there is something to look at". Directly presented canvases stop
+        // sending messages at the cap; compositing hosts need every commit.
         // PRESENT_REPORT_CAP -- MUST stay in sync with js/index.ts, which treats
-        // reaching it as "resolve firstPaint anyway". Reporting is a startup
-        // concern, so it stops afterwards rather than posting a message per frame
-        // for the life of the engine; the cap is generous enough (~10s at 60fps)
+        // reaching it as "resolve firstPaint anyway". The startup cap is
+        // generous enough (~10s at 60fps)
         // that a first load never reaches it in practice, and if one somehow did,
         // the embedder resolves instead of waiting forever.
         var n = (Module['__geckoPresentCount'] || 0) + 1;
         Module['__geckoPresentCount'] = n;
-        if (n <= 600 && typeof postMessage === 'function') {
+        if ((n <= 600 || Module['__geckoReportFrames']) && typeof postMessage === 'function') {
           postMessage({
             cmd: {{{ CMD_CALL_HANDLER }}},
             handler: 'geckoOnPresent',
