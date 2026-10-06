@@ -28,6 +28,62 @@ function wrapper(factory = never) {
   return { g: new context.Gecko({canvas, wasm: {url: '/engine.wasm'}, forwardInput: false}), revoked, frames, warnings };
 }
 
+test('save bridge writes completed binary bytes once and disposes destination authority', async () => {
+  let module, data, signal;
+  const {g} = wrapper(options => { module = options; return never(); });
+  g.opts.onSave = async (_request, options) => {
+    signal = options.signal;
+    return { name: 'chosen.bin', write: async blob => { data = [...new Uint8Array(await blob.arrayBuffer())]; }, error: async () => assert.fail('unexpected error') };
+  };
+  const initialization = g.init();
+  while (!module) await new Promise(r => setTimeout(r, 0));
+  const selected = await module.geckoChooseSave({ id: '1', name: 'source.bin', type: 'application/octet-stream' });
+  assert.equal(selected.ok, true);
+  assert.equal(JSON.parse(selected.value).name, 'chosen.bin');
+  module.geckoSaveChunk('1', new Uint8Array([0, 255, 128]));
+  module.geckoSaveChunk('1', new Uint8Array([65]));
+  assert.equal((await module.geckoFinishSave({ id: '1' })).ok, true);
+  assert.deepEqual(data, [0, 255, 128, 65]);
+  assert.equal(signal.aborted, true);
+  assert.equal(g.saves.size, 0);
+  assert.equal((await module.geckoFinishSave({ id: '1' })).ok, false);
+  g.destroy(); await assert.rejects(initialization, { name: 'AbortError' });
+});
+
+test('destroy cancels a pending save chooser and ignores its late destination', async () => {
+  let module, resolve, signal;
+  const {g} = wrapper(options => { module = options; return never(); });
+  g.opts.onSave = (_request, options) => { signal = options.signal; return new Promise(r => { resolve = r; }); };
+  const initialization = g.init();
+  while (!module) await new Promise(r => setTimeout(r, 0));
+  const choice = module.geckoChooseSave({ id: '2', name: 'x' });
+  await Promise.resolve();
+  g.destroy();
+  assert.equal((await choice).ok, false);
+  assert.equal(signal.aborted, true);
+  resolve({ name: 'late', write: async () => assert.fail('late write'), error: async () => {} });
+  await assert.rejects(initialization, { name: 'AbortError' });
+  assert.equal(g.saves.size, 0);
+  module.geckoSaveChunk('2', new Uint8Array([1]));
+  assert.equal((await module.geckoFinishSave({ id: '2' })).ok, false);
+});
+
+test('download and host-write errors reach the selected destination without reporting success', async () => {
+  let module;
+  const errors = [];
+  const {g} = wrapper(options => { module = options; return never(); });
+  g.opts.onSave = async () => ({ name: 'x', write: async () => { throw Error('disk full'); }, error: async message => { errors.push(message); } });
+  const initialization = g.init();
+  while (!module) await new Promise(r => setTimeout(r, 0));
+  for (const [id, error] of [['a', 'network failed'], ['b', undefined]]) {
+    await module.geckoChooseSave({ id, name: 'x' });
+    assert.equal((await module.geckoFinishSave({ id, error })).ok, false);
+  }
+  assert.deepEqual(errors, ['network failed', 'Error: disk full']);
+  assert.equal(g.saves.size, 0);
+  g.destroy(); await assert.rejects(initialization, { name: 'AbortError' });
+});
+
 test('a runtime hook failure cannot interrupt wrapper resource release', () => {
   const {g, revoked, warnings} = wrapper();
   g.mod = {geckoDispose() {throw Error('bad runtime hook');}};

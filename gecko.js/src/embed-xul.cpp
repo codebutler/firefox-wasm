@@ -197,6 +197,10 @@ int main() {
           ok = SetEmbedTheme(g_cmd->url);
           PumpEvents();
           break;
+        case 12:  // privileged save/download command; never content eval
+          ok = SaveEmbedURL(g_cmd->url);
+          PumpEvents();
+          break;
       }
       // Build the result for this op: string ops (5-8) return a UTF-8 buffer; op 9
       // and mirror mode paint nothing; everything else paints a frame (GPU present
@@ -209,7 +213,7 @@ int main() {
         g_cmd->result = buf;
         g_cmd->resultLen = buf ? (uint32_t)strlen((char*)buf) : 0;
         g_cmd->state = ok ? 3 : -1;
-      } else if (g_cmd->op == 9 || g_cmd->op == 10 || g_cmd->op == 11 || g_mirror) {
+      } else if (g_cmd->op == 9 || g_cmd->op == 10 || g_cmd->op == 11 || g_cmd->op == 12 || g_mirror) {
         // op 9 (clipboard set), op 10 (rollup), and DOM-mirror produce no painted
         // frame.
         g_cmd->result = nullptr;
