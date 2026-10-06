@@ -1,0 +1,42 @@
+gecko.js/src/embed-xul.cpp
+  s_6e03fa3fb4523e::t_ce9136523c6135 200-203,216
+gecko.js/src/embed-browser.cpp
+  s_6e03fa3fb4523e::t_ce9136523c6135 164-165,193-216
+  s_6e03fa3fb4523e::t_7f708bbe728e95 217-218
+gecko.js/chrome/EmbedPickers.sys.mjs
+  s_6e03fa3fb4523e::t_ce9136523c6135 6,57,61-64,74-79
+gecko.js/src/embed-chrome.cpp
+  s_6e03fa3fb4523e::t_ce9136523c6135 307-358,365-368
+gecko.js/lifecycle.test.mjs
+  s_6e03fa3fb4523e::t_30212e01bcb0a1 31-86
+gecko.js/js/index.ts
+  s_6e03fa3fb4523e::t_693f6ce9a372a0 179-185,227,319-325,696-742,769-770,814-820,869-870,983,1012
+gecko.js/saves.test.mjs
+  s_6e03fa3fb4523e::t_5fe4f3bd14c73d 24
+  s_6e03fa3fb4523e::t_45fb472e34daea 1-23,25-124
+gecko.js/chrome/EmbedSaves.sys.mjs
+  s_6e03fa3fb4523e::t_fdd1909fb2f58f 1-7,9-155,158-176
+  s_6e03fa3fb4523e::t_5fe4f3bd14c73d 8,156-157
+gecko.js/src/embed-xul.h
+  s_6e03fa3fb4523e::t_ce9136523c6135 186
+gecko.js/pickers.test.mjs
+  s_6e03fa3fb4523e::t_8d49a5a6d2ae7b 19,42
+gecko.js/stage-gre-min.sh
+  s_6e03fa3fb4523e::t_14cd144ff98911 118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c1bce587e08d13da32e9e3612c5ba79ff2c47ea4",
+  "prompts": {},
+  "sessions": {
+    "s_6e03fa3fb4523e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a109cd-9be4-7f61-9408-b31918c847cd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
