@@ -43,6 +43,7 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply, const cha
     var resultPtr = $2;
     var callback = UTF8ToString($3);
     var finish = function() {
+      if (Module.geckoDisposed) return;
       Atomics.store(HEAP32, donePtr >> 2, 1);
       Atomics.notify(HEAP32, donePtr >> 2, 1);
       Module['_gecko_prompt_wake']();
@@ -57,9 +58,11 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply, const cha
       HEAPU8[ptr + bytes.length] = 0;
     };
     Promise.resolve().then(function() {
+      if (Module.geckoDisposed) return {ok: false};
       var fn = Module[callback];
       return typeof fn === 'function' ? fn(JSON.parse(request)) : {ok: false};
     }).then(function(r) {
+      if (Module.geckoDisposed) return;
       r = r || {};
       copy(r.value, 8);
       copy(r.user, 12);
@@ -68,6 +71,7 @@ static void HostPromptJson(const nsACString& json, PromptReply& reply, const cha
       HEAP32[(resultPtr + 4) >> 2] = r.button | 0;
       finish();
     }).catch(function() {
+      if (Module.geckoDisposed) return;
       HEAP32[resultPtr >> 2] = 0;
       finish();
     });

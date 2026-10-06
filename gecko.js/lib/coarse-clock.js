@@ -16,11 +16,11 @@ mergeInto(LibraryManager.library, {
   gecko_coarse_clock_start__proxy: 'sync',
   gecko_coarse_clock_start: function () {
     try {
-      if (globalThis.__geckoCoarseClock) return;          // idempotent
+      if (Module.geckoCoarseClock) return;          // idempotent
       if (typeof _gecko_coarse_now_ptr !== 'function') return;
       var ptr = _gecko_coarse_now_ptr();                  // 8-aligned byte offset
       if (!ptr) return;
-      globalThis.__geckoCoarseClock = true;
+      Module.geckoCoarseClock = true;
       // The heap is a SharedArrayBuffer (-pthread); a fresh view is needed after a
       // memory growth detaches the old buffer.
       var view = null;
@@ -39,7 +39,8 @@ mergeInto(LibraryManager.library, {
         Atomics.store(current(), 0, BigInt(Math.round(nowMs() * 1e6)));
       };
       tick();
-      setInterval(tick, 1);
+      var timer = setInterval(tick, 1);
+      Module.geckoCleanup.push(function () { clearInterval(timer); view = null; Module.geckoCoarseClock = false; });
     } catch (e) {}
   },
 });

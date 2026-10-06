@@ -78,7 +78,13 @@ mergeInto(LibraryManager.library, {
     warnedFmt: false, // one-shot guard for the unsupported-format warning
 
     ensure: function () {
-      if (!wcRT.decoders) wcRT.decoders = new Map();
+      if (!wcRT.decoders) {
+        wcRT.decoders = new Map();
+        Module.geckoCleanup.push(function () {
+          wcRT.decoders.forEach(function (reg) { reg.gen++; reg.dead = true; try { reg.decoder.close(); } catch (_) {} });
+          wcRT.decoders.clear();
+        });
+      }
     },
 
     // VideoColorSpace.matrix string -> code consumed by C++ MatrixToColorSpace:
@@ -110,6 +116,7 @@ mergeInto(LibraryManager.library, {
     // I420 ourselves. All per-frame data is captured into locals BEFORE the first
     // await -- during a flush burst the next callback runs before this copy resolves.
     onFrame: async function (reg, frame) {
+      if (Module.geckoDisposed || reg.dead) { frame.close(); return; }
       var myGen = reg.gen;
       var ptr = 0;
       try {
@@ -254,14 +261,14 @@ mergeInto(LibraryManager.library, {
         // A reset()/destroy() may have happened during the await. If so this frame
         // is stale: free our own buffer and drop it WITHOUT touching the control
         // block (the worker may already have freed it).
-        if (myGen !== reg.gen || reg.dead) { Module._free(ptr); return; }
+        if (myGen !== reg.gen || reg.dead) { if (!Module.geckoDisposed) Module._free(ptr); return; }
 
         var ci = reg.ctrl >> 2;
         // Ring full? (worker is RING_N frames behind.) Drop this frame.
         var readCount = Atomics.load(HEAP32, ci + wcOff.WC_READ);
         if (reg.writeCount - readCount >= wcOff.RING_N) {
           console.warn('[webcodecs] ring overflow; frame dropped');
-          Module._free(ptr);
+          if (!Module.geckoDisposed) Module._free(ptr);
           return;
         }
 
@@ -289,7 +296,7 @@ mergeInto(LibraryManager.library, {
         wcRT.wake(reg);
       } catch (e) {
         console.warn('[webcodecs] onFrame failed:', e && e.message ? e.message : e);
-        if (ptr) Module._free(ptr);
+        if (ptr) if (!Module.geckoDisposed) Module._free(ptr);
         if (frame) { try { frame.close(); } catch (_) {} }
         if (myGen === reg.gen && !reg.dead) wcRT.setError(reg);
       }
@@ -480,12 +487,19 @@ mergeInto(LibraryManager.library, {
     haveLastWrite: false,
 
     ensure: function () {
-      if (!wcaRT.decoders) wcaRT.decoders = new Map();
+      if (!wcaRT.decoders) {
+        wcaRT.decoders = new Map();
+        Module.geckoCleanup.push(function () {
+          wcaRT.stopAllPlayback();
+          wcaRT.decoders.forEach(function (reg) { reg.dead = true; try { reg.decoder.close(); } catch (_) {} });
+          wcaRT.decoders.clear();
+        });
+      }
       wcaRT.ensureAudioContext();
     },
 
     ensureAudioContext: function () {
-      if (wcaRT.ctx || typeof window === 'undefined') return;
+      if (Module.geckoDisposed || wcaRT.ctx || typeof window === 'undefined') return;
       var Ctor = window.AudioContext || window.webkitAudioContext;
       if (!Ctor) {
         console.warn('[webcodecs-audio] AudioContext unavailable');
@@ -501,6 +515,12 @@ mergeInto(LibraryManager.library, {
           return;
         }
       }
+      Module.geckoCleanup.push(function () {
+        wcaRT.stopAllPlayback();
+        if (wcaRT.sink) { wcaRT.sink.disconnect(); wcaRT.sink.port.close(); }
+        wcaRT.ctx.close().catch(function () {});
+        wcaRT.ctx = wcaRT.sink = wcaRT.ringCtrl = wcaRT.ringPcm = null;
+      });
       if (!wcaRT.resumeBound) {
         wcaRT.resumeBound = true;
         var resume = function () {
@@ -509,6 +529,7 @@ mergeInto(LibraryManager.library, {
         };
         ['pointerdown', 'mousedown', 'touchstart', 'keydown'].forEach(function (type) {
           window.addEventListener(type, resume, { passive: true });
+          Module.geckoCleanup.push(function () { window.removeEventListener(type, resume); });
         });
       }
       wcaRT.ensureSink();
@@ -527,6 +548,7 @@ mergeInto(LibraryManager.library, {
       Atomics.store(wcaRT.ringCtrl, 3, wcaRT.ringChannels);
       Atomics.store(wcaRT.ringCtrl, 4, wcaRT.playing ? 1 : 0);
       wcaRT.sinkReady = wcaRT.ctx.audioWorklet.addModule(url).then(function () {
+        if (Module.geckoDisposed) return;
         wcaRT.sink = new AudioWorkletNode(wcaRT.ctx, 'host-audio-sink', {
           outputChannelCount: [2],
           processorOptions: { ctrl: wcaRT.ringCtrl.buffer, pcm: wcaRT.ringPcm.buffer }
@@ -748,7 +770,7 @@ mergeInto(LibraryManager.library, {
         var readCount = Atomics.load(HEAP32, ci + wcaOff.WC_READ);
         if (reg.writeCount - readCount >= wcaOff.RING_N) {
           console.warn('[webcodecs-audio] ring overflow; block dropped');
-          Module._free(ptr);
+          if (!Module.geckoDisposed) Module._free(ptr);
           return;
         }
 
@@ -769,7 +791,7 @@ mergeInto(LibraryManager.library, {
         wcaRT.wake(reg);
       } catch (e) {
         console.warn('[webcodecs-audio] onAudioData failed:', e && e.message ? e.message : e);
-        if (ptr) Module._free(ptr);
+        if (ptr) if (!Module.geckoDisposed) Module._free(ptr);
         try { data.close(); } catch (_) {}
         var msg = e && e.message ? e.message : e;
         if (!reg.dead && msg !== 'unwind') wcaRT.setError(reg);

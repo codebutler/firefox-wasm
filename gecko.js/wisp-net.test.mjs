@@ -112,3 +112,15 @@ for (const host of ['192.0.2.7', 'fdcb:0:9:2:1234:5678:9abc:def0', '::1']) {
     assert.deepEqual(b.events, [['connected', 5]]);
   });
 }
+
+test('runtime disposal closes connected and pending custom streams and ignores late callbacks', () => {
+  const callbacks = []; let closed = 0;
+  const b = bridge((_host, _port, cb) => { callbacks.push(cb); return {send() {}, close() {closed++; cb.onEof();}}; });
+  b.connect(1, 'one.test', 80); b.connect(2, 'two.test', 80);
+  callbacks[0].onConnected();
+  b.WISP.dispose(); b.WISP.dispose();
+  callbacks[0].onData(new Uint8Array([1])); callbacks[1].onConnected(); callbacks[1].onError();
+  b.connect(3, 'late.test', 80);
+  assert.equal(closed, 2); assert.equal(callbacks.length, 2);
+  assert.deepEqual(b.events, [['connected', 1]]);
+});

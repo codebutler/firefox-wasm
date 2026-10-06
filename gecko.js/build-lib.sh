@@ -86,6 +86,7 @@ EMSETTINGS=(
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=536870912 -sMAXIMUM_MEMORY=4294967296
   -sSTACK_SIZE=67108864 -sEXIT_RUNTIME=0
   -pthread -sPTHREAD_POOL_SIZE=20 -sPTHREAD_POOL_SIZE_STRICT=0
+  --pre-js "$PKG/runtime-lifecycle.js"
   -sMODULARIZE=1 -sEXPORT_NAME=createGecko
   -sEXPORTED_FUNCTIONS=_main,_xul_init,_free,_malloc,_WasmXPTCStubDispatch,_xul_cmd_ptr,_wisp_wakeword,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error,_wasmfs_create_provider_backend,_provider_record_entry,_wasmhost_invoke_import,_wjhelp,_wasmjit_invoke,_wj_set_depth_limit,_WJTraceRoots,_InterpTraceRoots,_b_help,_hostimg_renderer_tid,_gecko_coarse_now_ptr,_gecko_prompt_wake
   # specialHTMLTargets is emscripten's selector->element override map, consulted by
