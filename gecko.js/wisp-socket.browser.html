@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <title>WasmFS scoped socket probe</title>
+  <h1>WasmFS scoped socket probe</h1>
+  <p id="result">Running</p>
+  <pre id="log"></pre>
+  <script>
+    var lines = [];
+    var result = document.getElementById('result');
+    var log = document.getElementById('log');
+    function append(line) {
+      lines.push(String(line));
+      log.textContent = lines.join('\n');
+    }
+    var Module = {
+      print: append,
+      printErr: append,
+      onExit: function (code) {
+        var probes = lines.filter(function (line) { return line.startsWith('socket bridge:'); });
+        result.textContent = code === 0 && probes.length === 7 ? 'PASS' : 'FAIL';
+        result.dataset.exitCode = String(code);
+        result.dataset.probes = String(probes.length);
+      },
+      onAbort: function (reason) {
+        append(reason);
+        result.textContent = 'FAIL';
+      },
+    };
+  </script>
+  <script src="./socket-fixture.js"></script>
+</html>
