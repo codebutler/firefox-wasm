@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix="nspr-sockets-") as directory:
     command += [
         str(HERE / "nspr-socket.test.c"), "-o", output,
         "-sWASMFS=1", "-sPROXY_TO_PTHREAD=1", "-sEXIT_RUNTIME=1", "-sENVIRONMENT=node",
-        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error",
+        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error,_wisp_errno_enodev,_wisp_errno_einval",
         "--js-library", str(HERE / "lib/wisp-net.js"),
         "--pre-js", str(HERE / "wisp-socket.pre.js"),
     ]
