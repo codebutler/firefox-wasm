@@ -153,21 +153,23 @@ class FilePicker {
           } else {
             if (!result.files?.length) return;
             const files = this.mode === 3 ? result.files : result.files.slice(0, 1);
-            this.selected = [];
+            const selected = [];
             for (const item of files) {
               if (cancelled) throw new Error("File selection cancelled");
               const file = staging.clone(); file.append(String(item.index));
               await this.writeStreamedFile(file, item, result.session);
               if (cancelled) throw new Error("File selection cancelled");
               const backing = await File.createFromFileName(file.path);
-              this.selected.push(new this.window.File([backing],
+              selected.push(new this.window.File([backing],
                 String(item.name).replace(/^.*[\\/]/, ""), {
                   type: item.type, lastModified: item.lastModified,
                 }));
             }
+            this.selected = selected;
           }
           if (!cancelled) code = Ci.nsIFilePicker.returnOK;
         } catch (error) {
+          this.selected = [];
           this.window.removeEventListener("pagehide", cleanup);
           cleanup();
           throw error;

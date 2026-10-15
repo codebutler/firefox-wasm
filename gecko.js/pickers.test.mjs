@@ -68,7 +68,7 @@ function bridge() {
       },
     },
     IOUtils: { async write(path, bytes, options) {
-      duringWrite?.();
+      duringWrite?.(path, bytes);
       const previous = options?.mode === 'append' ? disk.get(path)?.bytes || [] : [];
       disk.set(path, { bytes: [...previous, ...bytes] });
     } },
@@ -199,6 +199,22 @@ test('large uploads request bounded chunks in order and preserve all bytes', asy
   assert.equal(code, 0);
   assert.deepEqual(b.chunks.map(chunk => chunk.offset), [0, 65536, 131072, 196608]);
   assert.deepEqual(Buffer.from(await picker.domFileOrDirectory.arrayBuffer()), bytes);
+});
+
+test('a later file read failure cancels the whole selection without partial files', async () => {
+  const b = bridge(), picker = b.picker('file');
+  picker.init(b.context, 'Files', 3);
+  b.reply({ files: [
+    { name: 'first.bin', base64: 'AQID' },
+    { name: 'second.bin', base64: 'BAUG' },
+  ] });
+  b.onWrite(path => { if (path.endsWith('/1')) throw new Error('read denied'); });
+  let code;
+  picker.open({ done(value) { code = value; } });
+  await b.flush();
+  assert.equal(code, 1);
+  assert.equal(picker.selected.length, 0);
+  assert.deepEqual([...b.disk.keys()], ['/tmp']);
 });
 
 test('single-file mode restricts the result and cancellation cannot attach files', async () => {
