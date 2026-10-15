@@ -158,6 +158,12 @@ export interface GeckoOptions {
    */
   tcpTransport?: TcpTransportFactory;
   /**
+   * Live L3 interface-name lookup for guest if_nametoindex(). Return zero for
+   * an unknown or offline name. Indexes may change when the host stack is
+   * rebuilt; the callback is queried each time, not snapshotted at boot.
+   */
+  scopeIndex?: (name: string) => number;
+  /**
    * Optional: called on top-level location changes (nsIWebProgressListener).
    * When set, an embedder can drop its evalChrome location poller. Absent on
    * discs built before this callback existed — poller remains the fallback.
@@ -580,6 +586,10 @@ export class Gecko {
         if (this.opts.tcpTransport) {
           (m as unknown as { tcpTransport: TcpTransportFactory }).tcpTransport =
             this.opts.tcpTransport;
+        }
+        if (this.opts.scopeIndex) {
+          (m as unknown as { scopeIndex: (name: string) => number }).scopeIndex =
+            this.opts.scopeIndex;
         }
 
         // Custom provider OBJECTS only: register them for the WasmFS ProviderBackend

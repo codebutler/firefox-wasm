@@ -473,7 +473,6 @@ inline int poll_impl(intptr_t fds_, nfds_t nfds, int timeout) {
 //     stub, so Necko's setsockopt() calls succeed.
 // ===========================================================================
 extern "C" {
-
 // The Emscripten libc uses WASI errno values, not Linux host values. Export
 // these from the same sysroot as the socket backend so JS can pass exact codes
 // before or after an asynchronous transport callback.

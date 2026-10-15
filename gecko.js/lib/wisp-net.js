@@ -28,6 +28,21 @@
 // (no host-app imports); pc uses it to bridge onto its own hostConnect() seam.
 
 mergeInto(LibraryManager.library, {
+  // musl's if_nametoindex() calls this on the guest thread. Resolve on the
+  // runtime main thread against the embedder's CURRENT L3 catalogue, never a
+  // boot-time snapshot. Unknown/offline/invalid entries return zero.
+  gecko_scope_index__proxy: 'sync',
+  gecko_scope_index__deps: ['$UTF8ToString'],
+  gecko_scope_index: function (name) {
+    var lookup = (typeof Module !== 'undefined') && Module.scopeIndex;
+    if (typeof lookup !== 'function') return 0;
+    try {
+      var index = lookup(UTF8ToString(name));
+      return Number.isInteger(index) && index > 0 && index <= 0xffffffff ? index : 0;
+    } catch (e) {
+      return 0;
+    }
+  },
   // --- DNS: keep the synthetic-IP <-> hostname map on the main thread R -------
   // gethostbyname() -> _emscripten_lookup_name allocates a fake 172.x IP and
   // records IP<->name in $DNS. Stock emscripten doesn't proxy it, so when Gecko
