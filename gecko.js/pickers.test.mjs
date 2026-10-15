@@ -8,6 +8,23 @@ function bridge() {
   const calls = [], cancelled = [], sent = [], deferred = [];
   const page = new EventTarget();
   page.File = File;
+  page.Directory = class { constructor(path) { this.path = path; this.name = path.split('/').pop(); } };
+  const disk = new Map([['/tmp', { directory: true }]]);
+  let duringWrite = null;
+  class GuestFile {
+    constructor(path) { this.path = path; }
+    clone() { return new GuestFile(this.path); }
+    append(name) { this.path += `/${name}`; }
+    exists() { return disk.has(this.path); }
+    create(kind) { disk.set(this.path, { directory: kind === 1 }); }
+    createUnique(kind) {
+      const base = this.path;
+      let suffix = 0;
+      while (this.exists()) this.path = `${base}-${++suffix}`;
+      this.create(kind);
+    }
+    remove() { for (const path of disk.keys()) if (path === this.path || path.startsWith(`${this.path}/`)) disk.delete(path); }
+  }
   const context = { canOpenModalPicker: true, window: page };
   let reply = null, during;
   class JSWindowActorParent {
@@ -18,7 +35,7 @@ function bridge() {
   const global = vm.createContext({
     console, File, Uint8Array, atob, JSWindowActorParent, NativeDateTimePickerChild, chooseSave: () => null,
     Cu: { importGlobalProperties() {} },
-    Ci: { nsIFilePicker: { returnOK: 0, returnCancel: 1, filterAll: 1 } },
+    Ci: { nsIFile: { DIRECTORY_TYPE: 1 }, nsIFilePicker: { returnOK: 0, returnCancel: 1, filterAll: 1 } },
     Cr: { NS_ERROR_FAILURE: 1 },
     Cc: { '@mozilla.org/supports-string;1': { createInstance() { return { data: '' }; } } },
     Components: { ID: value => value, manager: { QueryInterface() { return {
@@ -28,6 +45,7 @@ function bridge() {
       registerWindowActor(name, value) { actors.set(name, value); } },
     Services: {
       tm: { dispatchToMainThread(fn) { deferred.push(fn); } }, prefs: { setBoolPref() {} },
+      dirsvc: { get() { return new GuestFile('/tmp'); } },
       obs: {
         addObserver(fn, name) { observers.set(name, fn); },
         notifyObservers(subject, topic, data) {
@@ -36,19 +54,72 @@ function bridge() {
         },
       },
     },
+    IOUtils: { async write(path, bytes) { duringWrite?.(); disk.set(path, { bytes: [...bytes] }); } },
   });
   const source = readFileSync(new URL('./chrome/EmbedPickers.sys.mjs', import.meta.url), 'utf8')
     .replace(/import \{ DateTimePickerChild[\s\S]*?;/, '')
     .replace(/import \{ chooseSave \}[^;]*;/, '')
     .replace(/export class (DateTimePickerChild|DateTimePickerParent)/g, 'globalThis.$1 = class $1');
   vm.runInContext(source, global);
-  return { calls, cancelled, sent, context, page, actors, observers,
+  return { calls, cancelled, sent, context, page, actors, observers, disk,
+    onWrite(fn) { duringWrite = fn; },
     Child: global.DateTimePickerChild, Parent: global.DateTimePickerParent,
     picker(kind) { return factories.get(`@mozilla.org/${kind}picker;1`).createInstance(); },
     reply(value, callback) { reply = value; during = callback; },
-    flush() { deferred.splice(0).forEach(fn => fn()); },
+    flush() { return Promise.all(deferred.splice(0).map(fn => fn())); },
   };
 }
+
+test('directory mode stages a private guest tree and preserves relative hierarchy', async () => {
+  const b = bridge(), picker = b.picker('file');
+  picker.init(b.context, 'Upload folder', 2);
+  assert.equal(await picker.isModeSupported(2), true);
+  b.reply({ directory: { name: 'chosen', files: [
+    { path: 'one/café.bin', base64: 'AP+AQQ==' },
+    { path: 'two/café.bin', base64: 'AQID' },
+    { path: 'empty.bin', base64: '' },
+  ] } });
+  let result;
+  picker.open({ done(code) { result = code; } });
+  await b.flush();
+  assert.equal(result, 0);
+  assert.equal(b.calls[0].directory, true);
+  const root = picker.domFileOrDirectory;
+  assert.equal(root.name, 'chosen');
+  assert.deepEqual(b.disk.get(`${root.path}/one/café.bin`).bytes, [0, 255, 128, 65]);
+  assert.deepEqual(b.disk.get(`${root.path}/two/café.bin`).bytes, [1, 2, 3]);
+  assert.deepEqual(b.disk.get(`${root.path}/empty.bin`).bytes, []);
+  b.page.dispatchEvent(new Event('pagehide'));
+  assert.equal(b.disk.has(root.path), false);
+});
+
+test('invalid directory reply is cancelled and its partial guest tree removed', async () => {
+  const b = bridge(), picker = b.picker('file');
+  picker.init(b.context, '', 2);
+  b.reply({ directory: { name: 'chosen', files: [
+    { path: 'good.txt', base64: 'YQ==' }, { path: '../escape.txt', base64: 'Yg==' },
+  ] } });
+  let result;
+  picker.open({ done(code) { result = code; } });
+  await b.flush();
+  assert.equal(result, 1);
+  assert.equal(picker.domFileOrDirectory, null);
+  assert.deepEqual([...b.disk.keys()], ['/tmp']);
+});
+
+test('navigation during directory staging cancels and removes late bytes', async () => {
+  const b = bridge(), picker = b.picker('file');
+  picker.init(b.context, '', 2);
+  b.reply({ directory: { name: 'chosen', files: [
+    { path: 'first.bin', base64: 'AA==' }, { path: 'second.bin', base64: 'AQ==' },
+  ] } });
+  b.onWrite(() => b.page.dispatchEvent(new Event('pagehide')));
+  let result;
+  picker.open({ done(code) { result = code; } });
+  await b.flush();
+  assert.equal(result, 1);
+  assert.deepEqual([...b.disk.keys()], ['/tmp']);
+});
 
 test('native file picker returns binary DOM Files and preserves metadata, never paths', async () => {
   const b = bridge(), picker = b.picker('file');
