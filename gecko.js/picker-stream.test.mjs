@@ -102,3 +102,28 @@ test('range-backed files read one bounded chunk and close their source', async (
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(closes, 1);
 });
+
+test('two picker sessions keep workers and cancellation independent', async () => {
+  let workers = 0, terminations = 0;
+  class SessionWorker {
+    constructor() { this.id = ++workers; }
+    postMessage(message) {
+      if (message.kind !== 'read') return;
+      queueMicrotask(() => this.onmessage({ data: {
+        bytes: new TextEncoder().encode(JSON.stringify({ data: Buffer.from([this.id]).toString('base64') })),
+      } }));
+    }
+    terminate() { terminations++; }
+  }
+  const context = vm.createContext({ Blob, Worker: SessionWorker,
+    URL: { createObjectURL() { return 'blob:picker'; }, revokeObjectURL() {} } });
+  vm.runInContext(`${source.replace(/export /g, '')}\nglobalThis.PickerChunkEncoder = PickerChunkEncoder;`, context);
+  const firstAbort = new AbortController(), secondAbort = new AbortController();
+  const first = new context.PickerChunkEncoder([new Blob([Uint8Array.of(1)])], firstAbort.signal);
+  const second = new context.PickerChunkEncoder([new Blob([Uint8Array.of(2)])], secondAbort.signal);
+  firstAbort.abort(new Error('first window closed'));
+  const response = await second.read(0, 0);
+  assert.deepEqual(Buffer.from(JSON.parse(new TextDecoder().decode(response)).data, 'base64'), Buffer.from([2]));
+  second.close();
+  assert.equal(terminations, 2);
+});
