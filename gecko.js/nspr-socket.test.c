@@ -5,6 +5,7 @@
 #include "prerror.h"
 #include <assert.h>
 #include <errno.h>
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,7 +82,9 @@ static void checkScoped(PRUint32 scopeId, int expectedError) {
     assert(PR_Poll(&poll, 1, PR_SecondsToInterval(5)) == 1);
     char response[128] = {0};
     assert(PR_Recv(fd, response, sizeof(response) - 1, 0, PR_SecondsToInterval(5)) > 0);
-    assert(strcmp(response, "fe80::2:8080:41") == 0);
+    char expected[128];
+    snprintf(expected, sizeof(expected), "fe80::2:8080:%u", scopeId);
+    assert(strcmp(response, expected) == 0);
   }
   assert(PR_Close(fd) == PR_SUCCESS);
   printf("NSPR scoped socket: fe80::2%%%u -> %s\n", scopeId,
@@ -102,7 +105,15 @@ int main(void) {
     check("probe.test", PR_AF_UNSPEC, "probe.test:8080", nonblocking);
     check("probe.test", PR_AF_INET, "probe.test:8080", nonblocking);
   }
+  assert(if_nametoindex("lan") == 41);
+  errno = 0;
+  assert(if_nametoindex("unknown") == 0 && errno == ENODEV);
   checkScoped(41, 0);
+  // The second lookup sees a new host stack generation, without restarting
+  // Gecko. The old index now fails while the same name resolves to 51.
+  assert(if_nametoindex("lan") == 51);
+  checkScoped(41, ENODEV);
+  checkScoped(51, 0);
   checkScoped(42, ENODEV);
   checkScoped(43, EINVAL);
   return 0;

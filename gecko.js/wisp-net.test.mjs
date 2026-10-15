@@ -6,7 +6,7 @@ import vm from 'node:vm';
 // Emscripten's WASI errno ABI, supplied by the C sysroot exports in production.
 const ERRNO = { ECONNREFUSED: 14, EINVAL: 28, ENODEV: 43, EOPNOTSUPP: 138 };
 
-function bridge(factory, names = { '172.29.5.9': 'probe.test' }) {
+function bridge(factory, names = { '172.29.5.9': 'probe.test' }, scopeIndex) {
   const library = {};
   const events = [];
   const heap = new Uint8Array(4096);
@@ -21,7 +21,7 @@ function bridge(factory, names = { '172.29.5.9': 'probe.test' }) {
   }
   const context = {
     LibraryManager: { library }, mergeInto: Object.assign,
-    Module: { tcpTransport: factory, wispUrl: 'wss://probe.invalid/wisp', WispClientConnection: Client },
+    Module: { tcpTransport: factory, scopeIndex, wispUrl: 'wss://probe.invalid/wisp', WispClientConnection: Client },
     HEAPU8: heap, Uint8Array, ArrayBuffer, Map,
     DNS: { lookup_addr: address => names[address] },
     UTF8ToString: ptr => new TextDecoder().decode(heap.subarray(ptr, heap.indexOf(0, ptr))),
@@ -44,6 +44,21 @@ function bridge(factory, names = { '172.29.5.9': 'probe.test' }) {
   }
   return { library, events, heap, clients, connect, WISP: library.$WISP };
 }
+
+test('guest scope lookup reads the live catalogue and rejects invalid indexes', () => {
+  let current = 41;
+  const b = bridge(null, {}, name => name === 'lan' ? current : 0);
+  b.heap.set(new TextEncoder().encode('lan\0'), 64);
+  assert.equal(b.library.gecko_scope_index(64), 41);
+  current = 51; // Same semantic name, rebuilt host stack.
+  assert.equal(b.library.gecko_scope_index(64), 51);
+  b.heap.set(new TextEncoder().encode('unknown\0'), 64);
+  assert.equal(b.library.gecko_scope_index(64), 0);
+  const invalid = bridge(null, {}, () => 0x100000000);
+  invalid.heap.set(new TextEncoder().encode('lan\0'), 64);
+  assert.equal(invalid.library.gecko_scope_index(64), 0);
+  assert.equal(bridge(null, {}).library.gecko_scope_index(64), 0);
+});
 
 test('custom TCP transport never opens WISP and copies asynchronous payloads', () => {
   let callbacks;
