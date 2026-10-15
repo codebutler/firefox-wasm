@@ -1,0 +1,35 @@
+gecko.js/chrome/EmbedPickers.sys.mjs
+  s_e94526f07ce98a::t_c4fe1155c2d594 142,145,175
+  s_e94526f07ce98a::t_358e7519e14812 13-22,78-97,103-104,115-116,118,137-141,143-144,146-174,176
+gecko.js/js/index.ts
+  s_e94526f07ce98a::t_45c2d746dac095 14,320,675-695,700-701,711-715,720,800-801,900
+gecko.js/picker-stream.test.mjs
+  s_e94526f07ce98a::t_e4d7a856d2cf9d 1-28,30-41
+  s_e94526f07ce98a::t_4331b244c55484 29
+gecko.js/js/picker-stream.ts
+  s_e94526f07ce98a::t_5c025c25152829 1-89
+gecko.js/pickers.test.mjs
+  s_e94526f07ce98a::t_bd2dce6283507a 12,14-19,42,59-61,63-65,70-74,86-98,176,204,208,213
+  s_e94526f07ce98a::t_8546ed619bed80 8,62,81,189-201
+  s_e94526f07ce98a::t_6b14720285d51f 202-203
+gecko.js/src/embed-chrome.cpp
+  s_e94526f07ce98a::t_7c582dc73b1779 295-301,305-307,374-375
+gecko.js/runtime-lifecycle.js
+  s_e94526f07ce98a::t_45c2d746dac095 42-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3aa281b1329d658397b93b33e81eaf8731aae286",
+  "prompts": {},
+  "sessions": {
+    "s_e94526f07ce98a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13d58-8e3c-75a3-a98d-1725c0995ceb",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
