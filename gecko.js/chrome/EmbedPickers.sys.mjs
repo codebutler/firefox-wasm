@@ -150,10 +150,10 @@ class FilePicker {
         this.window.addEventListener("pagehide", cleanup, { once: true });
         try {
           if (this.mode === 2) {
-            if (!result.directory) return;
+            if (!result.directory) { cleanup(); return; }
             this.selected = [await this.stageDirectory(result, staging, () => cancelled)];
           } else {
-            if (!result.files?.length) return;
+            if (!result.files?.length) { cleanup(); return; }
             const files = this.mode === 3 ? result.files : result.files.slice(0, 1);
             const selected = [];
             for (const item of files) {

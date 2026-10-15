@@ -233,6 +233,17 @@ test('single-file mode restricts the result and cancellation cannot attach files
   assert.equal(b.cancelled.length, 1);
 });
 
+test('an empty file selection closes without leaving a staging directory', async () => {
+  const b = bridge(), picker = b.picker('file');
+  picker.init(b.context, 'Files', 0);
+  b.reply({ files: [] });
+  let code;
+  picker.open({ done(value) { code = value; } });
+  await b.flush();
+  assert.equal(code, 1);
+  assert.deepEqual([...b.disk.keys()], ['/tmp']);
+});
+
 test('native color callback commits valid RGB and cancels invalid/missing values', () => {
   const b = bridge(), picker = b.picker('color'), results = [];
   picker.init(b.context, 'Color', '#000000', []);
