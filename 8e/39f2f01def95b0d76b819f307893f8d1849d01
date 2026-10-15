@@ -1,0 +1,34 @@
+gecko.js/wisp-socket.test.cpp
+  s_e94526f07ce98a::t_bb80b7ff6a41c0 90-93
+gecko.js/wisp-socket.pre.js
+  s_e94526f07ce98a::t_66745493465927 4
+gecko.js/emsdk-patches/wisp_socket.h
+  s_e94526f07ce98a::t_97173c14a13c0c 477-484
+gecko.js/build-wisp-browser-fixture.sh
+  s_e94526f07ce98a::t_e340e740f713b9 11
+gecko.js/check-wisp-sockets.sh
+  s_e94526f07ce98a::t_e340e740f713b9 10
+gecko.js/build-lib.sh
+  s_e94526f07ce98a::t_e340e740f713b9 91
+gecko.js/wisp-net.test.mjs
+  s_e94526f07ce98a::t_d8359fd323df75 121-131
+  s_e94526f07ce98a::t_057c48365369a2 6-8,32-35,79,83,93,101,109,117
+gecko.js/lib/wisp-net.js
+  s_e94526f07ce98a::t_b07d3b98233391 118,121,141,165,170,178,190,194,201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8e39f2f01def95b0d76b819f307893f8d1849d01",
+  "prompts": {},
+  "sessions": {
+    "s_e94526f07ce98a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13d58-8e3c-75a3-a98d-1725c0995ceb",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
