@@ -3,13 +3,18 @@
 #include <arpa/inet.h>
 #include <cassert>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+static_assert(offsetof(sockaddr_in6, sin6_scope_id) ==
+              offsetof(sockaddr_in6, sin6_addr) + sizeof(in6_addr));
 
 // Emscripten getaddrinfo treats a %zone literal as a synthetic hostname. The
 // scoped socket contract begins at sockaddr_in6; URL/name parsing is separate.
@@ -71,8 +76,18 @@ static void check(const char* host, int family, const char* expected, uint32_t s
   assert(std::memcmp(guard, address->ai_addr, 3) == 0);
   for (size_t i = 3; i < sizeof(guard); ++i) assert(guard[i] == 0xa5);
   assert(close(fd) == 0);
+  const uint32_t observedScope = family == AF_INET6
+    ? ((const sockaddr_in6*)address->ai_addr)->sin6_scope_id : 0;
   if (!scopeId) freeaddrinfo(address);
-  printf("socket bridge: %s (family %d, scope %u) -> %s\n", host, family, scopeId, expected);
+  printf("socket bridge: %s (family %d, scope %u) -> %s\n", host, family, observedScope, expected);
+}
+
+static void rejectScopedName(const char* host) {
+  addrinfo hint{}, *address = nullptr;
+  hint.ai_family = AF_INET6;
+  hint.ai_socktype = SOCK_STREAM;
+  assert(getaddrinfo(host, "8080", &hint, &address) == EAI_NONAME);
+  assert(address == nullptr);
 }
 
 static void checkScopedError(const char* host, uint32_t scopeId, int expectedError) {
@@ -99,6 +114,14 @@ int main() {
   check("192.0.2.7", AF_INET, "192.0.2.7:8080");
   check("fdcb:0:9:2:1234:5678:9abc:def0", AF_INET6, "fdcb:0:9:2:1234:5678:9abc:def0:8080");
   check("fe80::2", AF_INET6, "fe80::2:8080:41", 41);
+  check("fe80::2%41", AF_INET6, "fe80::2:8080:41");
+  check("fe80::2%lan", AF_INET6, "fe80::2:8080:41");
+  check("fe80::2%lan", AF_INET6, "fe80::2:8080:51");
+  for (const char* invalid : {"fe80::2%", "fe80::2%0", "fe80::2%4294967296",
+                              "fe80::2%lan%extra", "fe80::2%unknown",
+                              "fdcb::1%lan", "192.0.2.7%lan", "fe80::zz%lan"}) {
+    rejectScopedName(invalid);
+  }
   checkScopedError("fe80::2", 42, ENODEV);
   checkScopedError("fe80::2", 43, EINVAL);
   check("::1", AF_INET6, "::1:8080");

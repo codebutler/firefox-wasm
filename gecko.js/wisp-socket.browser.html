@@ -18,7 +18,7 @@
       printErr: append,
       onExit: function (code) {
         var probes = lines.filter(function (line) { return line.startsWith('socket bridge:'); });
-        result.textContent = code === 0 && probes.length === 7 ? 'PASS' : 'FAIL';
+        result.textContent = code === 0 && probes.length === 10 ? 'PASS' : 'FAIL';
         result.dataset.exitCode = String(code);
         result.dataset.probes = String(probes.length);
       },
