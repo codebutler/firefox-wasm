@@ -127,3 +127,40 @@ test('two picker sessions keep workers and cancellation independent', async () =
   second.close();
   assert.equal(terminations, 2);
 });
+
+test('failed worker initialization releases the session', async () => {
+  let terminated = 0, revoked = 0, closes = 0;
+  class InitFailureWorker {
+    postMessage() { throw new Error('clone failed'); }
+    terminate() { terminated++; }
+  }
+  const context = vm.createContext({ Blob, Worker: InitFailureWorker,
+    URL: { createObjectURL() { return 'blob:picker'; }, revokeObjectURL() { revoked++; } } });
+  vm.runInContext(`${source.replace(/export /g, '')}\nglobalThis.PickerChunkEncoder = PickerChunkEncoder;`, context);
+  const reader = { size: 1, async read() { return Uint8Array.of(1); },
+    async close() { closes++; } };
+  assert.throws(() => new context.PickerChunkEncoder([reader], new AbortController().signal), /clone failed/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(terminated, 1);
+  assert.equal(revoked, 1);
+  assert.equal(closes, 1);
+});
+
+test('synchronous range-reader failure rejects the read and permits cleanup', async () => {
+  let terminated = 0, closes = 0;
+  class IdleWorker {
+    postMessage() {}
+    terminate() { terminated++; }
+  }
+  const context = vm.createContext({ Blob, Worker: IdleWorker,
+    URL: { createObjectURL() { return 'blob:picker'; }, revokeObjectURL() {} } });
+  vm.runInContext(`${source.replace(/export /g, '')}\nglobalThis.PickerChunkEncoder = PickerChunkEncoder;`, context);
+  const reader = { size: 1, read() { throw new Error('I/O failed'); },
+    async close() { closes++; } };
+  const encoder = new context.PickerChunkEncoder([reader], new AbortController().signal);
+  await assert.rejects(encoder.read(0, 0), /I\/O failed/);
+  encoder.close();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(terminated, 1);
+  assert.equal(closes, 1);
+});

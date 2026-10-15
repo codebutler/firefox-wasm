@@ -107,8 +107,13 @@ export class PickerChunkEncoder {
       this.close();
     };
     signal.addEventListener('abort', this.abort, { once: true });
-    this.worker.postMessage({ kind: 'init', blobs: sources.map(source =>
-      source instanceof Blob ? source : null) });
+    try {
+      this.worker.postMessage({ kind: 'init', blobs: sources.map(source =>
+        source instanceof Blob ? source : null) });
+    } catch (error) {
+      this.close();
+      throw error;
+    }
   }
 
   private abort = () => this.close();
@@ -127,7 +132,7 @@ export class PickerChunkEncoder {
         try { this.worker.postMessage({ kind: 'read', index, offset }); }
         catch (error) { this.pending = null; reject(error); }
       } else {
-        void source.read(offset, PICKER_CHUNK_SIZE).then(bytes => {
+        void Promise.resolve().then(() => source.read(offset, PICKER_CHUNK_SIZE)).then(bytes => {
           if (this.closed) return;
           if (!(bytes instanceof Uint8Array) || bytes.byteLength > PICKER_CHUNK_SIZE ||
               offset + bytes.byteLength > source.size)
