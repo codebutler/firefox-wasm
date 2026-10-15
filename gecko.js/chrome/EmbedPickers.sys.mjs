@@ -101,19 +101,19 @@ class FilePicker {
     const root = staging.clone(); root.append(name);
     root.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
     for (const item of result.directory.files) {
-        if (isCancelled()) throw new Error("Directory selection cancelled");
-        const parts = String(item.path || "").split("/");
-        if (!parts.length || parts.some(part => !part || part === "." || part === ".." ||
-            /[\\\x00-\x1f]/.test(part))) throw new Error("Invalid relative file path");
-        let dir = root;
-        for (const part of parts.slice(0, -1)) {
-          const next = dir.clone(); next.append(part);
-          if (!next.exists()) next.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
-          dir = next;
-        }
-        const file = dir.clone(); file.append(parts.at(-1));
-        await this.writeStreamedFile(file, item, result.session);
-        if (isCancelled()) throw new Error("Directory selection cancelled");
+      if (isCancelled()) throw new Error("Directory selection cancelled");
+      const parts = String(item.path || "").split("/");
+      if (!parts.length || parts.some(part => !part || part === "." || part === ".." ||
+          /[\\\x00-\x1f]/.test(part))) throw new Error("Invalid relative file path");
+      let dir = root;
+      for (const part of parts.slice(0, -1)) {
+        const next = dir.clone(); next.append(part);
+        if (!next.exists()) next.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+        dir = next;
+      }
+      const file = dir.clone(); file.append(parts.at(-1));
+      await this.writeStreamedFile(file, item, result.session);
+      if (isCancelled()) throw new Error("Directory selection cancelled");
     }
     return new this.window.Directory(root.path);
   }
