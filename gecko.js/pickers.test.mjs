@@ -65,10 +65,23 @@ function bridge() {
     onWrite(fn) { duringWrite = fn; },
     Child: global.DateTimePickerChild, Parent: global.DateTimePickerParent,
     picker(kind) { return factories.get(`@mozilla.org/${kind}picker;1`).createInstance(); },
+    promptCollection() { return factories.get('@mozilla.org/embedcomp/prompt-collection;1').createInstance(); },
     reply(value, callback) { reply = value; during = callback; },
     flush() { return Promise.all(deferred.splice(0).map(fn => fn())); },
   };
 }
+
+test('folder upload requires a separate host confirmation', () => {
+  const b = bridge();
+  b.reply({ confirmed: true });
+  assert.equal(b.promptCollection().confirmFolderUpload(b.context, '日本語'), true);
+  assert.deepEqual(b.calls[0], { kind: 'folder-confirm', name: '日本語', id: '1' });
+  b.reply(null);
+  assert.equal(b.promptCollection().confirmFolderUpload(b.context, 'cancelled'), false);
+  b.reply({ confirmed: true }, () => b.page.dispatchEvent(new Event('pagehide')));
+  assert.equal(b.promptCollection().confirmFolderUpload(b.context, 'navigating'), false);
+  assert.equal(b.cancelled.length, 1);
+});
 
 test('directory mode stages a private guest tree and preserves relative hierarchy', async () => {
   const b = bridge(), picker = b.picker('file');

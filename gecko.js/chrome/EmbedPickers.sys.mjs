@@ -144,6 +144,18 @@ class FilePicker {
     });
   }
 }
+// Gecko asks the embedding for a second, explicit folder-upload confirmation
+// after the directory picker completes. Without this service the native input
+// discards the selection before it can enumerate the staged tree.
+class PromptCollection {
+  QueryInterface = ChromeUtils.generateQI(["nsIPromptCollection"]);
+  asyncBeforeUnloadCheck() { return Promise.resolve(false); }
+  confirmRepost() { return false; }
+  confirmFolderUpload(context, directoryName) {
+    const reply = request({ kind: "folder-confirm", name: directoryName }, context);
+    return reply?.confirmed === true;
+  }
+}
 class ColorPicker {
   QueryInterface = ChromeUtils.generateQI(["nsIColorPicker"]);
   init(context, title, initialColor, defaultColors) {
@@ -170,6 +182,7 @@ function register(cid, contract, implementation) {
 }
 register("{7a09bf2e-fdd3-42c0-8a3c-353e232535c7}", "@mozilla.org/filepicker;1", FilePicker);
 register("{834fe019-9acb-43db-8070-28180e58c7a1}", "@mozilla.org/colorpicker;1", ColorPicker);
+register("{73a402c9-2681-4255-bbe4-90ad54107cd1}", "@mozilla.org/embedcomp/prompt-collection;1", PromptCollection);
 
 export class DateTimePickerChild extends NativeDateTimePickerChild {
   openPickerImpl(input) {
