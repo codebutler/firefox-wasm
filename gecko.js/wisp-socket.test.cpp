@@ -87,6 +87,10 @@ static void checkScopedError(const char* host, uint32_t scopeId, int expectedErr
   int socketError = 0;
   socklen_t length = sizeof(socketError);
   assert(getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0);
+  if (socketError != expectedError) {
+    std::fprintf(stderr, "socket scope error mismatch: scope=%u actual=%d expected=%d ENODEV=%d EINVAL=%d\n",
+                 scopeId, socketError, expectedError, ENODEV, EINVAL);
+  }
   assert(socketError == expectedError);
   assert(close(fd) == 0);
 }

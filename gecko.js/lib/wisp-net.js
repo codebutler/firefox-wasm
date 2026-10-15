@@ -115,10 +115,10 @@ mergeInto(LibraryManager.library, {
         }
         conn.streams = {};
         var p = conn.pending; conn.pending = [];
-        for (var j = 0; j < p.length; j++) { try { p[j](errno || 111 /* ECONNREFUSED */); } catch (e) {} }
+        for (var j = 0; j < p.length; j++) { try { p[j](errno || _wisp_errno_econnrefused()); } catch (e) {} }
       };
       client.onclose = function () { teardown(0); };
-      client.onerror = function () { teardown(111 /* ECONNREFUSED */); };
+      client.onerror = function () { teardown(_wisp_errno_econnrefused()); };
       WISP.conn = conn;
       return conn;
     },
@@ -138,7 +138,7 @@ mergeInto(LibraryManager.library, {
     },
     doConnectCustom: function (id, host, port, scopeId, factory) {
       if (scopeId && factory.supportsScopes !== true) {
-        try { _wisp_set_error(id, 95 /* EOPNOTSUPP */); } catch (e) {}
+        try { _wisp_set_error(id, _wisp_errno_eopnotsupp()); } catch (e) {}
         return;
       }
       var streams = WISP.ensureCustomStreams();
@@ -162,12 +162,12 @@ mergeInto(LibraryManager.library, {
           onError: function (code) {
             if (!streams.has(id)) return;
             streams.delete(id);
-            try { _wisp_set_error(id, (code >>> 0) || 111 /* ECONNREFUSED */); } catch (e) {}
+            try { _wisp_set_error(id, (code >>> 0) || _wisp_errno_econnrefused()); } catch (e) {}
           },
         }, scopeId);
         if (!handle || typeof handle.send !== 'function' || typeof handle.close !== 'function') {
           streams.delete(id);
-          try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {}
+          try { _wisp_set_error(id, _wisp_errno_econnrefused()); } catch (e) {}
           return;
         }
         if (streams.get(id) === pending) streams.set(id, handle);
@@ -175,7 +175,7 @@ mergeInto(LibraryManager.library, {
       } catch (e) {
         streams.delete(id);
         err('[wisp] Module.tcpTransport connect failed: ' + e);
-        try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e2) {}
+        try { _wisp_set_error(id, _wisp_errno_econnrefused()); } catch (e2) {}
       }
     },
     doConnect: function (id, host, port, scopeId) {
@@ -187,18 +187,18 @@ mergeInto(LibraryManager.library, {
       var factory = WISP.customFactory();
       if (factory) { WISP.doConnectCustom(id, host, port, scopeId, factory); return; }
       if (scopeId) {
-        try { _wisp_set_error(id, 95 /* EOPNOTSUPP */); } catch (e) {}
+        try { _wisp_set_error(id, _wisp_errno_eopnotsupp()); } catch (e) {}
         return;
       }
       var conn = WISP.ensureConn();
-      if (!conn) { try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {} return; }
+      if (!conn) { try { _wisp_set_error(id, _wisp_errno_econnrefused()); } catch (e) {} return; }
       // `failed` is set (with an errno) if the handshake collapsed while this
       // connect was still queued (teardown calls the pending thunk with an arg).
       var go = function (failed) {
         if (failed) { try { _wisp_set_error(id, failed); } catch (e) {} return; }
         var stream;
         try { stream = conn.client.create_stream(host, port & 0xffff); }
-        catch (e) { err('[wisp] create_stream failed: ' + e); try { _wisp_set_error(id, 111); } catch (e2) {} return; }
+        catch (e) { err('[wisp] create_stream failed: ' + e); try { _wisp_set_error(id, _wisp_errno_econnrefused()); } catch (e2) {} return; }
         conn.streams[id] = stream;
         stream.onmessage = function (bytes) {
           if (WISP.disposed) return;

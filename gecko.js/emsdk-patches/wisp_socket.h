@@ -474,6 +474,14 @@ inline int poll_impl(intptr_t fds_, nfds_t nfds, int timeout) {
 // ===========================================================================
 extern "C" {
 
+// The Emscripten libc uses WASI errno values, not Linux host values. Export
+// these from the same sysroot as the socket backend so JS can pass exact codes
+// before or after an asynchronous transport callback.
+int wisp_errno_econnrefused(void) { return ECONNREFUSED; }
+int wisp_errno_eopnotsupp(void) { return EOPNOTSUPP; }
+int wisp_errno_enodev(void) { return ENODEV; }
+int wisp_errno_einval(void) { return EINVAL; }
+
 void wisp_deliver(uint32_t id, const uint8_t* data, uint32_t len) {
   std::shared_ptr<wasmfs::wisp::SocketFile> s;
   {

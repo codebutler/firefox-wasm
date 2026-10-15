@@ -1,7 +1,7 @@
 // Test transport: return the destination observed by the actual JS bridge.
 Module.tcpTransport = function (host, port, callbacks, scopeId) {
   if (scopeId === 42 || scopeId === 43) {
-    callbacks.onError(scopeId === 42 ? 19 /* ENODEV */ : 22 /* EINVAL */);
+    callbacks.onError(scopeId === 42 ? Module._wisp_errno_enodev() : Module._wisp_errno_einval());
     return { send() {}, close() {} };
   }
   callbacks.onConnected();
