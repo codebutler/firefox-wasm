@@ -54,7 +54,7 @@ class FilePicker {
   init(context, title, mode, global) {
     Object.assign(this, { context, title, mode, window: global || context?.window || globalThis });
   }
-  isModeSupported(mode) { return Promise.resolve(mode === 0 || mode === 1 || mode === 3); }
+  isModeSupported(mode) { return Promise.resolve(mode === 0 || mode === 1 || mode === 2 || mode === 3); }
   appendFilters(mask) { if (mask & Ci.nsIFilePicker.filterAll) this.filters.push({ title: "All files", pattern: "*" }); }
   appendFilter(title, pattern) { this.filters.push({ title, pattern }); }
   appendRawFilter(filter) { this.rawFilters.push(filter); }
@@ -65,10 +65,51 @@ class FilePicker {
   get domFileOrDirectory() { return this.selected[0] || null; }
   get domFileOrDirectoryEnumerator() { return enumerator(this.selected); }
   get domFilesInWebKitDirectory() { return enumerator([]); }
+  async stageDirectory(result) {
+    const name = String(result.directory.name || "");
+    if (!name || name === "." || name === ".." || /[\\/\x00-\x1f]/.test(name))
+      throw new Error("Invalid directory name");
+    const staging = Services.dirsvc.get("TmpD", Ci.nsIFile);
+    staging.append("yore-upload");
+    staging.createUnique(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+    const root = staging.clone(); root.append(name);
+    root.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+    let cancelled = false;
+    const cleanup = () => {
+      cancelled = true;
+      try { staging.remove(true); } catch {}
+    };
+    this.window.addEventListener("pagehide", cleanup, { once: true });
+    try {
+      for (const item of result.directory.files) {
+        if (cancelled) throw new Error("Directory selection cancelled");
+        const parts = String(item.path || "").split("/");
+        if (!parts.length || parts.some(part => !part || part === "." || part === ".." ||
+            /[\\\x00-\x1f]/.test(part))) throw new Error("Invalid relative file path");
+        let dir = root;
+        for (const part of parts.slice(0, -1)) {
+          const next = dir.clone(); next.append(part);
+          if (!next.exists()) next.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+          dir = next;
+        }
+        const file = dir.clone(); file.append(parts.at(-1));
+        const raw = atob(item.base64);
+        const bytes = Uint8Array.from(raw, char => char.charCodeAt(0));
+        await IOUtils.write(file.path, bytes);
+        if (cancelled) throw new Error("Directory selection cancelled");
+      }
+      const directory = new this.window.Directory(root.path);
+      return directory;
+    } catch (error) {
+      this.window.removeEventListener("pagehide", cleanup);
+      cleanup();
+      throw error;
+    }
+  }
   open(callback) {
     // The interface is asynchronous: don't enter a nested event loop before
     // HTMLInputElement has finished recording that a picker is open.
-    Services.tm.dispatchToMainThread(() => {
+    Services.tm.dispatchToMainThread(async () => {
       let code = Ci.nsIFilePicker.returnCancel;
       try {
         if (this.mode === 1) {
@@ -77,10 +118,17 @@ class FilePicker {
           if (this.saveFile) code = Ci.nsIFilePicker.returnOK;
           return;
         }
-        if (this.mode !== 0 && this.mode !== 3) return;
+        if (this.mode !== 0 && this.mode !== 2 && this.mode !== 3) return;
         const result = request({ kind: "file", title: this.title,
-          multiple: this.mode === 3, filters: this.filters, filterIndex: this.filterIndex,
+          multiple: this.mode === 3, directory: this.mode === 2,
+          filters: this.filters, filterIndex: this.filterIndex,
           accept: this.rawFilters.join(","), okLabel: this.okButtonLabel }, this.context);
+        if (this.mode === 2) {
+          if (!result?.directory) return;
+          this.selected = [await this.stageDirectory(result)];
+          code = Ci.nsIFilePicker.returnOK;
+          return;
+        }
         if (!result?.files?.length) return;
         const files = this.mode === 3 ? result.files : result.files.slice(0, 1);
         this.selected = files.map(file => {
