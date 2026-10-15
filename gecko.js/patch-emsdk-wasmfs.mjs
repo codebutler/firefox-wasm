@@ -154,6 +154,55 @@ edit(join(EM, 'system/lib/libc/musl/src/network/if_nametoindex.c'),
       '}');
 });
 
+// --- 3c. Emscripten JS getaddrinfo: preserve a validated IPv6 zone --------
+// This build uses libcore.js's JS getaddrinfo, not musl's lookup_ipliteral.c.
+// A whole "fe80::2%lan" string fails inetPton6 and becomes a synthetic DNS
+// hostname unless the zone is stripped before numeric parsing. Restrict zones
+// to link-local unicast/multicast and write the index into sockaddr_in6.
+edit(join(EM, 'src/lib/libcore.js'), 'libcore.js scoped IPv6 getaddrinfo', (s) => {
+  const scopeVar = '    var port = 0;\n    var flags = 0;';
+  must(s, scopeVar, 'getaddrinfo scope variable');
+  s = s.replace(scopeVar, '    var port = 0;\n    var scopeId = 0;\n    var flags = 0;');
+
+  const sockaddrWrite = '      errno = writeSockaddr(sa, family, addr, port);';
+  must(s, sockaddrWrite, 'getaddrinfo sockaddr write');
+  s = s.replace(sockaddrWrite, sockaddrWrite + '\n' +
+    '      if (family === {{{ cDefs.AF_INET6 }}} && scopeId) {\n' +
+    "        {{{ makeSetValue('sa', C_STRUCTS.sockaddr_in6.sin6_scope_id, 'scopeId', 'i32') }}};\n" +
+    '      }');
+
+  const parse = '    node = UTF8ToString(node);\n    addr = inetPton4(node);';
+  must(s, parse, 'getaddrinfo numeric parse');
+  s = s.replace(parse, `    node = UTF8ToString(node);
+    var percent = node.indexOf('%');
+    if (percent !== -1) {
+      if (node.indexOf('%', percent + 1) !== -1) return {{{ cDefs.EAI_NONAME }}};
+      var literal = node.slice(0, percent);
+      var zone = node.slice(percent + 1);
+      if (!zone) return {{{ cDefs.EAI_NONAME }}};
+      var scopedAddress = inetPton6(literal);
+      if (scopedAddress === null) return {{{ cDefs.EAI_NONAME }}};
+      var firstByte = scopedAddress[0] & 255;
+      var secondByte = (scopedAddress[0] >>> 8) & 255;
+      var linkLocal = firstByte === 0xfe && (secondByte & 0xc0) === 0x80;
+      var multicastLinkLocal = firstByte === 0xff && (secondByte & 15) === 2;
+      if (!linkLocal && !multicastLinkLocal) return {{{ cDefs.EAI_NONAME }}};
+      if (/^[0-9]+$/.test(zone)) {
+        scopeId = Number(zone);
+      } else {
+        var lookup = (typeof Module !== 'undefined') && Module.scopeIndex;
+        if (typeof lookup !== 'function') return {{{ cDefs.EAI_NONAME }}};
+        try { scopeId = lookup(zone); }
+        catch (e) { return {{{ cDefs.EAI_NONAME }}}; }
+      }
+      if (!Number.isInteger(scopeId) || scopeId <= 0 || scopeId > 0xffffffff)
+        return {{{ cDefs.EAI_NONAME }}};
+      node = literal;
+    }
+    addr = inetPton4(node);`);
+  return s;
+});
+
 // --- 4. wasmfs.cpp: create /dev/shm (writable) at FS init -----------------
 // Gecko's IPC shared memory (SharedStringMap string bundles, shared prefs, ...)
 // uses shm_open(), which musl resolves under /dev/shm. The legacy emscripten FS
