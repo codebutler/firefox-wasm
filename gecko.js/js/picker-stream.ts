@@ -42,16 +42,23 @@ export function preparePickerStream(value: unknown, id: string): PickerStream | 
   if (!value || typeof value !== 'object') return null;
   const reply = value as { files?: readonly PickerFile[]; directory?: { name: string; files: readonly PickerFile[] } };
   const sources: PickerReadSource[] = [];
-  if (Array.isArray(reply.files)) {
-    return { metadata: { session: id, files: describe(reply.files, sources) }, sources };
+  try {
+    if (Array.isArray(reply.files)) {
+      return { metadata: { session: id, files: describe(reply.files, sources) }, sources };
+    }
+    if (reply.directory && Array.isArray(reply.directory.files)) {
+      return { metadata: { session: id, directory: {
+        name: reply.directory.name,
+        files: describe(reply.directory.files, sources),
+      } }, sources };
+    }
+    return null;
+  } catch (error) {
+    for (const source of sources) {
+      if (!(source instanceof Blob)) void source.close().catch(() => {});
+    }
+    throw error;
   }
-  if (reply.directory && Array.isArray(reply.directory.files)) {
-    return { metadata: { session: id, directory: {
-      name: reply.directory.name,
-      files: describe(reply.directory.files, sources),
-    } }, sources };
-  }
-  return null;
 }
 
 export const PICKER_CHUNK_SIZE = 64 * 1024;

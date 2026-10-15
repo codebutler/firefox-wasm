@@ -20,6 +20,17 @@ test('picker metadata retains file identity but never serializes payloads', () =
   assert.ok(!JSON.stringify(selection.metadata).includes('255'));
 });
 
+test('invalid later metadata closes range sources already selected', async () => {
+  let closes = 0;
+  const reader = { size: 3, async read() { return Uint8Array.of(1, 2, 3); },
+    async close() { closes++; } };
+  assert.throws(() => stream.preparePickerStream({ files: [
+    { name: 'first', source: reader }, { name: 'invalid', source: { size: -1 } },
+  ] }, 'picker-invalid'), /not a readable source/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closes, 1);
+});
+
 test('worker encodes only the requested chunk, including binary and an empty file', async () => {
   const worker = new Worker(`const {parentPort}=require('node:worker_threads');
     globalThis.self={postMessage:(...args)=>parentPort.postMessage(...args)};
