@@ -1,0 +1,21 @@
+gecko.js/chrome/EmbedPickers.sys.mjs
+  s_e94526f07ce98a::t_02de83280ba76c 153,156
+gecko.js/pickers.test.mjs
+  s_e94526f07ce98a::t_f6eda22a57d71c 223-233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7e0c50035fc6d922681e725e975526b3207ef170",
+  "prompts": {},
+  "sessions": {
+    "s_e94526f07ce98a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13d58-8e3c-75a3-a98d-1725c0995ceb",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
