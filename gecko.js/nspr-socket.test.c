@@ -4,6 +4,7 @@
 #include "prnetdb.h"
 #include "prerror.h"
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +58,36 @@ static void check(const char* host, PRUint16 family, const char* expected,
   printf("NSPR socket: %s (%s) -> %s\n", host, nonblocking ? "nonblocking" : "blocking", response);
 }
 
+// The URL/name parser does not supply a zone yet. Exercise the NSPR socket
+// seam directly with the numeric interface index a guest would obtain later.
+static void checkScoped(PRUint32 scopeId, int expectedError) {
+  PRNetAddr address;
+  assert(PR_StringToNetAddr("fe80::2", &address) == PR_SUCCESS);
+  assert(address.raw.family == PR_AF_INET6);
+  address.ipv6.port = PR_htons(8080);
+  address.ipv6.scope_id = scopeId;
+  PRFileDesc* fd = PR_OpenTCPSocket(PR_AF_INET6);
+  assert(fd);
+  PRStatus result = PR_Connect(fd, &address, PR_SecondsToInterval(5));
+  if (expectedError) {
+    assert(result == PR_FAILURE);
+    assert(PR_GetOSError() == expectedError);
+  } else {
+    assert(result == PR_SUCCESS);
+    PRNetAddr peer;
+    assert(PR_GetPeerName(fd, &peer) == PR_SUCCESS);
+    assert(peer.ipv6.scope_id == scopeId);
+    PRPollDesc poll = {.fd = fd, .in_flags = PR_POLL_READ};
+    assert(PR_Poll(&poll, 1, PR_SecondsToInterval(5)) == 1);
+    char response[128] = {0};
+    assert(PR_Recv(fd, response, sizeof(response) - 1, 0, PR_SecondsToInterval(5)) > 0);
+    assert(strcmp(response, "fe80::2:8080:41") == 0);
+  }
+  assert(PR_Close(fd) == PR_SUCCESS);
+  printf("NSPR scoped socket: fe80::2%%%u -> %s\n", scopeId,
+         expectedError ? "rejected" : "connected");
+}
+
 // NSPR retains Linux sendfile in its method table. Like Gecko's unsupported
 // syscall stub it must never run here; networking is not replaced by a stub.
 ssize_t sendfile(int out_fd, int in_fd, off_t* offset, size_t count) { abort(); }
@@ -71,5 +102,8 @@ int main(void) {
     check("probe.test", PR_AF_UNSPEC, "probe.test:8080", nonblocking);
     check("probe.test", PR_AF_INET, "probe.test:8080", nonblocking);
   }
+  checkScoped(41, 0);
+  checkScoped(42, ENODEV);
+  checkScoped(43, EINVAL);
   return 0;
 }
