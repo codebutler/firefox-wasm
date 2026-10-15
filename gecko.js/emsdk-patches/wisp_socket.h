@@ -39,7 +39,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -474,18 +473,6 @@ inline int poll_impl(intptr_t fds_, nfds_t nfds, int timeout) {
 //     stub, so Necko's setsockopt() calls succeed.
 // ===========================================================================
 extern "C" {
-unsigned gecko_scope_index(const char* name);
-
-// Guest interface names are supplied by the embedder's live L3 catalogue.
-// The default musl implementation probes an AF_UNIX ioctl, which has no
-// interface table in the WasmFS guest.
-unsigned if_nametoindex(const char* name) {
-  if (!name) { errno = EINVAL; return 0; }
-  unsigned index = gecko_scope_index(name);
-  if (!index) errno = ENODEV;
-  return index;
-}
-
 // The Emscripten libc uses WASI errno values, not Linux host values. Export
 // these from the same sysroot as the socket backend so JS can pass exact codes
 // before or after an asynchronous transport callback.

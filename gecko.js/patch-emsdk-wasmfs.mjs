@@ -130,6 +130,30 @@ edit(join(WASMFS, 'syscalls.cpp'), 'syscalls.cpp WISP sockets', (s) => {
   return s;
 });
 
+// --- 3b. musl: resolve guest interface names through the embedder ---------
+// musl's stock if_nametoindex() probes an AF_UNIX ioctl, which WasmFS cannot
+// serve. Patch the libc definition itself: if_indextoname() shares the same
+// archive object, so defining a second strong symbol in syscalls.cpp produces
+// a duplicate-symbol link failure when that object is pulled in.
+edit(join(EM, 'system/lib/libc/musl/src/network/if_nametoindex.c'),
+     'musl if_nametoindex live L3 scope lookup', (s) => {
+  const fn = /unsigned if_nametoindex\(const char \*name\)\n\{[\s\S]*?\n\}/;
+  if (!fn.test(s)) {
+    console.error('patch-emsdk-wasmfs: musl if_nametoindex body not found -- update this patch.');
+    process.exit(1);
+  }
+  return s.replace('#include <net/if.h>', '#include <net/if.h>\n#include <errno.h>')
+    .replace(fn,
+      'extern unsigned gecko_scope_index(const char *name);\n' +
+      'unsigned if_nametoindex(const char *name)\n' +
+      '{\n' +
+      '  if (!name) { errno = EINVAL; return 0; }\n' +
+      '  unsigned index = gecko_scope_index(name);\n' +
+      '  if (!index) errno = ENODEV;\n' +
+      '  return index;\n' +
+      '}');
+});
+
 // --- 4. wasmfs.cpp: create /dev/shm (writable) at FS init -----------------
 // Gecko's IPC shared memory (SharedStringMap string bundles, shared prefs, ...)
 // uses shm_open(), which musl resolves under /dev/shm. The legacy emscripten FS
@@ -197,8 +221,10 @@ const cacheLib = join(EM, 'cache', 'sysroot', 'lib', 'wasm32-emscripten');
 let removed = 0;
 if (existsSync(cacheLib)) {
   for (const f of readdirSync(cacheLib)) {
-    if (/^libwasmfs.*\.a$/.test(f)) { rmSync(join(cacheLib, f)); removed++; }
+    if (/^(?:libwasmfs.*|libc(?:-mt)?(?:-debug)?)\.a$/.test(f)) {
+      rmSync(join(cacheLib, f)); removed++;
+    }
   }
 }
-console.log('patch-emsdk-wasmfs: cleared ' + removed + ' cached libwasmfs archive(s); they rebuild on next link');
+console.log('patch-emsdk-wasmfs: cleared ' + removed + ' cached WasmFS/libc archive(s); they rebuild on next link');
 console.log('patch-emsdk-wasmfs: done');
