@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <cassert>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -11,6 +12,9 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+static_assert(offsetof(sockaddr_in6, sin6_scope_id) ==
+              offsetof(sockaddr_in6, sin6_addr) + sizeof(in6_addr));
 
 // Emscripten getaddrinfo treats a %zone literal as a synthetic hostname. The
 // scoped socket contract begins at sockaddr_in6; URL/name parsing is separate.

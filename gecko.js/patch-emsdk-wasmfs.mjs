@@ -168,7 +168,9 @@ edit(join(EM, 'src/lib/libcore.js'), 'libcore.js scoped IPv6 getaddrinfo', (s) =
   must(s, sockaddrWrite, 'getaddrinfo sockaddr write');
   s = s.replace(sockaddrWrite, sockaddrWrite + '\n' +
     '      if (family === {{{ cDefs.AF_INET6 }}} && scopeId) {\n' +
-    "        {{{ makeSetValue('sa', C_STRUCTS.sockaddr_in6.sin6_scope_id, 'scopeId', 'i32') }}};\n" +
+    // The pinned struct metadata omits sin6_scope_id. It follows the 16-byte
+    // sin6_addr; the fixture asserts this offset against the C ABI.
+    "        {{{ makeSetValue('sa', C_STRUCTS.sockaddr_in6.sin6_addr.__in6_union.__s6_addr+16, 'scopeId', 'i32') }}};\n" +
     '      }');
 
   const parse = '    node = UTF8ToString(node);\n    addr = inetPton4(node);';
