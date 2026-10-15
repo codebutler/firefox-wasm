@@ -78,6 +78,9 @@ test('folder upload requires a separate host confirmation', () => {
   assert.deepEqual(b.calls[0], { kind: 'folder-confirm', name: '日本語', id: '1' });
   b.reply(null);
   assert.equal(b.promptCollection().confirmFolderUpload(b.context, 'cancelled'), false);
+  b.reply({ confirmed: true }, () => b.page.dispatchEvent(new Event('pagehide')));
+  assert.equal(b.promptCollection().confirmFolderUpload(b.context, 'navigating'), false);
+  assert.equal(b.cancelled.length, 1);
 });
 
 test('directory mode stages a private guest tree and preserves relative hierarchy', async () => {

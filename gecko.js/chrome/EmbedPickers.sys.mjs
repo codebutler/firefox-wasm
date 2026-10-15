@@ -151,8 +151,8 @@ class PromptCollection {
   QueryInterface = ChromeUtils.generateQI(["nsIPromptCollection"]);
   asyncBeforeUnloadCheck() { return Promise.resolve(false); }
   confirmRepost() { return false; }
-  confirmFolderUpload(_context, directoryName) {
-    const reply = request({ kind: "folder-confirm", name: directoryName });
+  confirmFolderUpload(context, directoryName) {
+    const reply = request({ kind: "folder-confirm", name: directoryName }, context);
     return reply?.confirmed === true;
   }
 }
