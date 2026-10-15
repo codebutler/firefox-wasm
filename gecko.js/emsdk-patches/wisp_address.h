@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -31,9 +32,12 @@ struct SocketAddress {
     if (family != domain || (family != AF_INET && family != AF_INET6)) return -EAFNOSUPPORT;
     const socklen_t required = family == AF_INET6 ? sizeof(sockaddr_in6) : sizeof(sockaddr_in);
     if (length < required) return -EINVAL;
-    // Neither transport exposes an interface index. Reject scoped destinations
-    // instead of silently connecting to the wrong interface.
-    if (family == AF_INET6 && ((const sockaddr_in6*)address)->sin6_scope_id) return -EOPNOTSUPP;
+    // The IPv4-mapped transport host becomes IPv4, where a v6 scope has no
+    // meaning. Preserve all other v6 scope IDs for the transport boundary.
+    if (family == AF_INET6) {
+      const auto* v6 = (const sockaddr_in6*)address;
+      if (v6->sin6_scope_id && IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) return -EINVAL;
+    }
     value = {};
     std::memcpy(&value, address, required);
     size = required;
@@ -44,6 +48,10 @@ struct SocketAddress {
     return ntohs(value.ss_family == AF_INET6
       ? ((const sockaddr_in6*)&value)->sin6_port
       : ((const sockaddr_in*)&value)->sin_port);
+  }
+
+  uint32_t scopeId() const {
+    return value.ss_family == AF_INET6 ? ((const sockaddr_in6*)&value)->sin6_scope_id : 0;
   }
 
   const char* transportHost(char (&buffer)[INET6_ADDRSTRLEN]) const {

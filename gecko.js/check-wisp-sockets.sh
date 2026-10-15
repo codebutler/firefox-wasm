@@ -7,6 +7,6 @@ SOCKET_TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$SOCKET_TEST_DIR"' EXIT
 "$EMXX" "$HERE/wisp-socket.test.cpp" -o "$SOCKET_TEST_DIR/test.js" \
   -pthread -sWASMFS=1 -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -sENVIRONMENT=node \
-  -sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error \
+  -sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error,_wisp_errno_econnrefused,_wisp_errno_eopnotsupp,_wisp_errno_enodev,_wisp_errno_einval \
   --js-library "$HERE/lib/wisp-net.js" --pre-js "$HERE/wisp-socket.pre.js"
 node "$SOCKET_TEST_DIR/test.js"

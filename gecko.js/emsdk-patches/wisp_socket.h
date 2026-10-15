@@ -62,7 +62,7 @@ namespace wisp {
 // ---------------------------------------------------------------------------
 extern "C" {
 void wisp_open(uint32_t id);
-void wisp_connect(uint32_t id, const char* host, uint32_t port);
+void wisp_connect(uint32_t id, const char* host, uint32_t port, uint32_t scopeId);
 void wisp_send(uint32_t id, const uint8_t* buf, uint32_t len);
 void wisp_close(uint32_t id);
 }
@@ -139,7 +139,7 @@ public:
     // forever: a hard deadlock. (The send/recv paths are safe: doSend/doClose on
     // the main thread never re-lock this mutex.)
     char host[INET6_ADDRSTRLEN];
-    wisp_connect(id, address.transportHost(host), address.port());
+    wisp_connect(id, address.transportHost(host), address.port(), address.scopeId());
   }
   int takeError() { // SO_ERROR: read-and-clear
     std::lock_guard<std::recursive_mutex> g(mutex);
@@ -473,6 +473,14 @@ inline int poll_impl(intptr_t fds_, nfds_t nfds, int timeout) {
 //     stub, so Necko's setsockopt() calls succeed.
 // ===========================================================================
 extern "C" {
+
+// The Emscripten libc uses WASI errno values, not Linux host values. Export
+// these from the same sysroot as the socket backend so JS can pass exact codes
+// before or after an asynchronous transport callback.
+int wisp_errno_econnrefused(void) { return ECONNREFUSED; }
+int wisp_errno_eopnotsupp(void) { return EOPNOTSUPP; }
+int wisp_errno_enodev(void) { return ENODEV; }
+int wisp_errno_einval(void) { return EINVAL; }
 
 void wisp_deliver(uint32_t id, const uint8_t* data, uint32_t len) {
   std::shared_ptr<wasmfs::wisp::SocketFile> s;

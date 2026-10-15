@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
+// Emscripten's WASI errno ABI, supplied by the C sysroot exports in production.
+const ERRNO = { ECONNREFUSED: 14, EINVAL: 28, ENODEV: 43, EOPNOTSUPP: 138 };
+
 function bridge(factory, names = { '172.29.5.9': 'probe.test' }) {
   const library = {};
   const events = [];
@@ -26,13 +29,17 @@ function bridge(factory, names = { '172.29.5.9': 'probe.test' }) {
     _wisp_set_connected: id => events.push(['connected', id]),
     _wisp_set_eof: id => events.push(['eof', id]),
     _wisp_set_error: (id, code) => events.push(['error', id, code]),
+    _wisp_errno_econnrefused: () => ERRNO.ECONNREFUSED,
+    _wisp_errno_eopnotsupp: () => ERRNO.EOPNOTSUPP,
+    _wisp_errno_enodev: () => ERRNO.ENODEV,
+    _wisp_errno_einval: () => ERRNO.EINVAL,
     _wisp_deliver: (id, ptr, len) => events.push(['data', id, Array.from(heap.slice(ptr, ptr + len))]),
   };
   vm.runInNewContext(readFileSync(new URL('./lib/wisp-net.js', import.meta.url), 'utf8'), context);
   context.WISP = library.$WISP;
-  function connect(id, host, port) {
+  function connect(id, host, port, scopeId = 0) {
     heap.set(new TextEncoder().encode(host + '\0'), 64);
-    library.wisp_connect(id, 64, port);
+    library.wisp_connect(id, 64, port, scopeId);
     heap.fill(0, 64, 128); // C++ stack string expires when the sync proxy returns.
   }
   return { library, events, heap, clients, connect, WISP: library.$WISP };
@@ -69,13 +76,57 @@ test('custom synchronous connection/data callbacks are retained', () => {
 test('a synchronous failure does not resurrect a custom stream', () => {
   let closed = false;
   const b = bridge((host, port, cb) => {
-    cb.onError(111);
+    cb.onError(ERRNO.ECONNREFUSED);
     return { send() {}, close() { closed = true; } };
   });
   b.connect(9, '172.29.5.9', 80);
-  assert.deepEqual(b.events, [['error', 9, 111]]);
+  assert.deepEqual(b.events, [['error', 9, ERRNO.ECONNREFUSED]]);
   assert.equal(b.WISP.customStreams.has(9), false);
   assert.equal(closed, true);
+});
+
+test('scoped destination fails closed with an older custom transport', () => {
+  let calls = 0;
+  const b = bridge(() => { calls++; throw new Error('must not be called'); });
+  b.connect(10, 'fe80::2', 8080, 41);
+  assert.equal(calls, 0);
+  assert.deepEqual(b.events, [['error', 10, ERRNO.EOPNOTSUPP]]);
+  assert.equal(b.clients.length, 0);
+});
+
+test('scoped custom transport receives the exact index and preserves invalid/stale errno', () => {
+  const observed = [];
+  const factory = (host, port, callbacks, scopeId) => {
+    observed.push([host, port, scopeId]);
+    callbacks.onError(scopeId === 41 ? ERRNO.ENODEV : ERRNO.EINVAL);
+    return { send() {}, close() {} };
+  };
+  factory.supportsScopes = true;
+  const b = bridge(factory);
+  b.connect(11, 'fe80::2', 8080, 41);
+  b.connect(12, 'fe80::2', 8080, 0xffffffff);
+  assert.deepEqual(observed, [['fe80::2', 8080, 41], ['fe80::2', 8080, 0xffffffff]]);
+  assert.deepEqual(b.events, [['error', 11, ERRNO.ENODEV], ['error', 12, ERRNO.EINVAL]]);
+  assert.equal(b.WISP.customStreams.size, 0);
+  assert.equal(b.clients.length, 0);
+});
+
+test('scoped destination fails closed on the WISP fallback', () => {
+  const b = bridge();
+  b.connect(13, 'fe80::2', 8080, 41);
+  assert.deepEqual(b.events, [['error', 13, ERRNO.EOPNOTSUPP]]);
+  assert.equal(b.clients.length, 0);
+});
+
+test('ordinary custom and WISP failures use the target libc errno', () => {
+  const custom = bridge(() => { throw new Error('connect failed'); });
+  custom.connect(21, '192.0.2.7', 8080);
+  assert.deepEqual(custom.events.at(-1), ['error', 21, ERRNO.ECONNREFUSED]);
+
+  const wisp = bridge();
+  wisp.connect(22, '192.0.2.7', 8080);
+  wisp.clients[0].onerror();
+  assert.deepEqual(wisp.events, [['error', 22, ERRNO.ECONNREFUSED]]);
 });
 
 test('WISP fallback waits for handshake and forwards bytes and EOF', () => {

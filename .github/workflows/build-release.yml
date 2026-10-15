@@ -276,6 +276,16 @@ jobs:
           bash gecko.js/check-wisp-sockets.sh
           python3 gecko.js/check-nspr-sockets.py
 
+      - name: Build browser WasmFS socket fixture
+        run: bash gecko.js/build-wisp-browser-fixture.sh browser-socket-fixture
+
+      - name: Upload browser WasmFS socket fixture
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-socket-fixture
+          path: browser-socket-fixture/
+          if-no-files-found: error
+
       # Memory headroom safety net. Engine LTO is OFF by default (it needs >54 GiB and
       # OOM-killed this 8-core/~31 GiB runner), so the big remaining spike is wasm-opt
       # -O3 over the ~250 MB module at the final relink. Adding swap lets a peak above
