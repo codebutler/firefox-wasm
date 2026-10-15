@@ -82,7 +82,7 @@ const GRE_MOUNT = 0;
 const opfsAbs = (p: string) => '/opfs/' + p.replace(/^\/+|\/+$/g, '');
 
 /** Optional embedder TCP transport — see Module.tcpTransport in wisp-net.js. */
-export type TcpTransportFactory = (
+export type TcpTransportFactory = ((
   host: string,
   port: number,
   handlers: {
@@ -91,7 +91,11 @@ export type TcpTransportFactory = (
     onEof: () => void;
     onError: (code?: number) => void;
   },
-) => { send: (chunk: Uint8Array) => void; close: () => void };
+  scopeId: number,
+) => { send: (chunk: Uint8Array) => void; close: () => void }) & {
+  /** Required to receive nonzero IPv6 scope IDs; otherwise they fail closed. */
+  supportsScopes?: true;
+};
 
 export interface GeckoContextMenuInfo {
   x: number;
@@ -146,9 +150,11 @@ export interface GeckoOptions {
   /**
    * Optional TCP transport factory. When set, Necko sockets route through it
    * instead of the WISP WebSocket (`Module.wispUrl` is unused). Signature:
-   *   connect(host, port, { onData, onConnected, onEof, onError }) → { send, close }
+   *   connect(host, port, { onData, onConnected, onEof, onError }, scopeId) → { send, close }
    * Return the handle synchronously; fire `onConnected` when the duplex is
    * ready (may be async). Generic embedder API — see gecko.js/lib/wisp-net.js.
+   * Set supportsScopes=true on the function before accepting nonzero scopeId;
+   * otherwise the bridge rejects scoped connections with EOPNOTSUPP.
    */
   tcpTransport?: TcpTransportFactory;
   /**

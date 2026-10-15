@@ -58,7 +58,15 @@ int main() {
   assert(peer.value.ss_family == AF_INET6);
   assert(peer.port() == 8080);
   sa->sin6_scope_id = 3;
-  assert(peer.parse(AF_INET6, (sockaddr*)sa, mapped.size) == -EOPNOTSUPP);
+  assert(peer.parse(AF_INET6, (sockaddr*)sa, mapped.size) == -EINVAL);
+  assert(peer.scopeId() == 0);
+  assert(inet_pton(AF_INET6, "fe80::2", &sa->sin6_addr) == 1);
+  assert(peer.parse(AF_INET6, (sockaddr*)sa, mapped.size) == 0);
+  assert(peer.scopeId() == 3);
+  sockaddr_storage scopedCopy{};
+  socklen_t scopedLength = sizeof(scopedCopy);
+  assert(peer.copyTo((sockaddr*)&scopedCopy, &scopedLength) == 0);
+  assert(((sockaddr_in6*)&scopedCopy)->sin6_scope_id == 3);
   sockaddr_storage output{};
   socklen_t length = sizeof(output);
   assert(SocketAddress{}.copyTo((sockaddr*)&output, &length) == -ENOTCONN);

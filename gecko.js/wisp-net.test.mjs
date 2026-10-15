@@ -30,9 +30,9 @@ function bridge(factory, names = { '172.29.5.9': 'probe.test' }) {
   };
   vm.runInNewContext(readFileSync(new URL('./lib/wisp-net.js', import.meta.url), 'utf8'), context);
   context.WISP = library.$WISP;
-  function connect(id, host, port) {
+  function connect(id, host, port, scopeId = 0) {
     heap.set(new TextEncoder().encode(host + '\0'), 64);
-    library.wisp_connect(id, 64, port);
+    library.wisp_connect(id, 64, port, scopeId);
     heap.fill(0, 64, 128); // C++ stack string expires when the sync proxy returns.
   }
   return { library, events, heap, clients, connect, WISP: library.$WISP };
@@ -76,6 +76,39 @@ test('a synchronous failure does not resurrect a custom stream', () => {
   assert.deepEqual(b.events, [['error', 9, 111]]);
   assert.equal(b.WISP.customStreams.has(9), false);
   assert.equal(closed, true);
+});
+
+test('scoped destination fails closed with an older custom transport', () => {
+  let calls = 0;
+  const b = bridge(() => { calls++; throw new Error('must not be called'); });
+  b.connect(10, 'fe80::2', 8080, 41);
+  assert.equal(calls, 0);
+  assert.deepEqual(b.events, [['error', 10, 95]]);
+  assert.equal(b.clients.length, 0);
+});
+
+test('scoped custom transport receives the exact index and preserves invalid/stale errno', () => {
+  const observed = [];
+  const factory = (host, port, callbacks, scopeId) => {
+    observed.push([host, port, scopeId]);
+    callbacks.onError(scopeId === 41 ? 19 /* ENODEV: stale */ : 22 /* EINVAL: invalid */);
+    return { send() {}, close() {} };
+  };
+  factory.supportsScopes = true;
+  const b = bridge(factory);
+  b.connect(11, 'fe80::2', 8080, 41);
+  b.connect(12, 'fe80::2', 8080, 0xffffffff);
+  assert.deepEqual(observed, [['fe80::2', 8080, 41], ['fe80::2', 8080, 0xffffffff]]);
+  assert.deepEqual(b.events, [['error', 11, 19], ['error', 12, 22]]);
+  assert.equal(b.WISP.customStreams.size, 0);
+  assert.equal(b.clients.length, 0);
+});
+
+test('scoped destination fails closed on the WISP fallback', () => {
+  const b = bridge();
+  b.connect(13, 'fe80::2', 8080, 41);
+  assert.deepEqual(b.events, [['error', 13, 95]]);
+  assert.equal(b.clients.length, 0);
 });
 
 test('WISP fallback waits for handshake and forwards bytes and EOF', () => {

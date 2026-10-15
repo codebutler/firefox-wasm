@@ -62,7 +62,7 @@ namespace wisp {
 // ---------------------------------------------------------------------------
 extern "C" {
 void wisp_open(uint32_t id);
-void wisp_connect(uint32_t id, const char* host, uint32_t port);
+void wisp_connect(uint32_t id, const char* host, uint32_t port, uint32_t scopeId);
 void wisp_send(uint32_t id, const uint8_t* buf, uint32_t len);
 void wisp_close(uint32_t id);
 }
@@ -139,7 +139,7 @@ public:
     // forever: a hard deadlock. (The send/recv paths are safe: doSend/doClose on
     // the main thread never re-lock this mutex.)
     char host[INET6_ADDRSTRLEN];
-    wisp_connect(id, address.transportHost(host), address.port());
+    wisp_connect(id, address.transportHost(host), address.port(), address.scopeId());
   }
   int takeError() { // SO_ERROR: read-and-clear
     std::lock_guard<std::recursive_mutex> g(mutex);

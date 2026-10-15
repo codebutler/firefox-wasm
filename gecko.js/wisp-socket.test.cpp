@@ -49,9 +49,31 @@ static void check(const char* host, int family, const char* expected) {
   printf("socket bridge: %s (family %d) -> %s\n", host, family, expected);
 }
 
+static void checkScopedError(const char* host, int expectedError) {
+  addrinfo hint{}, *address = nullptr;
+  hint.ai_family = AF_INET6;
+  hint.ai_socktype = SOCK_STREAM;
+  assert(getaddrinfo(host, "8080", &hint, &address) == 0);
+  int fd = socket(AF_INET6, SOCK_STREAM, 0);
+  assert(fd >= 0);
+  assert(connect(fd, address->ai_addr, address->ai_addrlen) == -1 && errno == EINPROGRESS);
+  pollfd poller{fd, POLLERR, 0};
+  assert(poll(&poller, 1, 1000) == 1);
+  assert(poller.revents & POLLERR);
+  int socketError = 0;
+  socklen_t length = sizeof(socketError);
+  assert(getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0);
+  assert(socketError == expectedError);
+  assert(close(fd) == 0);
+  freeaddrinfo(address);
+}
+
 int main() {
   check("192.0.2.7", AF_INET, "192.0.2.7:8080");
   check("fdcb:0:9:2:1234:5678:9abc:def0", AF_INET6, "fdcb:0:9:2:1234:5678:9abc:def0:8080");
+  check("fe80::2%41", AF_INET6, "fe80::2:8080:41");
+  checkScopedError("fe80::2%42", ENODEV);
+  checkScopedError("fe80::2%43", EINVAL);
   check("::1", AF_INET6, "::1:8080");
   check("::ffff:192.0.2.7", AF_INET6, "192.0.2.7:8080");
   check("probe.test", AF_INET, "probe.test:8080");

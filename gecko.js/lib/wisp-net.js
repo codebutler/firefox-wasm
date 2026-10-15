@@ -20,7 +20,9 @@
 // the old SOCKFS-proxied-to-main model).
 
 // Optional embedder transport — Module.tcpTransport:
-//   connect(host, port, { onData, onConnected, onEof, onError }) → { send, close }
+//   connect(host, port, { onData, onConnected, onEof, onError }, scopeId) → { send, close }
+// A factory must set supportsScopes = true to accept nonzero scope IDs. Older
+// factories remain valid for unscoped connections and cannot silently drop one.
 // When set, every stream routes through that factory and the WISP WebSocket is
 // never opened. Absent → current WISP path, byte-for-byte. Generic embedder API
 // (no host-app imports); pc uses it to bridge onto its own hostConnect() seam.
@@ -134,7 +136,11 @@ mergeInto(LibraryManager.library, {
       HEAPU8.set(u8, ptr);
       try { _wisp_deliver(id, ptr, u8.length); } finally { _free(ptr); }
     },
-    doConnectCustom: function (id, host, port, factory) {
+    doConnectCustom: function (id, host, port, scopeId, factory) {
+      if (scopeId && factory.supportsScopes !== true) {
+        try { _wisp_set_error(id, 95 /* EOPNOTSUPP */); } catch (e) {}
+        return;
+      }
       var streams = WISP.ensureCustomStreams();
       // A transport may report connection/data synchronously from its factory.
       // Register ownership first; terminal callbacks remove it and must not be
@@ -158,7 +164,7 @@ mergeInto(LibraryManager.library, {
             streams.delete(id);
             try { _wisp_set_error(id, (code >>> 0) || 111 /* ECONNREFUSED */); } catch (e) {}
           },
-        });
+        }, scopeId);
         if (!handle || typeof handle.send !== 'function' || typeof handle.close !== 'function') {
           streams.delete(id);
           try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {}
@@ -172,14 +178,18 @@ mergeInto(LibraryManager.library, {
         try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e2) {}
       }
     },
-    doConnect: function (id, host, port) {
+    doConnect: function (id, host, port, scopeId) {
       if (WISP.disposed) return;
       // Synthetic DNS addresses (including IPv4-mapped IPv6, normalized by
       // C++) resolve back to hostnames; real IP literals pass through unchanged.
       try { if (DNS.lookup_addr) { var nm = DNS.lookup_addr(host); if (nm) host = nm; } } catch (e) {}
 
       var factory = WISP.customFactory();
-      if (factory) { WISP.doConnectCustom(id, host, port, factory); return; }
+      if (factory) { WISP.doConnectCustom(id, host, port, scopeId, factory); return; }
+      if (scopeId) {
+        try { _wisp_set_error(id, 95 /* EOPNOTSUPP */); } catch (e) {}
+        return;
+      }
       var conn = WISP.ensureConn();
       if (!conn) { try { _wisp_set_error(id, 111 /* ECONNREFUSED */); } catch (e) {} return; }
       // `failed` is set (with an errno) if the handshake collapsed while this
@@ -257,7 +267,9 @@ mergeInto(LibraryManager.library, {
 
   wisp_connect__proxy: 'sync',
   wisp_connect__deps: ['$WISP', '$UTF8ToString'],
-  wisp_connect: function (id, host, port) { WISP.doConnect(id >>> 0, UTF8ToString(host), port >>> 0); },
+  wisp_connect: function (id, host, port, scopeId) {
+    WISP.doConnect(id >>> 0, UTF8ToString(host), port >>> 0, scopeId >>> 0);
+  },
 
   wisp_send__proxy: 'sync',
   wisp_send__deps: ['$WISP'],
