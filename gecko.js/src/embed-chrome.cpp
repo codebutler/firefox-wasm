@@ -292,10 +292,19 @@ class EmbedPickerObserver final : public nsIObserver {
       }, id.get());
       return NS_OK;
     }
+    if (!strcmp(topic, "gecko-embed-picker-close")) {
+      NS_ConvertUTF16toUTF8 id(data);
+      MAIN_THREAD_EM_ASM({
+        if (Module['geckoClosePicker']) Module['geckoClosePicker'](UTF8ToString($0));
+      }, id.get());
+      return NS_OK;
+    }
     nsCOMPtr<nsISupportsString> result = do_QueryInterface(subject);
     if (!result) return NS_ERROR_INVALID_ARG;
     PromptReply reply;
-    HostPromptJson(NS_ConvertUTF16toUTF8(data), reply, "geckoOnPicker");
+    HostPromptJson(NS_ConvertUTF16toUTF8(data), reply,
+                   !strcmp(topic, "gecko-embed-picker-chunk")
+                     ? "geckoReadPickerChunk" : "geckoOnPicker");
     return result->SetData(NS_ConvertUTF8toUTF16(
         reply.ok && reply.value ? reply.value : "null"));
   }
@@ -362,6 +371,8 @@ void RegisterEmbedChrome() {
     RefPtr<EmbedPickerObserver> picker = new EmbedPickerObserver();
     observers->AddObserver(picker, "gecko-embed-picker", false);
     observers->AddObserver(picker, "gecko-embed-picker-cancel", false);
+    observers->AddObserver(picker, "gecko-embed-picker-chunk", false);
+    observers->AddObserver(picker, "gecko-embed-picker-close", false);
     RefPtr<EmbedSaveObserver> save = new EmbedSaveObserver();
     observers->AddObserver(save, "gecko-embed-save-choose", false);
     observers->AddObserver(save, "gecko-embed-save-cancel", false);
