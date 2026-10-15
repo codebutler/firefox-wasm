@@ -40,6 +40,11 @@ static void check(const char* host, int family, const char* expected) {
   length = 3;
   const ssize_t count = recvfrom(fd, bytes, sizeof(bytes) - 1, 0, (sockaddr*)guard, &length);
   assert(count > 0);
+  if (std::strcmp(bytes, expected) != 0) {
+    std::fprintf(stderr, "socket bridge mismatch: host=%s actual=%s expected=%s scope=%u\n",
+                 host, bytes, expected,
+                 family == AF_INET6 ? ((const sockaddr_in6*)address->ai_addr)->sin6_scope_id : 0);
+  }
   assert(std::strcmp(bytes, expected) == 0);
   assert(length == address->ai_addrlen);
   assert(std::memcmp(guard, address->ai_addr, 3) == 0);
