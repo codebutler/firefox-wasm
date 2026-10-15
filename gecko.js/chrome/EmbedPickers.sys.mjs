@@ -10,6 +10,16 @@ let nextId = 0;
 function cancel(id) {
   Services.obs.notifyObservers(null, "gecko-embed-picker-cancel", id);
 }
+function closePicker(id) {
+  Services.obs.notifyObservers(null, "gecko-embed-picker-close", id);
+}
+function readPickerChunk(session, index, offset) {
+  const result = Cc["@mozilla.org/supports-string;1"].createInstance(Ci.nsISupportsString);
+  result.data = "null";
+  Services.obs.notifyObservers(result, "gecko-embed-picker-chunk",
+    JSON.stringify({ id: session, index, offset }));
+  return JSON.parse(result.data);
+}
 function request(data, context, state = {}) {
   const id = String(++nextId);
   state.id = id;
@@ -65,24 +75,33 @@ class FilePicker {
   get domFileOrDirectory() { return this.selected[0] || null; }
   get domFileOrDirectoryEnumerator() { return enumerator(this.selected); }
   get domFilesInWebKitDirectory() { return enumerator([]); }
-  async stageDirectory(result) {
+  async writeStreamedFile(file, item, session) {
+    if (!Number.isSafeInteger(item.index) || !Number.isSafeInteger(item.size) || item.size < 0)
+      throw new Error("Invalid picker file metadata");
+    let offset = 0;
+    if (item.size === 0) {
+      await IOUtils.write(file.path, new Uint8Array(), { mode: "create" });
+      return;
+    }
+    while (offset < item.size) {
+      const result = readPickerChunk(session, item.index, offset);
+      if (typeof result?.data !== "string") throw new Error("Picker stream closed");
+      const raw = atob(result.data);
+      const bytes = Uint8Array.from(raw, char => char.charCodeAt(0));
+      if (!bytes.length || bytes.length > 65536 || offset + bytes.length > item.size)
+        throw new Error("Invalid picker chunk length");
+      await IOUtils.write(file.path, bytes, { mode: offset ? "append" : "create" });
+      offset += bytes.length;
+    }
+  }
+  async stageDirectory(result, staging, isCancelled) {
     const name = String(result.directory.name || "");
     if (!name || name === "." || name === ".." || /[\\/\x00-\x1f]/.test(name))
       throw new Error("Invalid directory name");
-    const staging = Services.dirsvc.get("TmpD", Ci.nsIFile);
-    staging.append("yore-upload");
-    staging.createUnique(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
     const root = staging.clone(); root.append(name);
     root.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
-    let cancelled = false;
-    const cleanup = () => {
-      cancelled = true;
-      try { staging.remove(true); } catch {}
-    };
-    this.window.addEventListener("pagehide", cleanup, { once: true });
-    try {
-      for (const item of result.directory.files) {
-        if (cancelled) throw new Error("Directory selection cancelled");
+    for (const item of result.directory.files) {
+        if (isCancelled()) throw new Error("Directory selection cancelled");
         const parts = String(item.path || "").split("/");
         if (!parts.length || parts.some(part => !part || part === "." || part === ".." ||
             /[\\\x00-\x1f]/.test(part))) throw new Error("Invalid relative file path");
@@ -93,18 +112,10 @@ class FilePicker {
           dir = next;
         }
         const file = dir.clone(); file.append(parts.at(-1));
-        const raw = atob(item.base64);
-        const bytes = Uint8Array.from(raw, char => char.charCodeAt(0));
-        await IOUtils.write(file.path, bytes);
-        if (cancelled) throw new Error("Directory selection cancelled");
-      }
-      const directory = new this.window.Directory(root.path);
-      return directory;
-    } catch (error) {
-      this.window.removeEventListener("pagehide", cleanup);
-      cleanup();
-      throw error;
+        await this.writeStreamedFile(file, item, result.session);
+        if (isCancelled()) throw new Error("Directory selection cancelled");
     }
+    return new this.window.Directory(root.path);
   }
   open(callback) {
     // The interface is asynchronous: don't enter a nested event loop before
@@ -123,22 +134,47 @@ class FilePicker {
           multiple: this.mode === 3, directory: this.mode === 2,
           filters: this.filters, filterIndex: this.filterIndex,
           accept: this.rawFilters.join(","), okLabel: this.okButtonLabel }, this.context);
-        if (this.mode === 2) {
-          if (!result?.directory) return;
-          this.selected = [await this.stageDirectory(result)];
-          code = Ci.nsIFilePicker.returnOK;
-          return;
+        if (!result?.session) return;
+        const staging = Services.dirsvc.get("TmpD", Ci.nsIFile);
+        staging.append("yore-upload");
+        staging.createUnique(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+        let cancelled = false;
+        let streaming = true;
+        const cleanup = () => {
+          cancelled = true;
+          if (streaming) cancel(result.session);
+          try { staging.remove(true); } catch {}
+        };
+        this.window.addEventListener("pagehide", cleanup, { once: true });
+        try {
+          if (this.mode === 2) {
+            if (!result.directory) return;
+            this.selected = [await this.stageDirectory(result, staging, () => cancelled)];
+          } else {
+            if (!result.files?.length) return;
+            const files = this.mode === 3 ? result.files : result.files.slice(0, 1);
+            this.selected = [];
+            for (const item of files) {
+              if (cancelled) throw new Error("File selection cancelled");
+              const file = staging.clone(); file.append(String(item.index));
+              await this.writeStreamedFile(file, item, result.session);
+              if (cancelled) throw new Error("File selection cancelled");
+              const backing = await File.createFromFileName(file.path);
+              this.selected.push(new this.window.File([backing],
+                String(item.name).replace(/^.*[\\/]/, ""), {
+                  type: item.type, lastModified: item.lastModified,
+                }));
+            }
+          }
+          if (!cancelled) code = Ci.nsIFilePicker.returnOK;
+        } catch (error) {
+          this.window.removeEventListener("pagehide", cleanup);
+          cleanup();
+          throw error;
+        } finally {
+          streaming = false;
+          closePicker(result.session);
         }
-        if (!result?.files?.length) return;
-        const files = this.mode === 3 ? result.files : result.files.slice(0, 1);
-        this.selected = files.map(file => {
-          const raw = atob(file.base64);
-          const bytes = Uint8Array.from(raw, char => char.charCodeAt(0));
-          return new this.window.File([bytes], file.name.replace(/^.*[\\/]/, ""), {
-            type: file.type, lastModified: file.lastModified,
-          });
-        });
-        code = Ci.nsIFilePicker.returnOK;
       } catch (error) { console.error("[embed-file-picker]", error); }
       finally { callback.done(code); }
     });

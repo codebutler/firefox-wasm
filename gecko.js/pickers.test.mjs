@@ -5,12 +5,18 @@ import { test } from 'node:test';
 
 function bridge() {
   const factories = new Map(), actors = new Map(), observers = new Map();
-  const calls = [], cancelled = [], sent = [], deferred = [];
+  const calls = [], chunks = [], cancelled = [], sent = [], deferred = [];
   const page = new EventTarget();
-  page.File = File;
   page.Directory = class { constructor(path) { this.path = path; this.name = path.split('/').pop(); } };
   const disk = new Map([['/tmp', { directory: true }]]);
+  const payloads = [];
   let duringWrite = null;
+  class GuestDOMFile extends File {
+    static async createFromFileName(path) {
+      return new GuestDOMFile([Uint8Array.from(disk.get(path)?.bytes || [])], path.split('/').pop());
+    }
+  }
+  page.File = GuestDOMFile;
   class GuestFile {
     constructor(path) { this.path = path; }
     clone() { return new GuestFile(this.path); }
@@ -33,7 +39,7 @@ function bridge() {
   }
   class NativeDateTimePickerChild { openPickerImpl() { return {}; } }
   const global = vm.createContext({
-    console, File, Uint8Array, atob, JSWindowActorParent, NativeDateTimePickerChild, chooseSave: () => null,
+    console, File: GuestDOMFile, Uint8Array, atob, JSWindowActorParent, NativeDateTimePickerChild, chooseSave: () => null,
     Cu: { importGlobalProperties() {} },
     Ci: { nsIFile: { DIRECTORY_TYPE: 1 }, nsIFilePicker: { returnOK: 0, returnCancel: 1, filterAll: 1 } },
     Cr: { NS_ERROR_FAILURE: 1 },
@@ -50,23 +56,46 @@ function bridge() {
         addObserver(fn, name) { observers.set(name, fn); },
         notifyObservers(subject, topic, data) {
           if (topic.endsWith('-cancel')) { cancelled.push(data); return; }
+          if (topic.endsWith('-close')) return;
+          if (topic.endsWith('-chunk')) {
+            const { index, offset } = JSON.parse(data);
+            chunks.push({ index, offset });
+            subject.data = JSON.stringify({ data: payloads[index].subarray(offset, offset + 65536).toString('base64') });
+            return;
+          }
           calls.push(JSON.parse(data)); during?.(); subject.data = JSON.stringify(reply);
         },
       },
     },
-    IOUtils: { async write(path, bytes) { duringWrite?.(); disk.set(path, { bytes: [...bytes] }); } },
+    IOUtils: { async write(path, bytes, options) {
+      duringWrite?.();
+      const previous = options?.mode === 'append' ? disk.get(path)?.bytes || [] : [];
+      disk.set(path, { bytes: [...previous, ...bytes] });
+    } },
   });
   const source = readFileSync(new URL('./chrome/EmbedPickers.sys.mjs', import.meta.url), 'utf8')
     .replace(/import \{ DateTimePickerChild[\s\S]*?;/, '')
     .replace(/import \{ chooseSave \}[^;]*;/, '')
     .replace(/export class (DateTimePickerChild|DateTimePickerParent)/g, 'globalThis.$1 = class $1');
   vm.runInContext(source, global);
-  return { calls, cancelled, sent, context, page, actors, observers, disk,
+  return { calls, chunks, cancelled, sent, context, page, actors, observers, disk,
     onWrite(fn) { duringWrite = fn; },
     Child: global.DateTimePickerChild, Parent: global.DateTimePickerParent,
     picker(kind) { return factories.get(`@mozilla.org/${kind}picker;1`).createInstance(); },
     promptCollection() { return factories.get('@mozilla.org/embedcomp/prompt-collection;1').createInstance(); },
-    reply(value, callback) { reply = value; during = callback; },
+    reply(value, callback) {
+      payloads.length = 0;
+      const describe = file => {
+        const bytes = Buffer.from(file.base64 || '', 'base64');
+        const index = payloads.push(bytes) - 1;
+        const { base64, ...metadata } = file;
+        return { ...metadata, index, size: bytes.length };
+      };
+      reply = value?.directory ? { session: 'test-session', directory: {
+        name: value.directory.name, files: value.directory.files.map(describe),
+      } } : value?.files ? { session: 'test-session', files: value.files.map(describe) } : value;
+      during = callback;
+    },
     flush() { return Promise.all(deferred.splice(0).map(fn => fn())); },
   };
 }
@@ -144,7 +173,7 @@ test('native file picker returns binary DOM Files and preserves metadata, never 
   const results = [];
   picker.open({ done: code => results.push(code) });
   assert.equal(b.calls.length, 0, 'open must finish before completion can run');
-  b.flush();
+  await b.flush();
   assert.deepEqual(results, [0]);
   assert.equal(b.calls[0].accept, '.bin');
   const files = picker.domFileOrDirectoryEnumerator;
@@ -157,16 +186,31 @@ test('native file picker returns binary DOM Files and preserves metadata, never 
   assert.equal(files.hasMoreElements(), false);
 });
 
-test('single-file mode restricts the result and cancellation cannot attach files', () => {
+test('large uploads request bounded chunks in order and preserve all bytes', async () => {
+  const b = bridge(), picker = b.picker('file');
+  picker.init(b.context, 'Large file', 0);
+  const bytes = Buffer.alloc(65536 * 3 + 17);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+  b.reply({ files: [{ name: 'large.bin', type: 'application/octet-stream',
+    lastModified: 101, base64: bytes.toString('base64') }] });
+  let code;
+  picker.open({ done(value) { code = value; } });
+  await b.flush();
+  assert.equal(code, 0);
+  assert.deepEqual(b.chunks.map(chunk => chunk.offset), [0, 65536, 131072, 196608]);
+  assert.deepEqual(Buffer.from(await picker.domFileOrDirectory.arrayBuffer()), bytes);
+});
+
+test('single-file mode restricts the result and cancellation cannot attach files', async () => {
   const b = bridge(), picker = b.picker('file');
   picker.init(b.context, 'Upload', 0);
   b.reply({ files: [{ name: 'one.txt', base64: 'YQ==' }, { name: 'two.txt', base64: 'Yg==' }] });
-  picker.open({ done() {} }); b.flush();
+  picker.open({ done() {} }); await b.flush();
   assert.equal(picker.selected.length, 1);
   const cancelled = b.picker('file'); cancelled.init(b.context, '', 0);
   b.reply({ files: [{ name: 'late.txt', base64: 'YQ==' }] }, () => b.page.dispatchEvent(new Event('pagehide')));
   let result;
-  cancelled.open({ done(code) { result = code; } }); b.flush();
+  cancelled.open({ done(code) { result = code; } }); await b.flush();
   assert.equal(result, 1);
   assert.equal(cancelled.domFileOrDirectory, null);
   assert.equal(b.cancelled.length, 1);

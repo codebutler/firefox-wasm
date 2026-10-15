@@ -11,6 +11,7 @@
 // artifact the consumer serves is the wasm (GeckoOptions.wasm). emscripten 6.0.x no longer emits a separate
 // *.worker.js; pthread workers spawn from the main module via mainScriptUrlOrBlob.
 import { encodePickerReply } from './picker-encoding';
+import { encodePickerChunk, preparePickerStream } from './picker-stream';
 import { assembleSave } from './save-assembly';
 import geckoSource from '../wasm/gecko.js?source';
 import { ZSTDDecoder } from 'zstddec';
@@ -316,7 +317,7 @@ export class Gecko {
   private cmd = 0;
   private queue: Cmd[] = [];
   private running = false;
-  private pickers = new Map<string, AbortController>();
+  private pickers = new Map<string, { controller: AbortController; blobs: readonly Blob[] }>();
   private saves = new Map<string, {
     controller: AbortController;
     target?: NonNullable<Awaited<ReturnType<NonNullable<GeckoOptions['onSave']>>>>;
@@ -671,12 +672,33 @@ export class Gecko {
       };
     }
 
-    moduleOpts.geckoCancelPicker = (id: string) => this.pickers.get(id)?.abort();
+    const closePicker = (id: string) => {
+      this.pickers.get(id)?.controller.abort();
+      this.pickers.delete(id);
+    };
+    moduleOpts.geckoCancelPicker = closePicker;
+    moduleOpts.geckoClosePicker = closePicker;
+    moduleOpts.geckoReadPickerChunk = async (req: { id: string; index: number; offset: number }) => {
+      const state = this.pickers.get(String(req.id));
+      if (this.destroyed || !state || state.controller.signal.aborted ||
+          !Number.isSafeInteger(req.index) || req.index < 0 || req.index >= state.blobs.length)
+        return { ok: false };
+      try {
+        const blob = state.blobs[req.index]!;
+        const data = await encodePickerChunk(blob, req.offset, state.controller.signal);
+        return { ok: true, value: await encodePickerReply({ data }, state.controller.signal) };
+      } catch (error) {
+        console.error('[gecko-picker-chunk]', error);
+        closePicker(String(req.id));
+        return { ok: false };
+      }
+    };
     moduleOpts.geckoOnPicker = async (req: Record<string, unknown>) => {
       if (this.destroyed || !this.opts.onPicker) return { ok: false };
       const id = String(req.id);
       const controller = new AbortController();
-      this.pickers.set(id, controller);
+      this.pickers.set(id, { controller, blobs: [] });
+      let keepSession = false;
       try {
         const cancelled = new Promise<null>(resolve => {
           controller.signal.addEventListener('abort', () => resolve(null), { once: true });
@@ -686,13 +708,16 @@ export class Gecko {
           cancelled,
         ]);
         if (controller.signal.aborted || result == null) return { ok: false };
-        return { ok: true, value: await encodePickerReply(result, controller.signal) };
+        const stream = preparePickerStream(result, id);
+        if (stream) this.pickers.set(id, { controller, blobs: stream.blobs });
+        const value = await encodePickerReply(stream?.metadata ?? result, controller.signal);
+        keepSession = !!stream && !controller.signal.aborted;
+        return { ok: true, value };
       } catch (error) {
         console.error('[gecko-picker]', error);
         return { ok: false };
       } finally {
-        controller.abort();
-        this.pickers.delete(id);
+        if (!keepSession) closePicker(id);
       }
     };
     const cancelSave = moduleOpts.geckoCancelSave = (id: string) => {
@@ -772,7 +797,8 @@ export class Gecko {
   async load(url: string): Promise<void> {
     // Native pickers can hold a nested Gecko event loop. Withdraw their host
     // UI before queuing navigation, so load never waits for a stale selection.
-    for (const controller of this.pickers.values()) controller.abort();
+    for (const state of this.pickers.values()) state.controller.abort();
+    this.pickers.clear();
     for (const state of this.saves.values()) state.controller.abort();
     this.saves.clear();
     this.alive();
@@ -871,7 +897,7 @@ export class Gecko {
     if (this.destroyed) return;
     this.destroyed = true;
     this.lifetime.abort(new DOMException('Gecko was destroyed', 'AbortError'));
-    for (const controller of this.pickers.values()) controller.abort();
+    for (const state of this.pickers.values()) state.controller.abort();
     this.pickers.clear();
     for (const state of this.saves.values()) state.controller.abort();
     this.saves.clear();

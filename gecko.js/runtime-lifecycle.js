@@ -39,6 +39,7 @@ if (!ENVIRONMENT_IS_PTHREAD) {
     Module.canvas = null;
     Module.geckoProviders = {};
     for (var key of ['geckoOnPresent', 'geckoOnLocationChange', 'geckoOnContextMenu',
-      'geckoOnNewWindow', 'geckoOnPrompt', 'geckoOnPicker', 'geckoCancelPicker']) Module[key] = function () {};
+      'geckoOnNewWindow', 'geckoOnPrompt', 'geckoOnPicker', 'geckoCancelPicker',
+      'geckoReadPickerChunk', 'geckoClosePicker']) Module[key] = function () {};
   };
 }
