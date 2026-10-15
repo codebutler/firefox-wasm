@@ -135,7 +135,9 @@ class FilePicker {
           filters: this.filters, filterIndex: this.filterIndex,
           accept: this.rawFilters.join(","), okLabel: this.okButtonLabel }, this.context);
         if (!result?.session) return;
-        const staging = Services.dirsvc.get("TmpD", Ci.nsIFile);
+        // Surf's profile is a native OPFS mount. Keep staged file backing on
+        // disk so Wasm heap use remains bounded as upload payloads grow.
+        const staging = Services.dirsvc.get("ProfD", Ci.nsIFile);
         staging.append("yore-upload");
         staging.createUnique(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
         let cancelled = false;

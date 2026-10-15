@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 function bridge() {
   const factories = new Map(), actors = new Map(), observers = new Map();
-  const calls = [], chunks = [], cancelled = [], sent = [], deferred = [];
+  const calls = [], chunks = [], cancelled = [], sent = [], deferred = [], directories = [];
   const page = new EventTarget();
   page.Directory = class { constructor(path) { this.path = path; this.name = path.split('/').pop(); } };
   const disk = new Map([['/tmp', { directory: true }]]);
@@ -51,7 +51,7 @@ function bridge() {
       registerWindowActor(name, value) { actors.set(name, value); } },
     Services: {
       tm: { dispatchToMainThread(fn) { deferred.push(fn); } }, prefs: { setBoolPref() {} },
-      dirsvc: { get() { return new GuestFile('/tmp'); } },
+      dirsvc: { get(name) { directories.push(name); return new GuestFile('/tmp'); } },
       obs: {
         addObserver(fn, name) { observers.set(name, fn); },
         notifyObservers(subject, topic, data) {
@@ -78,7 +78,7 @@ function bridge() {
     .replace(/import \{ chooseSave \}[^;]*;/, '')
     .replace(/export class (DateTimePickerChild|DateTimePickerParent)/g, 'globalThis.$1 = class $1');
   vm.runInContext(source, global);
-  return { calls, chunks, cancelled, sent, context, page, actors, observers, disk,
+  return { calls, chunks, cancelled, sent, directories, context, page, actors, observers, disk,
     onWrite(fn) { duringWrite = fn; },
     Child: global.DateTimePickerChild, Parent: global.DateTimePickerParent,
     picker(kind) { return factories.get(`@mozilla.org/${kind}picker;1`).createInstance(); },
@@ -125,6 +125,7 @@ test('directory mode stages a private guest tree and preserves relative hierarch
   picker.open({ done(code) { result = code; } });
   await b.flush();
   assert.equal(result, 0);
+  assert.deepEqual(b.directories, ['ProfD']);
   assert.equal(b.calls[0].directory, true);
   const root = picker.domFileOrDirectory;
   assert.equal(root.name, 'chosen');
