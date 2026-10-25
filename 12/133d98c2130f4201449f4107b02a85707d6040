@@ -1,0 +1,30 @@
+gecko.js/README.md
+  s_90462c1d3f2e7c::t_b51387272c3b73 99-100
+  s_90462c1d3f2e7c::t_7b143e4a2c0304 98,101-105
+gecko.js/js/index.ts
+  s_90462c1d3f2e7c::t_04e11b33b1b066 852-856,859
+  s_90462c1d3f2e7c::t_7e960f76d434c0 860
+gecko.js/theme-bridge.test.mjs
+  s_90462c1d3f2e7c::t_d574667f6ead9d 9,15-18,44,140-141,145-150,156-158,166-167,169,174,176-177,179-181,183,188,190-191
+  s_90462c1d3f2e7c::t_db1d82cc11ea80 6-8,10-14,19-43,45-46,50,60-66,68-69,88,137-139,142-144,151-155,159-165,168,170-173,175,178,182,184-187,189,192
+gecko.js/chrome/EmbedTheme.sys.mjs
+  s_90462c1d3f2e7c::t_8b16cc5e899d0b 12-17,92-93,96-97,100,106-107,125
+  s_90462c1d3f2e7c::t_43a33675297d03 8-11,18-21,44-55,59-60,62-65,73-75,86-91,94-95,98-99,101-105,108-124,126-129
+  s_90462c1d3f2e7c::t_3dc8e6624cb8bd 130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "12133d98c2130f4201449f4107b02a85707d6040",
+  "prompts": {},
+  "sessions": {
+    "s_90462c1d3f2e7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4c2603ee-98bf-4208-851a-dac79f5dd79c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
