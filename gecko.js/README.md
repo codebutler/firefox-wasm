@@ -95,6 +95,14 @@ The UTF-8 JSON payload must be smaller than 65,536 bytes. The theme command runs
 in a privileged module, separately from `evalChrome()` (which, despite its old
 name, evaluates in the content realm). Native controls and their DOM state are
 preserved; theming does not substitute host DOM widgets for page controls.
+Optional `assets: { "<name>.svg": "<svg …>" }` supplies the images `contentCss`
+uses, served at `gecko.themeAssetBase + name` (`resource://embed-theme/<name>`).
+Reference them there rather than as `data:` URLs: a page's Content-Security-Policy
+applies to `data:` images even when a UA sheet requests them, so they disappear on
+sites whose `img-src` omits `data:`. These URLs are local resources that CSP exempts.
+Names are lowercase `[a-z0-9_-]` ending in `.svg` and immutable, because Gecko's
+image cache keys on the URL: give changed art a new name (a content hash works).
+Each call supplies the complete set; names it omits are removed.
 Optional `selection: { background: '#rrggbb', text: '#rrggbb' }` supplies native
 selection system colors, including listboxes whose UA rules intentionally use
 `!important`. Omitting it on a later call restores the default selection palette.

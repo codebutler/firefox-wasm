@@ -849,9 +849,15 @@ export class Gecko {
     await this.run({ op: OP_PAINT });
   }
 
+  /** Base URL of the images a theme supplies in `assets`. `contentCss` names
+   *  them as `url(<themeAssetBase><name>)`. A page's CSP does not apply to
+   *  them, as it does to `data:` images. Absent on engines without assets. */
+  readonly themeAssetBase = 'resource://embed-theme/';
+
   /** Set UA form defaults and privileged popup styling, including live updates. */
   async setTheme(theme: { contentCss: string; popupCss: string; dark: boolean;
-    selection?: { background: string; text: string } }): Promise<void> {
+    selection?: { background: string; text: string };
+    assets?: Record<string, string> }): Promise<void> {
     const json = JSON.stringify(theme);
     if (this.enc.encode(json).length >= URL_CAPACITY) throw new RangeError('Embedding theme is too large');
     if (await this.run({ op: OP_THEME, url: json }) === null) throw new Error('Could not apply embedding theme');
