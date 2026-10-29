@@ -1,0 +1,21 @@
+bench/microbenches/host-reentry.js
+  s_e5d57fb4b99ec0::t_0195605f02d7ef 8-9
+patches/README.md
+  s_e5d57fb4b99ec0::t_31d1661238d6a6 703-713
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "038256660d7bc0b049e3a327f1e1534d8214b82c",
+  "prompts": {},
+  "sessions": {
+    "s_e5d57fb4b99ec0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18869-9dbf-79d3-969c-56bf1220b591",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
