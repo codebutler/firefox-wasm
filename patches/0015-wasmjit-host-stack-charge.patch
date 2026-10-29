@@ -99,7 +99,7 @@ index cc503a794c..6a69f58ff7 100644
  // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
  // call marshalling). Sized for nargs<=64 with slack.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index b8f5e013c0..3562458106 100644
+index b8f5e013c0..4d295ffbda 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -1799,9 +1799,30 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
@@ -160,7 +160,7 @@ index b8f5e013c0..3562458106 100644
    // Convention: 0.0 = result ready in gWJScratch (normal completion OR sound
    // resume); 1.0 = an exception is pending (a call/resume threw) -> propagate;
    // 2.0 = the function DID NOT RUN (entry GGG mismatch / argc guard);
-@@ -7266,6 +7297,102 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
+@@ -7266,6 +7297,105 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
    if (v > 0) js::wasm::gWJJitDepthLimit = v;
  }
  
@@ -233,11 +233,14 @@ index b8f5e013c0..3562458106 100644
 +// charge both stops before V8's limit and leaves recursion that fits alone: an
 +// apply recursion overflowed at 469 levels in one run and ~250 in another.
 +// wasmhost_stack_headroom(n) (wasm-host-bridge.js) recurses a small probe
-+// module with 64 live f64s per frame n levels deep and reports whether V8 let
-+// it; only probe frames unwind on the RangeError, inside the host's own
-+// try/catch. 384 frames is >=100 KB at TurboFan's smallest probe frame, enough
-+// for the next PBL level plus building the InternalError. Checked on every PBL
-+// activation nested more than 24 deep on a thread; shallow code never pays.
++// module n levels deep and reports whether V8 let it; only probe frames unwind
++// on the RangeError, inside the host's own try/catch. A probe frame keeps 64
++// f64s loaded from memory live across its call, so it costs ~580 B in every V8
++// tier (a probe whose values could be recomputed shrank 2x+ once TurboFan
++// compiled it, and the JIT-off path overflowed between checks). 256 frames is
++// ~145 KB: room for the next PBL level and for building and unwinding the
++// InternalError. Checked on every PBL activation nested more than 24 deep on a
++// thread; shallow code never pays.
 +// GECKO_PBL_HEADROOM=0 disables it, GECKO_PBL_HEADROOMFRAMES=<n> sizes it.
 +extern "C" int wasmhost_stack_headroom(int frames);
 +
@@ -246,7 +249,7 @@ index b8f5e013c0..3562458106 100644
 +  if (sFrames < 0) {
 +    const char* off = getenv("GECKO_PBL_HEADROOM");
 +    const char* n = getenv("GECKO_PBL_HEADROOMFRAMES");
-+    sFrames = (off && strcmp(off, "0") == 0) ? 0 : (n ? atoi(n) : 384);
++    sFrames = (off && strcmp(off, "0") == 0) ? 0 : (n ? atoi(n) : 256);
 +    if (sFrames < 0) sFrames = 0;
 +  }
 +  if (!sFrames || wasmhost_stack_headroom(sFrames)) return false;

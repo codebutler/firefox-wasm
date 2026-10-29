@@ -688,9 +688,13 @@ the thread at 469 levels.
   lifetime, so the JIT does not start a deep recursion on top of a deep PBL
   one.
 - **Host-stack headroom check.** A PBL activation nested more than 24 deep on
-  its thread asks the host whether 384 more frames of a probe module (64 live
-  `f64`s each, ≥100 KB in either V8 tier) fit
-  (`wasmhost_stack_headroom`, in both `wasm-host-bridge.js` files). If not, it
+  its thread asks the host whether 256 more frames of a probe module fit
+  (`wasmhost_stack_headroom`, in both `wasm-host-bridge.js` files). Each probe
+  frame keeps 64 `f64`s loaded from memory that deeper frames overwrite live
+  across its call, so it costs ~580 B under Liftoff and TurboFan alike (~145 KB
+  in all). A first probe whose values could be recomputed after the call shrank
+  more than 2× once TurboFan compiled it, and the JIT-off path still overflowed
+  between checks in Surf. If the probe does not fit, the activation
   reports a catchable `InternalError: too much recursion` instead of letting
   V8's stack overflow. Only probe frames unwind on the probe's `RangeError`,
   inside the host's try/catch. This measures instead of estimating: a PBL
