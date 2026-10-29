@@ -1,0 +1,25 @@
+gecko.js/js/index.ts
+  s_dbeaea4002d7d9::t_7fd17feace9b4f 281-282,992-1013
+  s_dbeaea4002d7d9::t_7114f866eb349c 1014-1015
+gecko.js/src/embed-xul.cpp
+  s_dbeaea4002d7d9::t_1d83ed6b14eba0 14-16,19-40,95-96,141-145,159,162,164,169,174-175,190,195,200,206,209,214,218,222,232
+  s_dbeaea4002d7d9::t_a793d96de0cb8c 236
+gecko.js/build-lib.sh
+  s_dbeaea4002d7d9::t_f4156e3f9d633f 91,168
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6d68e0f7407c2c488232754fb2c09dcc259d2b3c",
+  "prompts": {},
+  "sessions": {
+    "s_dbeaea4002d7d9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a187d8-63f5-7403-bff2-ae95aae0c2a4",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
