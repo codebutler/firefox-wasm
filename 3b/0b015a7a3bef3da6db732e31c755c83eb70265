@@ -1,0 +1,21 @@
+patches/0015-wasmjit-host-stack-charge.patch
+  s_96d4cca8cb6d9d::t_8ecbb9b8629773 71,81-83,95,156,176-177,179-190,197,214
+patches/README.md
+  s_96d4cca8cb6d9d::t_51299bd15bd691 693-704
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3b0b015a7a3bef3da6db732e31c755c83eb70265",
+  "prompts": {},
+  "sessions": {
+    "s_96d4cca8cb6d9d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_96d4cca8cb6d9d",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
