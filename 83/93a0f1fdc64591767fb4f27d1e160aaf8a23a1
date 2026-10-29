@@ -1,0 +1,23 @@
+bench/microbenches/host-reentry.js
+  s_2a950a56db299c::t_ba9067f1346da8 1-36
+patches/0015-wasmjit-host-stack-charge.patch
+  s_2a950a56db299c::t_8efdc0226a3105 1-213
+patches/README.md
+  s_2a950a56db299c::t_e0868f8fed0fc9 28,653-706
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8393a0f1fdc64591767fb4f27d1e160aaf8a23a1",
+  "prompts": {},
+  "sessions": {
+    "s_2a950a56db299c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fe4a4957-6ab7-430d-a719-0e54b71aafb9",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
