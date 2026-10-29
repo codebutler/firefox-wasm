@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 13 patches apply in order and reverse back to the pristine selected source
+All 15 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -649,6 +649,60 @@ content JS gets only ~452KB of the 64MB linear-memory stack -- measured
 Expected effect: untrusted recursion budget ~452KB -> ~31MB (~60x), i.e.
 ~620k host-boundary levels. Still catchable: quota < real stack, so
 over-quota throws `InternalError` before a real wasm stack overflow.
+
+## 0015-wasmjit-host-stack-charge.patch
+
+With the wasm JIT on, YouTube killed the app pthread in every trial: an
+uncatchable V8 `RangeError: Maximum call stack size exceeded` a few seconds
+after the home page loaded. The overflowing stack (named on a `wasm-opt -g`
+build) is BotGuard's nested-eval VM recursing through JIT and PBL in turn:
+
+```text
+JIT fn → hostImports/_wjhelp (JS) → wjhelp → wjhelpImpl
+  → PortableBaselineInterpret → ICInterpretOps → ICCallFallback
+  → InternalCallOrConstruct → RunScript → Interpret → MaybeEnterJit
+  → PortableBaselineInterpret → … → WasmJitRunCall → JIT fn → …
+```
+
+The 0005/0007 depth guard charges only emitted JIT frames. Everything else in
+that cycle stays on the host (V8) stack and never moves the linear-memory
+stack that SpiderMonkey's recursion quota watches (0010 widened that quota to
+~31 MB, so it cannot fire first). In four identical 1357-frame overflows there
+were 214 JIT frames, 67 PBL→JIT crossings and 129 PBL activations, and the
+guard had charged 151584 of its 298080 limit: the host stack ran out at about
+half the budget, before the suspend latch could fire. Lowering the limit
+(`GECKO_WJ_DEPTHLIMIT=100000`) still died, inside PBL frames after the latch,
+because the uncharged PBL tail kept growing the host stack.
+
+- **PBL→JIT edge charge.** `WasmJitRunCall` adds a fixed cost to
+  `gWJJitDepth` for the duration of the JIT call. Past the limit it refuses
+  and latches the suspend watermark, so the callee's subtree runs on PBL's
+  heap stack exactly as if the callee's prologue guard had refused. A
+  callee's own flag-3 refusal re-latches at the caller's depth (its latch
+  included the edge's charge).
+- **PBL activation charge.** Every `PortableBaselineInterpret` activation on
+  the JIT's runtime charges the same cost for its lifetime, so both the JIT
+  guard and the latch see the host frames PBL re-entry costs. Past 1.5× the
+  limit (≈90% of the calibrated capacity, since the limit is 60%), a new
+  activation reports a catchable `InternalError: too much recursion` instead
+  of letting V8's stack overflow and kill the thread.
+- **Watermark reset.** PBL activations keep the charged depth above 0, so
+  `RunCall` now clears a stale watermark whenever it runs below it (nothing
+  below the watermark is inside a delegated subtree), not only at depth 0.
+
+The charge is 3072 in the limit's units (probe-scaled bytes; the calibration
+sets 800 per probe frame). The four measured overflows need at least ~1800 per
+crossing and activation for the latch to fire before the host stack is full;
+3072 latches at roughly 40% of the real stack and caps at roughly 60%.
+`GECKO_WJ_HOSTCHARGE=<n>` sets it; `GECKO_WJ_HOSTCHARGE=0` turns the whole
+mechanism off (A/B opt-out). It is off with `GECKO_NOWASMJIT` and on worker
+runtimes (`parentRuntime` set): the JIT's depth globals belong to the main
+runtime's thread. `GECKO_WJ_SUSDBG` adds `[wj-hostsus]` (edge refusals) and
+`[wj-hostcap]` (over-recursion reports).
+
+Regression probe: `node bench/main.ts micro host-reentry --ab` recurses 200000
+levels through `Function.prototype.call` and `Array.prototype.map` callbacks;
+it must end in the same catchable `InternalError` in JIT and PBL modes.
 
 ## Surf integration refresh
 

@@ -1,0 +1,213 @@
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 13e7823d35..194913ef86 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -93,8 +93,35 @@ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
+ extern uint64_t gWJCallCallee;
+ extern uint32_t gWJExitFPLastSite;  // task #60 exitFP setter tracer
+ extern uint32_t gWJExitFPSetCount;
++// Host-stack charge (WasmJitRuntime.cpp): every PBL activation on the JIT's
++// runtime adds a fixed cost to gWJJitDepth while it is live, so the JIT's
++// recursion budget sees the host frames PBL re-entry costs.
++extern int32_t gWJJitDepth;
++extern int32_t WasmJitHostCharge(JSContext* cx);
++extern bool WasmJitHostOverCap();
+ }  // namespace wasm
+ }  // namespace js
++
++namespace {
++// Charges one PBL activation to gWJJitDepth for its lifetime. Restoring on exit
++// (not subtracting) keeps the counter exact however the activation returns.
++struct WJHostActivation {
++  int32_t saved = 0;
++  bool active = false;
++  explicit WJHostActivation(JSContext* cx) {
++    int32_t charge = js::wasm::WasmJitHostCharge(cx);
++    if (charge) {
++      saved = js::wasm::gWJJitDepth;
++      js::wasm::gWJJitDepth = saved + charge;
++      active = true;
++    }
++  }
++  ~WJHostActivation() {
++    if (active) js::wasm::gWJJitDepth = saved;
++  }
++  bool overCap() const { return active && js::wasm::WasmJitHostOverCap(); }
++};
++}  // namespace
+ #endif
+ 
+ namespace js {
+@@ -6209,6 +6236,10 @@ PBIResult PortableBaselineInterpret(
+     entryPC = Specialized ? pc : frame->script()->code();
+   }
+ 
++#if defined(__EMSCRIPTEN__)
++  WJHostActivation wjHost(cx_);
++#endif
++
+   bool from_unwind = false;
+ 
+   PBIResult ic_result = PBIResult::Ok;
+@@ -6239,6 +6270,17 @@ PBIResult PortableBaselineInterpret(
+       ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+       return PBIResult::Error;
+     }
++#if defined(__EMSCRIPTEN__)
++    // The linear-memory quota above barely moves while PBL and the wasm JIT
++    // recurse through each other on the host stack; the host-stack charge
++    // reports over-recursion before V8's stack overflows (an uncatchable
++    // RangeError that kills the thread).
++    if (wjHost.overCap()) {
++      PUSH_EXIT_FRAME();
++      ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
++      return PBIResult::Error;
++    }
++#endif
+   }
+ 
+   // Check max stack depth once, so we don't need to check it
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index cc503a794c..5f35e24a2b 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -565,6 +565,15 @@ extern int32_t gWJJitDepthLimit;
+ // the delegated subtree executes entirely in PBL on the heap shadow stack. The
+ // latch clears itself once the delegating frame unwinds below the watermark.
+ extern int32_t gWJSuspendWatermark;
++// Host-stack charge for a PBL->JIT edge or a PBL activation on the JIT's
++// runtime (0 = off: GECKO_WJ_HOSTCHARGE=0, GECKO_NOWASMJIT, or a worker
++// runtime). See WasmJitRuntime.cpp.
++extern int32_t WasmJitHostCharge(JSContext* cx);
++// GECKO_WJ_DEPTHLIMIT if set, else the calibrated gWJJitDepthLimit.
++extern int32_t WasmJitEffectiveDepthLimit();
++// True when the charged depth is past 1.5x the limit (~90% of the calibrated
++// host-stack capacity): a PBL activation reports over-recursion instead.
++extern bool WasmJitHostOverCap();
+ 
+ // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
+ // call marshalling). Sized for nargs<=64 with slack.
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index b8f5e013c0..db261cd47a 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -1799,9 +1799,30 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+   // Depth-delegated subtree in progress: refuse wasm entry so the whole subtree
+   // stays on PBL's heap shadow stack. At depth 0 every wasm frame has unwound,
+   // so clear any stale watermark (a delegated call is long finished).
+-  if (gWJJitDepth <= 0) {
+-    gWJSuspendWatermark = INT32_MAX;
+-  } else if (gWJJitDepth >= gWJSuspendWatermark) {
++  if (gWJJitDepth >= gWJSuspendWatermark && gWJJitDepth > 0) {
++    return 0;
++  }
++  // Below the watermark nothing on the stack is inside a delegated subtree
++  // (a subtree only ever runs deeper than the frame that latched it), so a
++  // stale latch is cleared here. PBL activations charge the host stack now,
++  // so the stack is rarely back at depth 0 -- clearing only there let the
++  // min-updated watermark ratchet down for the rest of the session.
++  gWJSuspendWatermark = INT32_MAX;
++  // Host-stack charge for this PBL->JIT edge (see WasmJitHostCharge). Past the
++  // limit, refuse and latch: the callee and its subtree run on PBL's heap
++  // stack, exactly as if the callee's own prologue guard had refused.
++  const int32_t wjHostCharge = WasmJitHostCharge(js::TlsContext.get());
++  if (wjHostCharge &&
++      gWJJitDepth + wjHostCharge > WasmJitEffectiveDepthLimit()) {
++    if (gWJJitDepth < gWJSuspendWatermark) gWJSuspendWatermark = gWJJitDepth;
++    static int susDbgH = getenv("GECKO_WJ_SUSDBG") ? 1 : 0;
++    if (susDbgH) {
++      static uint64_t n = 0;
++      if (++n <= 20 || (n % 1000) == 0)
++        fprintf(stderr, "[wj-hostsus] #%llu depth=%d limit=%d\n",
++                (unsigned long long)n, gWJJitDepth,
++                WasmJitEffectiveDepthLimit());
++    }
+     return 0;
+   }
+   // Last-lookup cache: hot functions are entered repeatedly with the same script,
+@@ -2004,6 +2025,8 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+   // JS shim if registration failed.
+   double flag;
+   gWJDidResume = false;
++  const int32_t wjHostSaved = gWJJitDepth;
++  gWJJitDepth = wjHostSaved + wjHostCharge;
+   gWJExecDepth++;
+   // Record the entry-time exitFP + activation for wjhelp's re-install (task #60);
+   // nesting-safe via save/restore around the call.
+@@ -2030,6 +2053,14 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+   gWJEntryExitFP = wjPrevEntryExitFP;
+   gWJEntryAct = wjPrevEntryAct;
+   gWJExecDepth--;
++  gWJJitDepth = wjHostSaved;
++  // The callee's prologue refused (flag 3) and latched the watermark at its
++  // entry depth, which included this edge's charge. Re-latch at the depth the
++  // caller is left at, or PBL would run the delegated subtree below the
++  // watermark and let it re-enter the JIT.
++  if (flag == 3.0 && wjHostSaved < gWJSuspendWatermark) {
++    gWJSuspendWatermark = wjHostSaved;
++  }
+   // Convention: 0.0 = result ready in gWJScratch (normal completion OR sound
+   // resume); 1.0 = an exception is pending (a call/resume threw) -> propagate;
+   // 2.0 = the function DID NOT RUN (entry GGG mismatch / argc guard);
+@@ -7266,6 +7297,61 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
+   if (v > 0) js::wasm::gWJJitDepthLimit = v;
+ }
+ 
++// HOST-STACK CHARGE. gWJJitDepth only counted emitted wasm-JIT frames, but every
++// PBL->JIT edge also leaves C++ and glue frames on the host (V8) stack: the
++// hostImports + _wjhelp JS shims, wjhelp/wjhelpImpl, a fresh
++// PortableBaselineInterpret activation, ICInterpretOps, ICCallFallback,
++// InternalCallOrConstruct, RunScript, Interpret, MaybeEnterJit. None of them
++// move the linear-memory stack SpiderMonkey's recursion quota watches, so a
++// recursion that alternates JIT and PBL (BotGuard's nested-eval VM on YouTube)
++// overflowed the host stack with gWJJitDepth at only ~50% of the limit -- an
++// uncatchable RangeError that killed the app pthread. Measured on the named
++// diagnostic build: 67 PBL->JIT crossings and 129 PBL activations in a
++// 1357-frame overflow, charged 151584 of a 298080 limit.
++//
++// So every PBL->JIT entry (WasmJitRunCall) and every PBL activation on the
++// JIT's runtime charges a fixed cost to gWJJitDepth for its lifetime (restored
++// on exit, like a JIT frame). Entries refuse -- and latch the suspend watermark
++// -- once the charged depth reaches the limit, so the deep tail stays on PBL's
++// heap stack; a PBL activation past 1.5x the limit (~90% of the calibrated
++// capacity) reports a catchable "too much recursion" instead of letting the
++// host stack overflow. Units are the limit's (probe-scaled bytes).
++// GECKO_WJ_HOSTCHARGE=<n> sets the charge; 0 turns the whole mechanism off
++// (A/B opt-out). Off with GECKO_NOWASMJIT, and off on worker runtimes (the JIT's
++// depth globals belong to the main runtime's thread).
++int32_t js::wasm::WasmJitHostCharge(JSContext* cx) {
++  static int32_t sCharge = -1;
++  if (sCharge < 0) {
++    if (getenv("GECKO_NOWASMJIT")) {
++      sCharge = 0;
++    } else {
++      const char* s = getenv("GECKO_WJ_HOSTCHARGE");
++      int32_t v = s ? int32_t(atoi(s)) : 3072;
++      sCharge = v > 0 ? v : 0;
++    }
++  }
++  if (!sCharge || !cx || cx->runtime()->parentRuntime) return 0;
++  return sCharge;
++}
++
++int32_t js::wasm::WasmJitEffectiveDepthLimit() {
++  static const char* sEnv = getenv("GECKO_WJ_DEPTHLIMIT");
++  return sEnv ? int32_t(atoi(sEnv)) : gWJJitDepthLimit;
++}
++
++bool js::wasm::WasmJitHostOverCap() {
++  int32_t limit = WasmJitEffectiveDepthLimit();
++  if (gWJJitDepth <= limit + limit / 2) return false;
++  static int susDbg = getenv("GECKO_WJ_SUSDBG") ? 1 : 0;
++  if (susDbg) {
++    static uint64_t n = 0;
++    if (++n <= 20 || (n % 1000) == 0)
++      fprintf(stderr, "[wj-hostcap] #%llu depth=%d cap=%d\n",
++              (unsigned long long)n, gWJJitDepth, limit + limit / 2);
++  }
++  return true;
++}
++
+ // DEBUG (GECKO_WJ_ROOTLOG): log every OBJECT-valued Value root right before the GC
+ // traces it during a minor (tenuring) collection. The LAST line printed before a
+ // crash pinpoints the stale root's array+index (the misrooted JIT value of #19).
