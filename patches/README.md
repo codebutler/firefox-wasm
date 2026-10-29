@@ -695,7 +695,9 @@ sets 800 per probe frame). The four measured overflows need at least ~1800 per
 crossing and activation for the latch to fire before the host stack is full;
 3072 latches at roughly 40% of the real stack and caps at roughly 60%.
 `GECKO_WJ_HOSTCHARGE=<n>` sets it; `GECKO_WJ_HOSTCHARGE=0` turns the whole
-mechanism off (A/B opt-out). It is off with `GECKO_NOWASMJIT` and on worker
+mechanism off (A/B opt-out). `GECKO_WJ_PBLCHARGE=<n>` sets the PBL
+activation's charge alone, and `GECKO_WJ_HOSTCAP=<percent of the limit>`
+(default 150) moves the over-recursion cap without moving the latch. It is off with `GECKO_NOWASMJIT` and on worker
 runtimes (`parentRuntime` set): the JIT's depth globals belong to the main
 runtime's thread. `GECKO_WJ_SUSDBG` adds `[wj-hostsus]` (edge refusals) and
 `[wj-hostcap]` (over-recursion reports).

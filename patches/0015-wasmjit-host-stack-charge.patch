@@ -1,5 +1,5 @@
 diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index 13e7823d35..194913ef86 100644
+index 13e7823d35..d8c0b3b5ed 100644
 --- a/js/src/vm/PortableBaselineInterpret.cpp
 +++ b/js/src/vm/PortableBaselineInterpret.cpp
 @@ -93,8 +93,35 @@ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
@@ -10,7 +10,7 @@ index 13e7823d35..194913ef86 100644
 +// runtime adds a fixed cost to gWJJitDepth while it is live, so the JIT's
 +// recursion budget sees the host frames PBL re-entry costs.
 +extern int32_t gWJJitDepth;
-+extern int32_t WasmJitHostCharge(JSContext* cx);
++extern int32_t WasmJitPblCharge(JSContext* cx);
 +extern bool WasmJitHostOverCap();
  }  // namespace wasm
  }  // namespace js
@@ -22,7 +22,7 @@ index 13e7823d35..194913ef86 100644
 +  int32_t saved = 0;
 +  bool active = false;
 +  explicit WJHostActivation(JSContext* cx) {
-+    int32_t charge = js::wasm::WasmJitHostCharge(cx);
++    int32_t charge = js::wasm::WasmJitPblCharge(cx);
 +    if (charge) {
 +      saved = js::wasm::gWJJitDepth;
 +      js::wasm::gWJJitDepth = saved + charge;
@@ -68,27 +68,31 @@ index 13e7823d35..194913ef86 100644
  
    // Check max stack depth once, so we don't need to check it
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index cc503a794c..5f35e24a2b 100644
+index cc503a794c..0e38940e74 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -565,6 +565,15 @@ extern int32_t gWJJitDepthLimit;
+@@ -565,6 +565,19 @@ extern int32_t gWJJitDepthLimit;
  // the delegated subtree executes entirely in PBL on the heap shadow stack. The
  // latch clears itself once the delegating frame unwinds below the watermark.
  extern int32_t gWJSuspendWatermark;
 +// Host-stack charge for a PBL->JIT edge or a PBL activation on the JIT's
 +// runtime (0 = off: GECKO_WJ_HOSTCHARGE=0, GECKO_NOWASMJIT, or a worker
 +// runtime). See WasmJitRuntime.cpp.
-+extern int32_t WasmJitHostCharge(JSContext* cx);
++// raw: the configured charge, ignoring the runtime gate.
++extern int32_t WasmJitHostCharge(JSContext* cx, bool raw = false);
++// The charge for one PBL activation (GECKO_WJ_PBLCHARGE, default the same).
++extern int32_t WasmJitPblCharge(JSContext* cx);
 +// GECKO_WJ_DEPTHLIMIT if set, else the calibrated gWJJitDepthLimit.
 +extern int32_t WasmJitEffectiveDepthLimit();
-+// True when the charged depth is past 1.5x the limit (~90% of the calibrated
-+// host-stack capacity): a PBL activation reports over-recursion instead.
++// True when the charged depth is past the cap (GECKO_WJ_HOSTCAP percent of the
++// limit, default 150: ~90% of the calibrated host-stack capacity): a PBL
++// activation reports over-recursion instead.
 +extern bool WasmJitHostOverCap();
  
  // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
  // call marshalling). Sized for nargs<=64 with slack.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index b8f5e013c0..db261cd47a 100644
+index b8f5e013c0..77f24e90a1 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -1799,9 +1799,30 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
@@ -149,7 +153,7 @@ index b8f5e013c0..db261cd47a 100644
    // Convention: 0.0 = result ready in gWJScratch (normal completion OR sound
    // resume); 1.0 = an exception is pending (a call/resume threw) -> propagate;
    // 2.0 = the function DID NOT RUN (entry GGG mismatch / argc guard);
-@@ -7266,6 +7297,61 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
+@@ -7266,6 +7297,81 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
    if (v > 0) js::wasm::gWJJitDepthLimit = v;
  }
  
@@ -173,9 +177,10 @@ index b8f5e013c0..db261cd47a 100644
 +// capacity) reports a catchable "too much recursion" instead of letting the
 +// host stack overflow. Units are the limit's (probe-scaled bytes).
 +// GECKO_WJ_HOSTCHARGE=<n> sets the charge; 0 turns the whole mechanism off
-+// (A/B opt-out). Off with GECKO_NOWASMJIT, and off on worker runtimes (the JIT's
++// (A/B opt-out). GECKO_WJ_PBLCHARGE=<n> sets the PBL activation's charge
++// alone (default: the same). Off with GECKO_NOWASMJIT, and off on worker runtimes (the JIT's
 +// depth globals belong to the main runtime's thread).
-+int32_t js::wasm::WasmJitHostCharge(JSContext* cx) {
++int32_t js::wasm::WasmJitHostCharge(JSContext* cx, bool raw) {
 +  static int32_t sCharge = -1;
 +  if (sCharge < 0) {
 +    if (getenv("GECKO_NOWASMJIT")) {
@@ -186,6 +191,7 @@ index b8f5e013c0..db261cd47a 100644
 +      sCharge = v > 0 ? v : 0;
 +    }
 +  }
++  if (raw) return sCharge;
 +  if (!sCharge || !cx || cx->runtime()->parentRuntime) return 0;
 +  return sCharge;
 +}
@@ -195,15 +201,33 @@ index b8f5e013c0..db261cd47a 100644
 +  return sEnv ? int32_t(atoi(sEnv)) : gWJJitDepthLimit;
 +}
 +
++int32_t js::wasm::WasmJitPblCharge(JSContext* cx) {
++  static int32_t sCharge = -1;
++  if (sCharge < 0) {
++    const char* s = getenv("GECKO_WJ_PBLCHARGE");
++    int32_t v = s ? int32_t(atoi(s)) : WasmJitHostCharge(nullptr, true);
++    sCharge = v > 0 ? v : 0;
++  }
++  return WasmJitHostCharge(cx) ? sCharge : 0;
++}
++
++// GECKO_WJ_HOSTCAP=<percent of the limit> moves the over-recursion cap without
++// moving the latch (default 150: ~90% of the calibrated capacity).
 +bool js::wasm::WasmJitHostOverCap() {
-+  int32_t limit = WasmJitEffectiveDepthLimit();
-+  if (gWJJitDepth <= limit + limit / 2) return false;
++  static int32_t sPct = -1;
++  if (sPct < 0) {
++    const char* s = getenv("GECKO_WJ_HOSTCAP");
++    int32_t v = s ? int32_t(atoi(s)) : 150;
++    sPct = v > 0 ? v : 150;
++  }
++  int64_t cap = int64_t(WasmJitEffectiveDepthLimit()) * sPct / 100;
++  if (gWJJitDepth <= cap) return false;
 +  static int susDbg = getenv("GECKO_WJ_SUSDBG") ? 1 : 0;
 +  if (susDbg) {
 +    static uint64_t n = 0;
 +    if (++n <= 20 || (n % 1000) == 0)
-+      fprintf(stderr, "[wj-hostcap] #%llu depth=%d cap=%d\n",
-+              (unsigned long long)n, gWJJitDepth, limit + limit / 2);
++      fprintf(stderr, "[wj-hostcap] #%llu depth=%d cap=%lld\n",
++              (unsigned long long)n, gWJJitDepth, (long long)cap);
 +  }
 +  return true;
 +}
