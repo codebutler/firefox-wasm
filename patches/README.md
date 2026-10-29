@@ -670,53 +670,54 @@ stack that SpiderMonkey's recursion quota watches (0010 widened that quota to
 ~31 MB, so it cannot fire first). In four identical 1357-frame overflows there
 were 214 JIT frames, 67 PBL→JIT crossings and 129 PBL activations, and the
 guard had charged 151584 of its 298080 limit: the host stack ran out at about
-half the budget, before the suspend latch could fire. Lowering the limit
-(`GECKO_WJ_DEPTHLIMIT=100000`) still died, inside PBL frames after the latch,
-because the uncharged PBL tail kept growing the host stack.
+half the budget, before the suspend latch could fire. PBL alone overflows too:
+with the JIT off, a page recursing through `Function.prototype.apply` killed
+the thread at 469 levels.
 
 - **PBL→JIT edge charge.** `WasmJitRunCall` adds a fixed cost to
-  `gWJJitDepth` for the duration of the JIT call. Past the limit it refuses
-  and latches the suspend watermark, so the callee's subtree runs on PBL's
-  heap stack exactly as if the callee's prologue guard had refused. A
-  callee's own flag-3 refusal re-latches at the caller's depth (its latch
-  included the edge's charge).
+  `gWJJitDepth` for the duration of the JIT call (default 12288,
+  `GECKO_WJ_HOSTCHARGE`). Past the limit it refuses and latches the suspend
+  watermark, so the callee's subtree runs on PBL's heap stack exactly as if
+  the callee's prologue guard had refused; a callee's own flag-3 refusal
+  re-latches at the caller's depth. A crossing costs about four times a PBL
+  level on the host stack, so the large charge latches a mixed recursion at
+  roughly a fifth of the stack and leaves the PBL tail the rest — BotGuard's
+  recursion then completes, as it does with the JIT off.
 - **PBL activation charge.** Every `PortableBaselineInterpret` activation on
-  the JIT's runtime charges the same cost for its lifetime, so both the JIT
-  guard and the latch see the host frames PBL re-entry costs. Past 1.5× the
-  limit (≈90% of the calibrated capacity, since the limit is 60%), a new
-  activation reports a catchable `InternalError: too much recursion` instead
-  of letting V8's stack overflow and kill the thread.
+  the JIT's runtime charges `GECKO_WJ_PBLCHARGE` (default 1792) for its
+  lifetime, so the JIT does not start a deep recursion on top of a deep PBL
+  one.
+- **Host-stack headroom check.** A PBL activation nested more than 24 deep on
+  its thread asks the host whether 384 more frames of a probe module (64 live
+  `f64`s each, ≥100 KB in either V8 tier) fit
+  (`wasmhost_stack_headroom`, in both `wasm-host-bridge.js` files). If not, it
+  reports a catchable `InternalError: too much recursion` instead of letting
+  V8's stack overflow. Only probe frames unwind on the probe's `RangeError`,
+  inside the host's try/catch. This measures instead of estimating: a PBL
+  level's real cost varies several-fold with V8's tier for the interpreter, so
+  no fixed charge both stops before the limit and lets recursion that fits
+  finish. It applies with the JIT off and on every thread.
+  `GECKO_PBL_HEADROOM=0` disables it; `GECKO_PBL_HEADROOMFRAMES=<n>` sizes it.
 - **Watermark reset.** PBL activations keep the charged depth above 0, so
   `RunCall` now clears a stale watermark whenever it runs below it (nothing
   below the watermark is inside a delegated subtree), not only at depth 0.
 
-Charges are in the limit's units (probe-scaled bytes; the calibration sets
-800 per probe frame), measured on the app thread against the live 298080
-limit: JIT-off PBL recursion through `Function.prototype.apply` overflows at
-469 levels (~1060 units of real stack each), and the same recursion with the
-JIT on overflows at 114 levels (~4360 each) while the old guard charged ~840
-per level. The edge charge defaults to 4096 and the PBL activation charge to
-1536, so on the measured overflows the latch fires at about half the real stack
-and the PBL tail reaches the cap at roughly three quarters of it.
-`GECKO_WJ_HOSTCHARGE=<n>` sets the edge charge and `GECKO_WJ_HOSTCHARGE=0`
-turns the whole mechanism off (A/B opt-out); `GECKO_WJ_PBLCHARGE=<n>` sets the
-activation charge; `GECKO_WJ_HOSTCAP=<percent of the limit>` (default 150)
-moves the over-recursion cap without moving the latch. It is off with `GECKO_NOWASMJIT` and on worker
-runtimes (`parentRuntime` set): the JIT's depth globals belong to the main
-runtime's thread. `GECKO_WJ_SUSDBG` adds `[wj-hostsus]` (edge refusals) and
-`[wj-hostcap]` (over-recursion reports).
+`GECKO_WJ_HOSTCHARGE=0` turns the charges off (A/B opt-out for the JIT
+overflow). They are off with `GECKO_NOWASMJIT` and on worker runtimes
+(`parentRuntime` set): the JIT's depth globals belong to the main runtime's
+thread. `GECKO_WJ_SUSDBG` adds `[wj-hostsus]` (edge refusals) and
+`[wj-hostcap]` (headroom refusals).
 
 Regression probe: `node bench/main.ts micro host-reentry` recurses 200000
 levels through `Function.prototype.call` and `Array.prototype.map` callbacks.
 With 0015 both recursions end in a catchable `InternalError` and the run prints
-`MICROSUM=3202`; with `GECKO_WJ_HOSTCHARGE=0` the embed dies (`memory access
-out of bounds` under the bench's 8 MB host stack). PBL-only (`--pbl`) dies the
-same way, before and after 0015: the JS-only embed's linear stack is smaller
-than its recursion quota, which is the embed's own limit and not this patch's
-concern (Gecko's linear stack is 64 MB). Octane richards/deltablue/earley and
-the call-chain/native-call/try-catch/kitchen-sink micros keep their `--ab`
-checksums; scores moved within this host's run-to-run noise (earley ~5-10%
-lower over two runs each, the others not measurably).
+`MICROSUM=3202`, with the JIT on or off (node's default stack). With
+`GECKO_PBL_HEADROOM=0` the embed dies with V8's `RangeError`, and
+`GECKO_WJ_HOSTCHARGE=0` alone still lets a JIT↔native recursion
+(`f.apply` at depth 2000) overflow. Octane richards/deltablue/earley/raytrace
+and the call-chain/native-call/try-catch/kitchen-sink micros keep their `--ab`
+checksums; earley no longer latches at any charge and moves by run-to-run noise
+(12587 at the default charge vs 13295 with charges off).
 
 ## Surf integration refresh
 

@@ -6,7 +6,7 @@
 // watches -- barely moves. Before 0015 the JIT's depth budget charged only the
 // JIT frames, and this overflowed V8's stack with an uncatchable RangeError
 // that killed the process. With 0015 both recursions end in a catchable
-// InternalError (MICROSUM=3202); GECKO_WJ_HOSTCHARGE=0 still crashes.
+// InternalError (MICROSUM=3202), JIT on or off; GECKO_PBL_HEADROOM=0 crashes.
 class Benchmark {
   setup() {
     this.depth = 200000;

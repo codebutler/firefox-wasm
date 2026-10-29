@@ -1,8 +1,8 @@
 diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index 13e7823d35..d8c0b3b5ed 100644
+index 13e7823d35..3d32ce7683 100644
 --- a/js/src/vm/PortableBaselineInterpret.cpp
 +++ b/js/src/vm/PortableBaselineInterpret.cpp
-@@ -93,8 +93,35 @@ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -93,8 +93,43 @@ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
  extern uint64_t gWJCallCallee;
  extern uint32_t gWJExitFPLastSite;  // task #60 exitFP setter tracer
  extern uint32_t gWJExitFPSetCount;
@@ -11,13 +11,15 @@ index 13e7823d35..d8c0b3b5ed 100644
 +// recursion budget sees the host frames PBL re-entry costs.
 +extern int32_t gWJJitDepth;
 +extern int32_t WasmJitPblCharge(JSContext* cx);
-+extern bool WasmJitHostOverCap();
++extern bool WasmJitHostHeadroomLow();
  }  // namespace wasm
  }  // namespace js
 +
 +namespace {
-+// Charges one PBL activation to gWJJitDepth for its lifetime. Restoring on exit
-+// (not subtracting) keeps the counter exact however the activation returns.
++// Charges one PBL activation to gWJJitDepth for its lifetime (restoring on exit,
++// not subtracting, keeps the counter exact however the activation returns) and
++// counts this thread's PBL nesting for the host-stack headroom check.
++thread_local int32_t sPBLNest = 0;
 +struct WJHostActivation {
 +  int32_t saved = 0;
 +  bool active = false;
@@ -28,17 +30,23 @@ index 13e7823d35..d8c0b3b5ed 100644
 +      js::wasm::gWJJitDepth = saved + charge;
 +      active = true;
 +    }
++    ++sPBLNest;
 +  }
 +  ~WJHostActivation() {
++    --sPBLNest;
 +    if (active) js::wasm::gWJJitDepth = saved;
 +  }
-+  bool overCap() const { return active && js::wasm::WasmJitHostOverCap(); }
++  // Shallow activations never probe: only a thread nested more than 24 PBL
++  // activations deep can be near V8's limit.
++  bool headroomLow() const {
++    return sPBLNest > 24 && js::wasm::WasmJitHostHeadroomLow();
++  }
 +};
 +}  // namespace
  #endif
  
  namespace js {
-@@ -6209,6 +6236,10 @@ PBIResult PortableBaselineInterpret(
+@@ -6209,6 +6244,10 @@ PBIResult PortableBaselineInterpret(
      entryPC = Specialized ? pc : frame->script()->code();
    }
  
@@ -49,16 +57,16 @@ index 13e7823d35..d8c0b3b5ed 100644
    bool from_unwind = false;
  
    PBIResult ic_result = PBIResult::Ok;
-@@ -6239,6 +6270,17 @@ PBIResult PortableBaselineInterpret(
+@@ -6239,6 +6278,17 @@ PBIResult PortableBaselineInterpret(
        ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
        return PBIResult::Error;
      }
 +#if defined(__EMSCRIPTEN__)
-+    // The linear-memory quota above barely moves while PBL and the wasm JIT
-+    // recurse through each other on the host stack; the host-stack charge
-+    // reports over-recursion before V8's stack overflows (an uncatchable
-+    // RangeError that kills the thread).
-+    if (wjHost.overCap()) {
++    // The linear-memory quota above barely moves while PBL (and the wasm JIT)
++    // recurse on the host stack; the headroom check reports over-recursion
++    // before V8's stack overflows (an uncatchable RangeError that kills the
++    // thread).
++    if (wjHost.headroomLow()) {
 +      PUSH_EXIT_FRAME();
 +      ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
 +      return PBIResult::Error;
@@ -68,10 +76,10 @@ index 13e7823d35..d8c0b3b5ed 100644
  
    // Check max stack depth once, so we don't need to check it
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index cc503a794c..806468ae05 100644
+index cc503a794c..6a69f58ff7 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
-@@ -565,6 +565,19 @@ extern int32_t gWJJitDepthLimit;
+@@ -565,6 +565,18 @@ extern int32_t gWJJitDepthLimit;
  // the delegated subtree executes entirely in PBL on the heap shadow stack. The
  // latch clears itself once the delegating frame unwinds below the watermark.
  extern int32_t gWJSuspendWatermark;
@@ -79,20 +87,19 @@ index cc503a794c..806468ae05 100644
 +// runtime (0 = off: GECKO_WJ_HOSTCHARGE=0, GECKO_NOWASMJIT, or a worker
 +// runtime). See WasmJitRuntime.cpp.
 +extern int32_t WasmJitHostCharge(JSContext* cx);
-+// The charge for one PBL activation (GECKO_WJ_PBLCHARGE, default 1536); 0
++// The charge for one PBL activation (GECKO_WJ_PBLCHARGE, default 1792); 0
 +// whenever WasmJitHostCharge is.
 +extern int32_t WasmJitPblCharge(JSContext* cx);
 +// GECKO_WJ_DEPTHLIMIT if set, else the calibrated gWJJitDepthLimit.
 +extern int32_t WasmJitEffectiveDepthLimit();
-+// True when the charged depth is past the cap (GECKO_WJ_HOSTCAP percent of the
-+// limit, default 150: ~90% of the calibrated host-stack capacity): a PBL
-+// activation reports over-recursion instead.
-+extern bool WasmJitHostOverCap();
++// True when the host stack has too little room left for another PBL level:
++// a PBL activation reports over-recursion instead (WasmJitRuntime.cpp).
++extern bool WasmJitHostHeadroomLow();
  
  // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
  // call marshalling). Sized for nargs<=64 with slack.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index b8f5e013c0..484ca50e1f 100644
+index b8f5e013c0..3562458106 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -1799,9 +1799,30 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
@@ -153,7 +160,7 @@ index b8f5e013c0..484ca50e1f 100644
    // Convention: 0.0 = result ready in gWJScratch (normal completion OR sound
    // resume); 1.0 = an exception is pending (a call/resume threw) -> propagate;
    // 2.0 = the function DID NOT RUN (entry GGG mismatch / argc guard);
-@@ -7266,6 +7297,87 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
+@@ -7266,6 +7297,102 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
    if (v > 0) js::wasm::gWJJitDepthLimit = v;
  }
  
@@ -173,20 +180,23 @@ index b8f5e013c0..484ca50e1f 100644
 +// JIT's runtime charges a fixed cost to gWJJitDepth for its lifetime (restored
 +// on exit, like a JIT frame). Entries refuse -- and latch the suspend watermark
 +// -- once the charged depth reaches the limit, so the deep tail stays on PBL's
-+// heap stack; a PBL activation past the cap (GECKO_WJ_HOSTCAP, default 1.5x the
-+// limit, ~90% of the calibrated capacity) reports a catchable "too much recursion" instead of letting the
-+// host stack overflow. Units are the limit's (probe-scaled bytes).
++// heap stack; a PBL activation that finds too little host stack left
++// (WasmJitHostHeadroomLow) reports a catchable "too much recursion" instead of
++// letting the host stack overflow. Units are the limit's (probe-scaled bytes).
 +//
-+// Measured on the app thread (probe limit 298080, so 800 units per probe
-+// frame): JIT-off PBL recursion through Function.prototype.apply overflows at
-+// 469 levels (~1060 units each); the same recursion with the JIT on overflows
-+// at 114 levels (~4360 units each) while charging only ~840 per level. The
-+// edge charge (GECKO_WJ_HOSTCHARGE, default 4096) and the PBL activation
-+// charge (GECKO_WJ_PBLCHARGE, default 1536) make the latch fire at about half
-+// the real stack and leave the PBL tail room below the cap.
-+// GECKO_WJ_HOSTCHARGE=0 turns the whole mechanism off (A/B opt-out). It is
++// The charges decide when the JIT stops entering, not when recursion fails:
++// past the latch the recursion continues in PBL, whose per-level host cost is
++// a quarter of a JIT<->PBL crossing's (measured on the app thread, probe limit
++// 298080: an apply recursion overflows at 114 levels with the JIT on, 469
++// with it off). So the edge charge (GECKO_WJ_HOSTCHARGE, default 12288) latches
++// a mixed recursion early -- about a fifth of the real stack -- and leaves the
++// cheaper PBL tail the rest; BotGuard's recursion on YouTube then completes,
++// as it does with the JIT off. A PBL activation charges GECKO_WJ_PBLCHARGE
++// (default 1792), so the JIT does not start a deep recursion on top of a deep
++// PBL one. GECKO_WJ_HOSTCHARGE=0 turns the charges off (A/B opt-out). They are
 +// also off with GECKO_NOWASMJIT and on worker runtimes (the JIT's depth
-+// globals belong to the main runtime's thread).
++// globals belong to the main runtime's thread); the headroom check below is
++// not, since PBL alone can overflow the host stack too.
 +int32_t js::wasm::WasmJitHostCharge(JSContext* cx) {
 +  static int32_t sCharge = -1;
 +  if (sCharge < 0) {
@@ -194,7 +204,7 @@ index b8f5e013c0..484ca50e1f 100644
 +      sCharge = 0;
 +    } else {
 +      const char* s = getenv("GECKO_WJ_HOSTCHARGE");
-+      int32_t v = s ? int32_t(atoi(s)) : 4096;
++      int32_t v = s ? int32_t(atoi(s)) : 12288;
 +      sCharge = v > 0 ? v : 0;
 +    }
 +  }
@@ -211,29 +221,41 @@ index b8f5e013c0..484ca50e1f 100644
 +  static int32_t sCharge = -1;
 +  if (sCharge < 0) {
 +    const char* s = getenv("GECKO_WJ_PBLCHARGE");
-+    int32_t v = s ? int32_t(atoi(s)) : 1536;
++    int32_t v = s ? int32_t(atoi(s)) : 1792;
 +    sCharge = v > 0 ? v : 0;
 +  }
 +  return WasmJitHostCharge(cx) ? sCharge : 0;
 +}
 +
-+// GECKO_WJ_HOSTCAP=<percent of the limit> moves the over-recursion cap without
-+// moving the latch (default 150: ~90% of the calibrated capacity).
-+bool js::wasm::WasmJitHostOverCap() {
-+  static int32_t sPct = -1;
-+  if (sPct < 0) {
-+    const char* s = getenv("GECKO_WJ_HOSTCAP");
-+    int32_t v = s ? int32_t(atoi(s)) : 150;
-+    sPct = v > 0 ? v : 150;
++// The over-recursion check measures the host stack instead of estimating it.
++// A PBL activation's real cost varies several-fold with V8's tier for the
++// interpreter (Liftoff frames are far larger than TurboFan's), so no fixed
++// charge both stops before V8's limit and leaves recursion that fits alone: an
++// apply recursion overflowed at 469 levels in one run and ~250 in another.
++// wasmhost_stack_headroom(n) (wasm-host-bridge.js) recurses a small probe
++// module with 64 live f64s per frame n levels deep and reports whether V8 let
++// it; only probe frames unwind on the RangeError, inside the host's own
++// try/catch. 384 frames is >=100 KB at TurboFan's smallest probe frame, enough
++// for the next PBL level plus building the InternalError. Checked on every PBL
++// activation nested more than 24 deep on a thread; shallow code never pays.
++// GECKO_PBL_HEADROOM=0 disables it, GECKO_PBL_HEADROOMFRAMES=<n> sizes it.
++extern "C" int wasmhost_stack_headroom(int frames);
++
++bool js::wasm::WasmJitHostHeadroomLow() {
++  static int32_t sFrames = -1;
++  if (sFrames < 0) {
++    const char* off = getenv("GECKO_PBL_HEADROOM");
++    const char* n = getenv("GECKO_PBL_HEADROOMFRAMES");
++    sFrames = (off && strcmp(off, "0") == 0) ? 0 : (n ? atoi(n) : 384);
++    if (sFrames < 0) sFrames = 0;
 +  }
-+  int64_t cap = int64_t(WasmJitEffectiveDepthLimit()) * sPct / 100;
-+  if (gWJJitDepth <= cap) return false;
++  if (!sFrames || wasmhost_stack_headroom(sFrames)) return false;
 +  static int susDbg = getenv("GECKO_WJ_SUSDBG") ? 1 : 0;
 +  if (susDbg) {
 +    static uint64_t n = 0;
 +    if (++n <= 20 || (n % 1000) == 0)
-+      fprintf(stderr, "[wj-hostcap] #%llu depth=%d cap=%lld\n",
-+              (unsigned long long)n, gWJJitDepth, (long long)cap);
++      fprintf(stderr, "[wj-hostcap] #%llu depth=%d frames=%d\n",
++              (unsigned long long)n, gWJJitDepth, sFrames);
 +  }
 +  return true;
 +}
