@@ -700,9 +700,17 @@ runtimes (`parentRuntime` set): the JIT's depth globals belong to the main
 runtime's thread. `GECKO_WJ_SUSDBG` adds `[wj-hostsus]` (edge refusals) and
 `[wj-hostcap]` (over-recursion reports).
 
-Regression probe: `node bench/main.ts micro host-reentry --ab` recurses 200000
-levels through `Function.prototype.call` and `Array.prototype.map` callbacks;
-it must end in the same catchable `InternalError` in JIT and PBL modes.
+Regression probe: `node bench/main.ts micro host-reentry` recurses 200000
+levels through `Function.prototype.call` and `Array.prototype.map` callbacks.
+With 0015 both recursions end in a catchable `InternalError` and the run prints
+`MICROSUM=3202`; with `GECKO_WJ_HOSTCHARGE=0` the embed dies (`memory access
+out of bounds` under the bench's 8 MB host stack). PBL-only (`--pbl`) dies the
+same way, before and after 0015: the JS-only embed's linear stack is smaller
+than its recursion quota, which is the embed's own limit and not this patch's
+concern (Gecko's linear stack is 64 MB). Octane richards/deltablue/earley and
+the call-chain/native-call/try-catch/kitchen-sink micros keep their `--ab`
+checksums; scores moved within this host's run-to-run noise (earley ~5-10%
+lower over two runs each, the others not measurably).
 
 ## Surf integration refresh
 

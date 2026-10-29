@@ -5,8 +5,8 @@
 // while the linear-memory stack -- what SpiderMonkey's recursion quota
 // watches -- barely moves. Before 0015 the JIT's depth budget charged only the
 // JIT frames, and this overflowed V8's stack with an uncatchable RangeError
-// that killed the process. Now it must end in a catchable InternalError (or
-// complete), the same in JIT and PBL modes.
+// that killed the process. With 0015 both recursions end in a catchable
+// InternalError (MICROSUM=3202); GECKO_WJ_HOSTCHARGE=0 still crashes.
 class Benchmark {
   setup() {
     this.depth = 200000;
