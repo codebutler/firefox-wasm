@@ -11,12 +11,33 @@
 namespace js {
 namespace wasm {
 void WasmJitDrainDeferred();
+extern int32_t gWJJitDepth;
+extern int32_t gWJJitDepthLimit;
+extern int32_t gWJSuspendWatermark;
 }
 }  // namespace js
-// No-op override of pthread_setname_np. musl provides a real one, but thread names
-// are irrelevant in this embedding; SpiderMonkey/mozglue call it on thread startup,
-// so define it as a cheap no-op.
-extern "C" int pthread_setname_np(pthread_t, const char*) { return 0; }
+// Keep the embedding's no-op override, with a branch-only diagnostic.
+extern "C" int pthread_setname_np(pthread_t thread, const char* name) {
+  if (getenv("GECKO_THREAD_DEBUG"))
+    fprintf(stderr, "[thread] 0x%08x %s\n", (unsigned)(uintptr_t)thread,
+            name ? name : "<unnamed>");
+  return 0;
+}
+
+// Export addresses instead of cached values. JS reads each word through a fresh
+// HEAP32 view, including after memory growth or an app-thread death.
+static uint32_t g_wj_state_ptrs[3];
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t* gecko_wj_state_ptr() {
+  g_wj_state_ptrs[0] = (uint32_t)(uintptr_t)&js::wasm::gWJJitDepth;
+  g_wj_state_ptrs[1] = (uint32_t)(uintptr_t)&js::wasm::gWJJitDepthLimit;
+  g_wj_state_ptrs[2] = (uint32_t)(uintptr_t)&js::wasm::gWJSuspendWatermark;
+  return g_wj_state_ptrs;
+}
+
+// phase: 0 boot, 1 idle drain, 2 JIT drain, 3 futex, 4 op,
+// 5 chrome script, 6 event pump. The other words are iteration and op.
+static int32_t g_diag[3] = {0, 0, -1};
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t* gecko_diag_ptr() { return g_diag; }
 
 // Canvas-passthrough flag, captured on the app thread in main() (where getenv
 // sees the env), read by libxul's GLContextProviderEmscripten on the content
@@ -71,7 +92,8 @@ static char* g_evalResult = nullptr; // op 5-8 string result -> g_cmd->result
 // calls. This lets xul_render's SpinEventLoopUntil block here without deadlocking
 // the workers (WebRender/compositor/helper threads) that need the runtime thread.
 int main() {
-  printf("embed-xul: main() on the app pthread (PROXY_TO_PTHREAD)\n");
+  printf("embed-xul: main() on the app pthread 0x%08x (PROXY_TO_PTHREAD)\n",
+         (unsigned)(uintptr_t)pthread_self());
   fflush(stdout);
 
   g_cmd = (XulCmd*)calloc(1, sizeof(XulCmd));
@@ -116,6 +138,11 @@ int main() {
   printf("embed-xul: READY cmd=%p (state@0,w@4,h@8,result@12,len@16,url@20)\n",
          (void*)g_cmd);
   fflush(stdout);
+  auto pumpEvents = []() {
+    g_diag[0] = 6;
+    PumpEvents();
+    g_diag[0] = 4;
+  };
 
   // On-demand command loop: serve load/input/paint requests from JS until the
   // process ends. op selects the action; every op repaints and returns BGRA.
@@ -129,17 +156,23 @@ int main() {
   // (4ms) to avoid stutter -- commands themselves don't wait for it (notify wakes us).
   constexpr double kCmdPumpMs = 4.0;
   for (;;) {
+    g_diag[1]++;
     int32_t s = g_cmd->state;
     if (s != 1) {  // idle: pump the engine loop, then wait for a command or timeout
+      g_diag[0] = 1;
       NS_ProcessPendingEvents(nullptr, 0);  // non-blocking drain of ready runnables
+      g_diag[0] = 2;
       js::wasm::WasmJitDrainDeferred();  // compile deferred hot fns off the critical path
       // futex_wait returns at once if `state` already changed (no lost wakeups), so
       // a request submitted in the race window between the read and the wait is not
       // missed -- it's why this takes the expected value `s`.
+      g_diag[0] = 3;
       emscripten_futex_wait((void*)&g_cmd->state, (uint32_t)s, kCmdPumpMs);
       continue;
     }
     {
+      g_diag[0] = 4;
+      g_diag[2] = g_cmd->op;
       g_cmd->state = 2;  // processing
       if (g_cmd->result) {
         free(g_cmd->result);
@@ -154,38 +187,39 @@ int main() {
         case 1:  // mouse
           do_mouse(g_cmd->evType, g_cmd->ex, g_cmd->ey, g_cmd->button,
                    g_cmd->clickCount, g_cmd->buttons, g_cmd->modifiers);
-          PumpEvents();
+          pumpEvents();
           break;
         case 2:  // keyboard
           do_key(g_cmd->evType, g_cmd->keyValue, g_cmd->keyCode, g_cmd->charCode,
                  g_cmd->modifiers);
-          PumpEvents();
+          pumpEvents();
           break;
         case 3:  // wheel
           do_wheel(g_cmd->ex, g_cmd->ey, (double)g_cmd->deltaX,
                    (double)g_cmd->deltaY, g_cmd->modifiers);
-          PumpEvents();
+          pumpEvents();
           break;
         case 4:  // paint only
           break;
         case 5: {  // eval JS in the content global; returns the eval's string result
           char* res = nullptr;
+          g_diag[0] = 5;
           ok = RunChromeScript(nsDependentCString(g_cmd->url), &res);
           g_evalResult = res;  // ownership -> g_cmd->result below (freed next cmd)
-          PumpEvents();
+          pumpEvents();
           break;
         }
         case 6:  // DOM-mirror: data: URLs for the page's <img>s (privileged, CORS-free)
           g_evalResult = mirror_collect_images();
-          PumpEvents();
+          pumpEvents();
           break;
         case 7:  // DOM-mirror: data:text/css URLs for every stylesheet (cross-origin too)
           g_evalResult = mirror_collect_css();
-          PumpEvents();
+          pumpEvents();
           break;
         case 8:  // DOM-mirror: data: URLs for the page's <canvas> pixels
           g_evalResult = mirror_collect_canvases();
-          PumpEvents();
+          pumpEvents();
           break;
         case 9:  // set clipboard text (system-clipboard prime before a native paste)
           ok = set_clipboard_text(g_cmd->url);
@@ -195,11 +229,11 @@ int main() {
           break;
         case 11:  // host theme, interpreted only in a privileged module
           ok = SetEmbedTheme(g_cmd->url);
-          PumpEvents();
+          pumpEvents();
           break;
         case 12:  // privileged save/download command; never content eval
           ok = SaveEmbedURL(g_cmd->url);
-          PumpEvents();
+          pumpEvents();
           break;
       }
       // Build the result for this op: string ops (5-8) return a UTF-8 buffer; op 9

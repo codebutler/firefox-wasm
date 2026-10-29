@@ -88,7 +88,7 @@ EMSETTINGS=(
   -pthread -sPTHREAD_POOL_SIZE=20 -sPTHREAD_POOL_SIZE_STRICT=0
   --pre-js "$PKG/runtime-lifecycle.js"
   -sMODULARIZE=1 -sEXPORT_NAME=createGecko
-  -sEXPORTED_FUNCTIONS=_main,_xul_init,_free,_malloc,_WasmXPTCStubDispatch,_xul_cmd_ptr,_wisp_wakeword,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_set_error,_wisp_errno_econnrefused,_wisp_errno_eopnotsupp,_wisp_errno_enodev,_wisp_errno_einval,_wasmfs_create_provider_backend,_provider_record_entry,_wasmhost_invoke_import,_wjhelp,_wasmjit_invoke,_wj_set_depth_limit,_WJTraceRoots,_InterpTraceRoots,_b_help,_hostimg_renderer_tid,_gecko_coarse_now_ptr,_gecko_prompt_wake
+  -sEXPORTED_FUNCTIONS=_main,_xul_init,_free,_malloc,_WasmXPTCStubDispatch,_xul_cmd_ptr,_wisp_wakeword,_wisp_deliver,_wisp_set_connected,_wisp_set_eof,_wisp_errno_econnrefused,_wisp_errno_eopnotsupp,_wisp_errno_enodev,_wisp_errno_einval,_wasmfs_create_provider_backend,_provider_record_entry,_wasmhost_invoke_import,_wjhelp,_wasmjit_invoke,_wj_set_depth_limit,_WJTraceRoots,_InterpTraceRoots,_b_help,_hostimg_renderer_tid,_gecko_coarse_now_ptr,_gecko_prompt_wake,_gecko_wj_state_ptr,_gecko_diag_ptr
   # specialHTMLTargets is emscripten's selector->element override map, consulted by
   # findEventTarget/findCanvasEventTarget BEFORE document.querySelector. Exporting it
   # lets the embedder hand the engine its canvas directly (js/index.ts, registerGlTarget),
@@ -165,7 +165,7 @@ if [ "${GECKO_RELEASE:-}" = "1" ] && [ "${NO_WASM_OPT:-}" != "1" ]; then
   # better module in a fraction of the wall time over this ~235MB binary. Do NOT add
   # `--converge`: it re-runs the whole pipeline to a fixpoint, which is effectively
   # unbounded on a module this large. Override with $GECKO_WASMOPT_FLAGS.
-  WASMOPT_FLAGS="${GECKO_WASMOPT_FLAGS:--all -O4 -O3}"
+  WASMOPT_FLAGS="${GECKO_WASMOPT_FLAGS:--all -O4 -O3 -g}"
   echo ">> wasm-opt $WASMOPT_FLAGS  (release, on gecko.wasm)"
   # shellcheck disable=SC2086  # intentional word-splitting of the flag string
   "$WASMOPT" $WASMOPT_FLAGS "$PKG/wasm/gecko.wasm" -o "$PKG/wasm/gecko.wasm.opt" \

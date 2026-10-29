@@ -278,6 +278,8 @@ interface GeckoModule {
    */
   specialHTMLTargets?: Record<string, HTMLElement>;
   _xul_cmd_ptr(): number;
+  _gecko_wj_state_ptr?(): number;
+  _gecko_diag_ptr?(): number;
   addRunDependency(id: string): void;
   removeRunDependency(id: string): void;
 }
@@ -985,6 +987,30 @@ export class Gecko {
     // findCanvasEventTarget strips the leading '#' before its offscreen-canvas lookup.
     targets['#screen'] = this.canvas;
     targets['screen'] = this.canvas;
+  }
+
+  /** Read shared diagnostics without waiting for the app pthread's command loop. */
+  diagnostics(): Record<string, number | null> | null {
+    const m = this.mod;
+    if (!m || !this.cmd || !m._gecko_wj_state_ptr || !m._gecko_diag_ptr) return null;
+    // Emscripten replaces HEAP32 after growth. Never retain its old view.
+    const read = (bytePtr: number): number | null => {
+      const heap = m.HEAP32;
+      if (!Number.isInteger(bytePtr) || bytePtr <= 0 || (bytePtr & 3) || bytePtr + 4 > heap.byteLength)
+        return null;
+      return heap[bytePtr >>> 2] ?? null;
+    };
+    const ptrs = m._gecko_wj_state_ptr();
+    const diag = m._gecko_diag_ptr();
+    const depthPtr = read(ptrs), limitPtr = read(ptrs + 4), watermarkPtr = read(ptrs + 8);
+    return {
+      cmdState: read(this.cmd + ST), cmdOp: read(this.cmd + OP),
+      phase: read(diag), iteration: read(diag + 4), op: read(diag + 8),
+      jitDepth: depthPtr === null ? null : read(depthPtr),
+      jitLimit: limitPtr === null ? null : read(limitPtr),
+      watermark: watermarkPtr === null ? null : read(watermarkPtr),
+      depthPtr, limitPtr, watermarkPtr,
+    };
   }
 
   // ---- command protocol --------------------------------------------------
