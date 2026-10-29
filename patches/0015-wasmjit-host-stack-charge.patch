@@ -68,7 +68,7 @@ index 13e7823d35..d8c0b3b5ed 100644
  
    // Check max stack depth once, so we don't need to check it
 diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
-index cc503a794c..0e38940e74 100644
+index cc503a794c..806468ae05 100644
 --- a/js/src/wasm/WasmJitBackend.h
 +++ b/js/src/wasm/WasmJitBackend.h
 @@ -565,6 +565,19 @@ extern int32_t gWJJitDepthLimit;
@@ -78,9 +78,9 @@ index cc503a794c..0e38940e74 100644
 +// Host-stack charge for a PBL->JIT edge or a PBL activation on the JIT's
 +// runtime (0 = off: GECKO_WJ_HOSTCHARGE=0, GECKO_NOWASMJIT, or a worker
 +// runtime). See WasmJitRuntime.cpp.
-+// raw: the configured charge, ignoring the runtime gate.
-+extern int32_t WasmJitHostCharge(JSContext* cx, bool raw = false);
-+// The charge for one PBL activation (GECKO_WJ_PBLCHARGE, default the same).
++extern int32_t WasmJitHostCharge(JSContext* cx);
++// The charge for one PBL activation (GECKO_WJ_PBLCHARGE, default 1536); 0
++// whenever WasmJitHostCharge is.
 +extern int32_t WasmJitPblCharge(JSContext* cx);
 +// GECKO_WJ_DEPTHLIMIT if set, else the calibrated gWJJitDepthLimit.
 +extern int32_t WasmJitEffectiveDepthLimit();
@@ -92,7 +92,7 @@ index cc503a794c..0e38940e74 100644
  // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
  // call marshalling). Sized for nargs<=64 with slack.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index b8f5e013c0..77f24e90a1 100644
+index b8f5e013c0..484ca50e1f 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -1799,9 +1799,30 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
@@ -153,7 +153,7 @@ index b8f5e013c0..77f24e90a1 100644
    // Convention: 0.0 = result ready in gWJScratch (normal completion OR sound
    // resume); 1.0 = an exception is pending (a call/resume threw) -> propagate;
    // 2.0 = the function DID NOT RUN (entry GGG mismatch / argc guard);
-@@ -7266,6 +7297,81 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
+@@ -7266,6 +7297,87 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
    if (v > 0) js::wasm::gWJJitDepthLimit = v;
  }
  
@@ -173,25 +173,31 @@ index b8f5e013c0..77f24e90a1 100644
 +// JIT's runtime charges a fixed cost to gWJJitDepth for its lifetime (restored
 +// on exit, like a JIT frame). Entries refuse -- and latch the suspend watermark
 +// -- once the charged depth reaches the limit, so the deep tail stays on PBL's
-+// heap stack; a PBL activation past 1.5x the limit (~90% of the calibrated
-+// capacity) reports a catchable "too much recursion" instead of letting the
++// heap stack; a PBL activation past the cap (GECKO_WJ_HOSTCAP, default 1.5x the
++// limit, ~90% of the calibrated capacity) reports a catchable "too much recursion" instead of letting the
 +// host stack overflow. Units are the limit's (probe-scaled bytes).
-+// GECKO_WJ_HOSTCHARGE=<n> sets the charge; 0 turns the whole mechanism off
-+// (A/B opt-out). GECKO_WJ_PBLCHARGE=<n> sets the PBL activation's charge
-+// alone (default: the same). Off with GECKO_NOWASMJIT, and off on worker runtimes (the JIT's
-+// depth globals belong to the main runtime's thread).
-+int32_t js::wasm::WasmJitHostCharge(JSContext* cx, bool raw) {
++//
++// Measured on the app thread (probe limit 298080, so 800 units per probe
++// frame): JIT-off PBL recursion through Function.prototype.apply overflows at
++// 469 levels (~1060 units each); the same recursion with the JIT on overflows
++// at 114 levels (~4360 units each) while charging only ~840 per level. The
++// edge charge (GECKO_WJ_HOSTCHARGE, default 4096) and the PBL activation
++// charge (GECKO_WJ_PBLCHARGE, default 1536) make the latch fire at about half
++// the real stack and leave the PBL tail room below the cap.
++// GECKO_WJ_HOSTCHARGE=0 turns the whole mechanism off (A/B opt-out). It is
++// also off with GECKO_NOWASMJIT and on worker runtimes (the JIT's depth
++// globals belong to the main runtime's thread).
++int32_t js::wasm::WasmJitHostCharge(JSContext* cx) {
 +  static int32_t sCharge = -1;
 +  if (sCharge < 0) {
 +    if (getenv("GECKO_NOWASMJIT")) {
 +      sCharge = 0;
 +    } else {
 +      const char* s = getenv("GECKO_WJ_HOSTCHARGE");
-+      int32_t v = s ? int32_t(atoi(s)) : 3072;
++      int32_t v = s ? int32_t(atoi(s)) : 4096;
 +      sCharge = v > 0 ? v : 0;
 +    }
 +  }
-+  if (raw) return sCharge;
 +  if (!sCharge || !cx || cx->runtime()->parentRuntime) return 0;
 +  return sCharge;
 +}
@@ -205,7 +211,7 @@ index b8f5e013c0..77f24e90a1 100644
 +  static int32_t sCharge = -1;
 +  if (sCharge < 0) {
 +    const char* s = getenv("GECKO_WJ_PBLCHARGE");
-+    int32_t v = s ? int32_t(atoi(s)) : WasmJitHostCharge(nullptr, true);
++    int32_t v = s ? int32_t(atoi(s)) : 1536;
 +    sCharge = v > 0 ? v : 0;
 +  }
 +  return WasmJitHostCharge(cx) ? sCharge : 0;

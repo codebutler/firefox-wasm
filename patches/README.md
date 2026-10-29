@@ -690,14 +690,18 @@ because the uncharged PBL tail kept growing the host stack.
   `RunCall` now clears a stale watermark whenever it runs below it (nothing
   below the watermark is inside a delegated subtree), not only at depth 0.
 
-The charge is 3072 in the limit's units (probe-scaled bytes; the calibration
-sets 800 per probe frame). The four measured overflows need at least ~1800 per
-crossing and activation for the latch to fire before the host stack is full;
-3072 latches at roughly 40% of the real stack and caps at roughly 60%.
-`GECKO_WJ_HOSTCHARGE=<n>` sets it; `GECKO_WJ_HOSTCHARGE=0` turns the whole
-mechanism off (A/B opt-out). `GECKO_WJ_PBLCHARGE=<n>` sets the PBL
-activation's charge alone, and `GECKO_WJ_HOSTCAP=<percent of the limit>`
-(default 150) moves the over-recursion cap without moving the latch. It is off with `GECKO_NOWASMJIT` and on worker
+Charges are in the limit's units (probe-scaled bytes; the calibration sets
+800 per probe frame), measured on the app thread against the live 298080
+limit: JIT-off PBL recursion through `Function.prototype.apply` overflows at
+469 levels (~1060 units of real stack each), and the same recursion with the
+JIT on overflows at 114 levels (~4360 each) while the old guard charged ~840
+per level. The edge charge defaults to 4096 and the PBL activation charge to
+1536, so on the measured overflows the latch fires at about half the real stack
+and the PBL tail reaches the cap at roughly three quarters of it.
+`GECKO_WJ_HOSTCHARGE=<n>` sets the edge charge and `GECKO_WJ_HOSTCHARGE=0`
+turns the whole mechanism off (A/B opt-out); `GECKO_WJ_PBLCHARGE=<n>` sets the
+activation charge; `GECKO_WJ_HOSTCAP=<percent of the limit>` (default 150)
+moves the over-recursion cap without moving the latch. It is off with `GECKO_NOWASMJIT` and on worker
 runtimes (`parentRuntime` set): the JIT's depth globals belong to the main
 runtime's thread. `GECKO_WJ_SUSDBG` adds `[wj-hostsus]` (edge refusals) and
 `[wj-hostcap]` (over-recursion reports).
