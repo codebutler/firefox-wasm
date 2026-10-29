@@ -1,0 +1,27 @@
+bench/spidermonkey.js/wasm-host-bridge.js
+  s_2a950a56db299c::t_3cc2d31e4d6e64 29-53
+gecko.js/lib/wasm-host-bridge.js
+  s_2a950a56db299c::t_8ec71eed43b782 29-53
+bench/microbenches/host-reentry.js
+  s_2a950a56db299c::t_db8f3287b00551 9
+patches/0015-wasmjit-host-stack-charge.patch
+  s_2a950a56db299c::t_9fbc2c46c64b69 2,5,14,19-22,33,36,39-43,49,60,65-69,79,82,90,95-97,102,163,183-185,187-196,198-199,207,224,230-250,252,257-258
+patches/README.md
+  s_2a950a56db299c::t_3e2f28d40bc22c 673-675,678-685,687-700,705-709,714-720
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "714a284e34d817f6604fc01090a4b26ede06e702",
+  "prompts": {},
+  "sessions": {
+    "s_2a950a56db299c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fe4a4957-6ab7-430d-a719-0e54b71aafb9",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
