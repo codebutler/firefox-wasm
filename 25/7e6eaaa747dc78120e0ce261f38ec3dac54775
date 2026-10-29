@@ -1,0 +1,33 @@
+bench/spidermonkey.js/wasm-host-bridge.js
+  s_2b9b0ca003c2a1::t_2d6edc41616f47 31-37,43
+gecko.js/lib/wasm-host-bridge.js
+  s_2b9b0ca003c2a1::t_dc61f4a0e58f46 31-37,43
+patches/0015-wasmjit-host-stack-charge.patch
+  s_aaeacde6509efb::t_f00a4b7c073dd2 102,163,236-243,252
+patches/README.md
+  s_aaeacde6509efb::t_af2b790282e063 691-697
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "257e6eaaa747dc78120e0ce261f38ec3dac54775",
+  "prompts": {},
+  "sessions": {
+    "s_2b9b0ca003c2a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18963-9a9d-7700-b34f-fd679cd1e806",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_aaeacde6509efb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18940-cc2d-7c90-bc36-29a7664d7cac",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
