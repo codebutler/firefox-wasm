@@ -1,0 +1,19 @@
+gecko.js/build-lib.sh
+  s_1c310537b66e7f::t_62892ea0acb46c 168
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e484f00e50763e1bd9134a81190189326ff71b40",
+  "prompts": {},
+  "sessions": {
+    "s_1c310537b66e7f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "67d54ca6-0fe2-43cf-81fa-2ff9e9bb8fd9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
