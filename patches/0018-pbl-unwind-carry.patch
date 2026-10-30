@@ -19,10 +19,10 @@ index eda6c580ae..4d03809e62 100644
  // The wasm JIT runs on the main runtime only (patch 0015), so its roots are
  // the main runtime's cells. A worker runtime's GC must not trace them: its
 diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index 470d116520..dd693c73f8 100644
+index 470d116520..cec5381080 100644
 --- a/js/src/vm/PortableBaselineInterpret.cpp
 +++ b/js/src/vm/PortableBaselineInterpret.cpp
-@@ -202,20 +202,16 @@ static void WJDumpFrameChain(JSContext* cx) {
+@@ -202,20 +202,19 @@ static void WJDumpFrameChain(JSContext* cx) {
            bad, (void*)lo, (void*)hi, cx->portableBaselineStack().top);
  }
  
@@ -42,16 +42,19 @@ index 470d116520..dd693c73f8 100644
 +// read past linear memory in 5 of 10 JIT-on YouTube loads; that crash was the
 +// cross-activation unwind re-raise's capture from a stale exit FP (fixed by
 +// 0017), not this one, and with 0017 12 of 12 loads captured here safely.
-+// GECKO_WJ_OVERSTACKLESS=1 keeps the stackless report
++// GECKO_WJ_OVERSTACKLESS set to any value but "0" keeps the stackless report
 +// (JSContext::onOverRecursedStackless: e.stack === "", status OverRecursed).
  static void WJReportOverRecursed(JSContext* cx) {
    static int framedbg = getenv("GECKO_WJ_FRAMEDBG") ? 1 : 0;
 -  static int stackless = getenv("GECKO_WJ_OVERCAPTURE") ? 0 : 1;
-+  static int stackless = getenv("GECKO_WJ_OVERSTACKLESS") ? 1 : 0;
++  static int stackless = [] {
++    const char* v = getenv("GECKO_WJ_OVERSTACKLESS");
++    return v && strcmp(v, "0") != 0 ? 1 : 0;
++  }();
    if (framedbg) {
      static uint64_t n = 0;
      if (++n <= 6) WJDumpFrameChain(cx);
-@@ -311,12 +307,23 @@ static bool gPBLResumeInError = false;
+@@ -311,12 +310,23 @@ static bool gPBLResumeInError = false;
  // exception), the intermediate wasm frames can only propagate a flag -- the
  // unwind TARGET must be carried here so the outer PBI's call-into-JIT site
  // can continue its own unwind chain instead of erroring with no exception.
@@ -81,7 +84,7 @@ index 470d116520..dd693c73f8 100644
  
  // Re-raise the in-flight exception when a catch/finally target lies beyond
  // this activation (patch 0017). The exit frame HandleException ran under has
-@@ -331,7 +338,6 @@ static bool gPBLUnwindHaveExc = false;
+@@ -331,7 +341,6 @@ static bool gPBLUnwindHaveExc = false;
  // old re-raise (A/B).
  static void PBLReraiseUnwindException(JSContext* cx) {
    if (!gPBLUnwindHaveExc) return;
@@ -89,7 +92,7 @@ index 470d116520..dd693c73f8 100644
    // GECKO_PBL_REUNWINDDBG: log each cross-activation re-raise.
    static int sDbg = getenv("GECKO_PBL_REUNWINDDBG") ? 1 : 0;
    if (sDbg) {
-@@ -344,18 +350,21 @@ static void PBLReraiseUnwindException(JSContext* cx) {
+@@ -344,18 +353,21 @@ static void PBLReraiseUnwindException(JSContext* cx) {
                : gPBLUnwindExc.isObject() ? "object" : "other",
                gPBLUnwindExcStack.isObject() ? "object" : "none");
    }
@@ -116,7 +119,7 @@ index 470d116520..dd693c73f8 100644
    }
    cx->setPendingException(rexc, rstack);
  }
-@@ -9683,7 +9692,7 @@ error:
+@@ -9683,7 +9695,7 @@ error:
        gPBLUnwindExcStack = rfe.exceptionStack;
        gPBLUnwindHaveExc = true;
      } else {
@@ -125,7 +128,7 @@ index 470d116520..dd693c73f8 100644
      }
  
      switch (rfe.kind) {
-@@ -9769,7 +9778,7 @@ unwind:
+@@ -9769,7 +9781,7 @@ unwind:
    // The target is in this activation: nothing is left to re-raise. A flag
    // left set would make a later cross-activation unwind re-raise this stale,
    // untraced exception value (patch 0017).

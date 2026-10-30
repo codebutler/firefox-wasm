@@ -719,7 +719,8 @@ embedding (see the headroom check below).
   cost a 145 KB recursion per check and never fire). In the JS-only shell
   (no JSPI) it would cover JIT-off recursion too, but it is skipped there as
   well.
-- **Stackless over-recursion error.** The headroom `InternalError` is built by
+- **Stackless over-recursion error (superseded by 0018; now opt-in with
+  `GECKO_WJ_OVERSTACKLESS=1`).** The headroom `InternalError` is built by
   `JSContext::onOverRecursedStackless`: `message` is `"too much recursion"`,
   `instanceof InternalError` holds and the exception status is `OverRecursed`
   as for `ReportOverRecursed` (so wasm `catch` and `Debugger` treat it the
@@ -735,9 +736,8 @@ embedding (see the headroom check below).
   `new Error().stack`, `console.trace`, the embedder's caller lookups, GC
   tracing of JIT activations) may still hit it — likely the same family as the
   GC stale-pointer crashes still seen with the JIT on.
-  `GECKO_WJ_OVERCAPTURE=1` captures a stack anyway (A/B). **Superseded by
-  0018:** the crashing walk was 0017's re-raise, and the report captures a
-  normal stack again (`GECKO_WJ_OVERSTACKLESS=1` keeps this stackless form).
+  `GECKO_WJ_OVERCAPTURE=1` captured a stack anyway (A/B). The crashing walk
+  turned out to be 0017's re-raise; 0018 captures a normal stack again.
 - **Diagnostics.** `GECKO_WJ_FRAMEDBG` walks every JIT activation's frame
   chain with bounds checks before a headroom report and prints the first bad
   link (`[wj-frames]`). It follows `jsExitFP → callerFramePtr`, not
@@ -895,8 +895,10 @@ Follow-ups to 0017 from its review, plus 0015's report:
   `GECKO_WJ_OVERCAPTURE=1`, 12 JIT-on loads had 13 headroom reports and no
   deaths, and the recursion page ended in catchable errors as before. So the
   report is `js::ReportOverRecursed` again: `e.stack`, `fileName` and
-  `lineNumber` are normal. `GECKO_WJ_OVERSTACKLESS=1` keeps the stackless form
-  (and `GECKO_WJ_OVERCAPTURE` is gone).
+  `lineNumber` are normal. `GECKO_WJ_OVERSTACKLESS` set to any value but `0`
+  keeps the stackless form (and `GECKO_WJ_OVERCAPTURE` is gone). On the 0018
+  build, 24 JIT-on YouTube loads made 45 captured reports in 19 of them, none
+  fatal; with the 13 above, 58 captured reports and no crash.
 - `RootMarking.cpp`'s comment no longer says `WJTraceRoots` is registered as an
   extra-roots tracer: both GC paths call it directly.
 - `GECKO_WJ_CALLDBG` reports more on the `apply` fast path (`WJH_APPLYARRAY`).
