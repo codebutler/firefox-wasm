@@ -899,6 +899,13 @@ Follow-ups to 0017 from its review, plus 0015's report:
   (and `GECKO_WJ_OVERCAPTURE` is gone).
 - `RootMarking.cpp`'s comment no longer says `WJTraceRoots` is registered as an
   extra-roots tracer: both GC paths call it directly.
+- `GECKO_WJ_CALLDBG` reports more on the `apply` fast path (`WJH_APPLYARRAY`).
+  When an argument or the array itself is from another compartment than the
+  context, it prints the context's, the array's, the callee's and `this`'s
+  compartments, and each object element's compartment, class and wrapper
+  flag. A JIT-on YouTube run hit a `js::ContextChecks` crash
+  (`unreachable`) there: one element of a packed `ArrayObject` belonged to
+  another compartment, while `this` and the callee did not.
 
 ## Surf integration refresh
 

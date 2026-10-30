@@ -134,3 +134,47 @@ index 470d116520..dd693c73f8 100644
    sp = ctx.stack.unwindingSP;
    ctx.stack.fp = ctx.stack.unwindingFP;
    frame = reinterpret_cast<BaselineFrame*>(
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 857a681fc3..7186b07ade 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -5835,6 +5835,39 @@ static double wjhelpImpl(double kindF, double siteF) {
+       }
+       WJCheckCallValues(cx, uint32_t(siteF) | 0x80000000u, thisv, callee,
+                         JS::HandleValueArray(av));
++      // Which side is foreign: the context, the array, or an element? (patch
++      // 0018, for the cross-compartment apply argument.)
++      auto compOf = [](const JS::Value& v) -> void* {
++        return v.isObject() ? (void*)v.toObject().compartment() : nullptr;
++      };
++      bool foreign = false;
++      for (size_t i = 0; i < av.length(); i++) {
++        if (av[i].isObject() && av[i].toObject().compartment() != cx->compartment())
++          foreign = true;
++      }
++      if (foreign || arrObj->compartment() != cx->compartment()) {
++        static uint64_t n = 0;
++        if (++n <= 20) {
++          fprintf(stderr,
++                  "[wj-calldbg] apply cx.comp=%p cx.realm=%p arr.comp=%p "
++                  "callee.comp=%p this.comp=%p len=%u packed=%d\n",
++                  (void*)cx->compartment(), (void*)cx->realm(),
++                  (void*)arrObj->compartment(), compOf(callee), compOf(thisv),
++                  len, int(arrObj->as<js::NativeObject>().denseElementsArePacked()));
++          for (size_t i = 0; i < av.length() && i < 8; i++) {
++            if (!av[i].isObject()) continue;
++            JSObject& o = av[i].toObject();
++            fprintf(stderr,
++                    "[wj-calldbg]   elem[%zu] comp=%p class=%s wrapper=%d "
++                    "callee.realm=%p\n",
++                    i, (void*)o.compartment(), o.getClass()->name,
++                    int(js::IsWrapper(&o)),
++                    callee.isObject() && callee.toObject().is<JSFunction>()
++                        ? (void*)callee.toObject().as<JSFunction>().realm()
++                        : nullptr);
++          }
++        }
++      }
+     }
+     if (!JS::Call(cx, thisv, callee, JS::HandleValueArray(av), &rv)) return 1.0;
+     gWJScratch[js::wasm::kWJResultSlot] = rv.get().asRawBits();
