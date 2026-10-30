@@ -1,0 +1,21 @@
+patches/0018-pbl-unwind-carry.patch
+  s_aca093c46da282::t_18346c279aa7f1 22,25,45,50-53,57,87,95,122,131
+patches/README.md
+  s_aca093c46da282::t_74a0aaa1569faa 722-723,739-740,898-901
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "babd9f44677169f594dafe603d0b7b8ef2196c81",
+  "prompts": {},
+  "sessions": {
+    "s_aca093c46da282": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6a30f233-98a6-4524-9174-d6e29096e244",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
