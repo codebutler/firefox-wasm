@@ -1,0 +1,21 @@
+patches/0016-wasmjit-worker-routes.patch
+  s_3c144ee810bb6b::t_6d774e6bba0b15 98,127,134,138
+patches/0017-pbl-unwind-reraise.patch
+  s_3c144ee810bb6b::t_622b4e61e25827 1-135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0a5f06434120e2ea1d4c4dd9c623678ea3c14f66",
+  "prompts": {},
+  "sessions": {
+    "s_3c144ee810bb6b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "76d10d03-108e-4277-8d88-04b217f66c70",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
