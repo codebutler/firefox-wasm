@@ -94,44 +94,8 @@ index d50bbc3db8..450828f0c0 100644
            std::partial_sort(v.begin(), v.begin() + std::min<size_t>(v.size(), 6),
                              v.end(),
                              [](auto& a, auto& b) { return a.second > b.second; });
-diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index 511ce6d3b7..d755119460 100644
---- a/js/src/vm/PortableBaselineInterpret.cpp
-+++ b/js/src/vm/PortableBaselineInterpret.cpp
-@@ -52,6 +52,8 @@
- #include "vm/Iteration.h"
- #include "vm/JitActivation.h"
- #include "vm/Activation.h"  // ActivationIterator (patch 0015 GECKO_WJ_FRAMEDBG)
-+#include "gc/GCRuntime.h"   // DIAG GECKO_WJ_OVERGC
-+#include "js/GCAPI.h"       // DIAG GECKO_WJ_OVERGC
- #include "vm/JSObject.h"
- #include "vm/JSScript.h"
- #include "vm/ObjectFuse.h"
-@@ -223,6 +225,22 @@ static void WJReportOverRecursed(JSContext* cx) {
-     // On OOM the pending OOM stays: falling back to ReportOverRecursed would
-     // bring the capture back.
-     cx->onOverRecursedStackless();
-+    // DIAG GECKO_WJ_OVERGC=1|2: a minor (1) or full (2) GC right after the
-+    // report, while the deep JIT<->PBL stack is still live. If a walk of that
-+    // stack is what faults, this makes it happen here, under this log line.
-+    static int overGC = getenv("GECKO_WJ_OVERGC") ? atoi(getenv("GECKO_WJ_OVERGC")) : 0;
-+    if (overGC) {
-+      static uint64_t n = 0;
-+      ++n;
-+      fprintf(stderr, "[wj-overgc] #%llu %s begin\n", (unsigned long long)n,
-+              overGC == 2 ? "full" : "minor");
-+      if (overGC == 2) {
-+        JS_GC(cx, JS::GCReason::API);
-+      } else {
-+        cx->runtime()->gc.evictNursery(JS::GCReason::API);
-+      }
-+      fprintf(stderr, "[wj-overgc] #%llu end\n", (unsigned long long)n);
-+    }
-     return;
-   }
-   js::ReportOverRecursed(cx);
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index bdd8663922..857a681fc3 100644
+index bdd8663922..6455414b0f 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -888,6 +888,14 @@ static bool WJThreadAllowed() {
@@ -160,20 +124,18 @@ index bdd8663922..857a681fc3 100644
  
  // __wjStats() backend: aggregate the ALWAYS-ON JIT counters into a JSON string
  // (no env flags, queryable mid-run -- the printf-free introspection of task #57).
-@@ -1056,6 +1066,12 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
+@@ -1056,6 +1066,10 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
  }
  
  void js::wasm::WasmJitInvalidateAll(const char* reason) {
 +  // A worker realm's fuse never guards code the JIT compiled (the JIT runs on
 +  // the main runtime only), and the tables below belong to the main thread:
 +  // clearing them from a worker raced the main thread's use (patch 0016).
-+  // GECKO_WJ_WORKERFUSE=1 lets worker fuse pops invalidate again (A/B).
-+  static int sWorkerFuse = getenv("GECKO_WJ_WORKERFUSE") ? 1 : 0;
-+  if (!sWorkerFuse && WJOnWorkerRuntime()) return;
++  if (WJOnWorkerRuntime()) return;
    uint32_t n = 0;
    if (gEntries) {
      for (auto& kv : *gEntries) {
-@@ -7385,6 +7401,10 @@ int32_t gWJSuspendWatermark = INT32_MAX;
+@@ -7385,6 +7399,10 @@ int32_t gWJSuspendWatermark = INT32_MAX;
  }  // namespace js
  
  extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
