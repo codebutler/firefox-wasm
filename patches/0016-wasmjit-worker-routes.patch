@@ -95,7 +95,7 @@ index d50bbc3db8..450828f0c0 100644
                              v.end(),
                              [](auto& a, auto& b) { return a.second > b.second; });
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index bdd8663922..6455414b0f 100644
+index bdd8663922..857a681fc3 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -888,6 +888,14 @@ static bool WJThreadAllowed() {
@@ -124,18 +124,20 @@ index bdd8663922..6455414b0f 100644
  
  // __wjStats() backend: aggregate the ALWAYS-ON JIT counters into a JSON string
  // (no env flags, queryable mid-run -- the printf-free introspection of task #57).
-@@ -1056,6 +1066,10 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
+@@ -1056,6 +1066,12 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
  }
  
  void js::wasm::WasmJitInvalidateAll(const char* reason) {
 +  // A worker realm's fuse never guards code the JIT compiled (the JIT runs on
 +  // the main runtime only), and the tables below belong to the main thread:
 +  // clearing them from a worker raced the main thread's use (patch 0016).
-+  if (WJOnWorkerRuntime()) return;
++  // GECKO_WJ_WORKERFUSE=1 lets worker fuse pops invalidate again (A/B).
++  static int sWorkerFuse = getenv("GECKO_WJ_WORKERFUSE") ? 1 : 0;
++  if (!sWorkerFuse && WJOnWorkerRuntime()) return;
    uint32_t n = 0;
    if (gEntries) {
      for (auto& kv : *gEntries) {
-@@ -7385,6 +7399,10 @@ int32_t gWJSuspendWatermark = INT32_MAX;
+@@ -7385,6 +7401,10 @@ int32_t gWJSuspendWatermark = INT32_MAX;
  }  // namespace js
  
  extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {

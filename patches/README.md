@@ -798,6 +798,10 @@ DOM worker's thread:
 - **Fuse pops.** `WasmJitInvalidateAll` ran on every realm's fuse pop and
   cleared `gEntries`, `gFamilies` and the call tables from the worker thread.
   A worker's fuse never guards JIT code, so it now returns on worker runtimes.
+  `GECKO_WJ_WORKERFUSE=1` lets worker fuse pops invalidate again (A/B). The
+  main thread's compiled code now survives a page load, so a deep JIT↔PBL
+  recursion carries more JIT frames; that made the 0017 crash below about
+  three times as frequent until 0017 fixed it.
 - **Calibration.** Every pthread realm's first wasm instantiation called
   `wj_set_depth_limit`; the last thread to calibrate set the JIT's limit. Worker
   runtimes' calls are ignored.
@@ -811,6 +815,56 @@ DOM worker's thread:
 off the JIT's thread. A thread with no `JSContext` is treated as the main
 runtime's for the fuse and calibration routes, so nothing the main runtime
 used to do is skipped.
+
+## 0017-pbl-unwind-reraise.patch
+
+With the JIT on, YouTube still lost the app thread in some trials to a
+`memory access out of bounds`, a few log lines after the 0015 headroom
+reports. A `wasm-opt -g` build named the stack:
+
+```text
+js::jit::JSJitFrameIter::operator++
+  ← js::FrameIter::settleOnActivation ← js::FrameIter::FrameIter
+  ← js::SavedStacks::saveCurrentStack ← JS::CaptureCurrentStack
+  ← js::CaptureStack ← JSContext::setPendingException(v, ShouldCaptureStack)
+  ← PortableBaselineInterpret (cross-activation unwind re-raise)
+```
+
+When `HandleException` finds a catch or finally in an outer PBL activation, the
+inner activation returns `Unwind`/`UnwindError` and first re-raises the
+in-flight exception so every boundary sees one pending (`gPBLUnwindExc`). That
+re-raise had three faults:
+
+- It called `setPendingException(v, ShouldCaptureStack::Maybe)`, which captures
+  a stack for the realm's first 50 throws. By then the exit frame
+  `HandleException` ran under had been popped, so the walk started from a stale
+  exit FP in unwound PBL stack, and under a deep recursion it read past linear
+  memory.
+- For a `Catch`, `HandleException` leaves the exception pending and fills
+  `rfe.exception` only for a `Finally`. So the re-raise replaced the real
+  exception with `undefined` in every cross-activation catch: all 320 re-raises
+  logged in one session were `pending=1 saved=undefined`.
+- When the catch resumed inside the same activation, `gPBLUnwindHaveExc` stayed
+  set over an untraced exception `Value`, which a later cross-activation unwind
+  could re-raise after a GC had moved or freed it.
+
+`PBLReraiseUnwindException` now keeps a pending exception as it is, and
+otherwise re-raises the saved value with the stack saved when it was thrown.
+It never captures. The flag is cleared when the target is in this activation.
+`GECKO_PBL_OLDREUNWIND=1` restores the old re-raise (A/B), and
+`GECKO_PBL_REUNWINDDBG=1` logs each re-raise (`[pbl-reunwind]`).
+
+On the named diagnostic build, with JIT-on YouTube watch→home:
+
+| Arm | Trials | App-thread deaths |
+|---|---|---|
+| 0017 | 12 | 0 (headroom reports in 10) |
+| `GECKO_PBL_OLDREUNWIND=1` | 8 | 2, both the stack above ending in the re-raise |
+| JIT off | 5 | 0 |
+
+The stack-capture crash that 0015 attributed to its over-recursion report has
+the same chain. It was likely this re-raise. 0015's stackless report stays,
+because an over-recursion error should not walk a deep stack in any case.
 
 ## Surf integration refresh
 

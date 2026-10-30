@@ -1,0 +1,95 @@
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 511ce6d3b7..470d116520 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -52,6 +52,7 @@
+ #include "vm/Iteration.h"
+ #include "vm/JitActivation.h"
+ #include "vm/Activation.h"  // ActivationIterator (patch 0015 GECKO_WJ_FRAMEDBG)
++#include "vm/SavedFrame.h"  // PBLReraiseUnwindException (patch 0017)
+ #include "vm/JSObject.h"
+ #include "vm/JSScript.h"
+ #include "vm/ObjectFuse.h"
+@@ -317,6 +318,48 @@ static JS::Value gPBLUnwindExc;
+ static JS::Value gPBLUnwindExcStack;
+ static bool gPBLUnwindHaveExc = false;
+ 
++// Re-raise the in-flight exception when a catch/finally target lies beyond
++// this activation (patch 0017). The exit frame HandleException ran under has
++// been popped by now, so the activation's exit FP points into unwound PBL
++// stack: nothing here may walk the stack. A Catch leaves the exception
++// pending (HandleException only fills rfe.exception for a Finally), so a
++// pending exception is kept as it is; otherwise the saved value is re-raised
++// with the stack captured when it was thrown. Capturing a new one here walked
++// the stale chain (an out-of-bounds read in JSJitFrameIter::operator++ under a
++// deep JIT<->PBL recursion) and, for a Catch, replaced the real exception with
++// the empty rfe.exception (undefined). GECKO_PBL_OLDREUNWIND=1 restores the
++// old re-raise (A/B).
++static void PBLReraiseUnwindException(JSContext* cx) {
++  if (!gPBLUnwindHaveExc) return;
++  gPBLUnwindHaveExc = false;
++  // GECKO_PBL_REUNWINDDBG: log each cross-activation re-raise.
++  static int sDbg = getenv("GECKO_PBL_REUNWINDDBG") ? 1 : 0;
++  if (sDbg) {
++    static uint64_t n = 0;
++    if (++n <= 40 || (n % 1000) == 0)
++      fprintf(stderr,
++              "[pbl-reunwind] #%llu pending=%d saved=%s stack=%s\n",
++              (unsigned long long)n, int(cx->isExceptionPending()),
++              gPBLUnwindExc.isUndefined() ? "undefined"
++              : gPBLUnwindExc.isObject() ? "object" : "other",
++              gPBLUnwindExcStack.isObject() ? "object" : "none");
++  }
++  static int sOld = getenv("GECKO_PBL_OLDREUNWIND") ? 1 : 0;
++  if (sOld) {
++    JS::RootedValue rexc(cx, gPBLUnwindExc);
++    cx->setPendingException(rexc, js::ShouldCaptureStack::Maybe);
++    return;
++  }
++  if (cx->isExceptionPending()) return;
++  JS::RootedValue rexc(cx, gPBLUnwindExc);
++  JS::Rooted<js::SavedFrame*> rstack(cx);
++  if (gPBLUnwindExcStack.isObject() &&
++      gPBLUnwindExcStack.toObject().is<js::SavedFrame>()) {
++    rstack = &gPBLUnwindExcStack.toObject().as<js::SavedFrame>();
++  }
++  cx->setPendingException(rexc, rstack);
++}
++
+ // Whether to compile interpreter dispatch loops using computed gotos
+ // or direct switches.
+ #if !defined(__wasi__) && !defined(TRACE_INTERP)
+@@ -9720,14 +9763,13 @@ unwind:
+     TRACE_PRINTF(" -> returning\n");
+     // Cross-activation: re-raise so callers across the wasm boundary see a
+     // real pending exception (see gPBLUnwindHaveExc).
+-    if (gPBLUnwindHaveExc) {
+-      JSContext* rcx = ctx.frameMgr.cxForLocalUseOnly();
+-      JS::RootedValue rexc(rcx, gPBLUnwindExc);
+-      rcx->setPendingException(rexc, js::ShouldCaptureStack::Maybe);
+-      gPBLUnwindHaveExc = false;
+-    }
++    PBLReraiseUnwindException(ctx.frameMgr.cxForLocalUseOnly());
+     return PBIResult::Unwind;
+   }
++  // The target is in this activation: nothing is left to re-raise. A flag
++  // left set would make a later cross-activation unwind re-raise this stale,
++  // untraced exception value (patch 0017).
++  gPBLUnwindHaveExc = false;
+   sp = ctx.stack.unwindingSP;
+   ctx.stack.fp = ctx.stack.unwindingFP;
+   frame = reinterpret_cast<BaselineFrame*>(
+@@ -9742,12 +9784,7 @@ unwind_error:
+                entryFrame);
+   if (reinterpret_cast<uintptr_t>(ctx.stack.unwindingFP) >
+       reinterpret_cast<uintptr_t>(entryFrame) + BaselineFrame::Size()) {
+-    if (gPBLUnwindHaveExc) {
+-      JSContext* rcx = ctx.frameMgr.cxForLocalUseOnly();
+-      JS::RootedValue rexc(rcx, gPBLUnwindExc);
+-      rcx->setPendingException(rexc, js::ShouldCaptureStack::Maybe);
+-      gPBLUnwindHaveExc = false;
+-    }
++    PBLReraiseUnwindException(ctx.frameMgr.cxForLocalUseOnly());
+     return PBIResult::UnwindError;
+   }
+   if (reinterpret_cast<uintptr_t>(ctx.stack.unwindingFP) ==
