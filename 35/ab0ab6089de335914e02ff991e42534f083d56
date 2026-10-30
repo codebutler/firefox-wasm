@@ -1,0 +1,23 @@
+bench/microbenches/host-reentry.js
+  s_3c144ee810bb6b::t_6f2cab83e4ab5b 8-11
+patches/0016-wasmjit-worker-routes.patch
+  s_3c144ee810bb6b::t_6ea775d13d71da 1-148
+patches/README.md
+  s_3c144ee810bb6b::t_9dde516d4d144a 761-763,783-814
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "35ab0ab6089de335914e02ff991e42534f083d56",
+  "prompts": {},
+  "sessions": {
+    "s_3c144ee810bb6b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "76d10d03-108e-4277-8d88-04b217f66c70",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
