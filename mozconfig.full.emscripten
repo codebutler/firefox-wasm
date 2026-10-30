@@ -18,6 +18,8 @@ ac_add_options --target=wasm32-unknown-emscripten
 # SharedArrayBuffer+Atomics feature, NOT the C++ thread memory; enabling it broke
 # the ArrayBuffer-union WebIDL codegen, and content SAB isn't needed to render).
 ac_add_options --disable-jit
+# DIAG (revert before PR): GC zeal for JS_GC_ZEAL=5 (post-barrier verifier).
+ac_add_options --enable-gczeal
 # Portable Baseline Interpreter: runs CacheIR inline caches in portable C++ with
 # NO codegen, so it works on this JIT-less wasm target and is far faster than the
 # plain bytecode interpreter (SpiderMonkey's slowest tier, our only option once

@@ -430,11 +430,16 @@ int main(int argc, char** argv) {
   }
 #ifdef JS_GC_ZEAL
   if (const char* z = getenv("GECKO_GCZEAL")) {
-    int mode = atoi(z);
+    // "M[;M...][,freq]": each mode is set (zeal modes OR together).
     int freq = 1;
     if (const char* comma = strchr(z, ',')) freq = atoi(comma + 1);
-    JS::SetGCZeal(cx, uint8_t(mode), uint32_t(freq < 1 ? 1 : freq));
-    fprintf(stderr, "[embed] GC zeal mode=%d freq=%d\n", mode, freq);
+    for (const char* p = z; p && *p && *p != ','; ) {
+      int mode = atoi(p);
+      JS::SetGCZeal(cx, uint8_t(mode), uint32_t(freq < 1 ? 1 : freq));
+      fprintf(stderr, "[embed] GC zeal mode=%d freq=%d\n", mode, freq);
+      const char* semi = strchr(p, ';');
+      p = semi ? semi + 1 : nullptr;
+    }
   }
 #endif
 
