@@ -44,7 +44,12 @@ mergeInto(LibraryManager.library, {
         var bytes = new Uint8Array(bin.length);
         for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));
-      } catch (e) {}
+      } catch (e) {
+        // Fail open (every check then "fits"), but visibly.
+        console.warn('[wasm-host] stack headroom probe unavailable; ' +
+          'over-recursion falls back to the host stack limit:',
+          e && e.message ? e.message : e);
+      }
       globalThis.__wjHeadroomProbe = inst;
     }
     if (!inst) return 1;
