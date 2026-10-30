@@ -1,5 +1,5 @@
 diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index 13e7823d35..523dd59ff2 100644
+index 13e7823d35..6054432507 100644
 --- a/js/src/vm/PortableBaselineInterpret.cpp
 +++ b/js/src/vm/PortableBaselineInterpret.cpp
 @@ -51,6 +51,9 @@
@@ -12,7 +12,7 @@ index 13e7823d35..523dd59ff2 100644
  #include "vm/JSObject.h"
  #include "vm/JSScript.h"
  #include "vm/ObjectFuse.h"
-@@ -93,8 +96,126 @@ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
+@@ -93,8 +96,130 @@ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
  extern uint64_t gWJCallCallee;
  extern uint32_t gWJExitFPLastSite;  // task #60 exitFP setter tracer
  extern uint32_t gWJExitFPSetCount;
@@ -107,11 +107,15 @@ index 13e7823d35..523dd59ff2 100644
 +          bad, (void*)lo, (void*)hi, cx->portableBaselineStack().top);
 +}
 +
-+// GECKO_WJ_STACKLESSOVER=1: report the host-stack over-recursion as an
-+// InternalError with no captured stack (A/B for the stack-capture crash).
++// The host-stack over-recursion is reported as an InternalError with no
++// captured stack. Capturing one walks every frame of a deep JIT<->PBL
++// recursion; in Surf that walk read past linear memory in 5 of 10 JIT-on
++// YouTube loads, while the same reports without a stack never crashed (0 of
++// 7). The deep stack is also exactly what an over-recursion error cannot
++// afford to walk. GECKO_WJ_OVERCAPTURE=1 captures one anyway (A/B).
 +static void WJReportOverRecursed(JSContext* cx) {
 +  static int framedbg = getenv("GECKO_WJ_FRAMEDBG") ? 1 : 0;
-+  static int stackless = getenv("GECKO_WJ_STACKLESSOVER") ? 1 : 0;
++  static int stackless = getenv("GECKO_WJ_OVERCAPTURE") ? 0 : 1;
 +  if (framedbg) {
 +    static uint64_t n = 0;
 +    if (++n <= 6) WJDumpFrameChain(cx);
@@ -139,7 +143,7 @@ index 13e7823d35..523dd59ff2 100644
  #endif
  
  namespace js {
-@@ -6209,6 +6330,10 @@ PBIResult PortableBaselineInterpret(
+@@ -6209,6 +6334,10 @@ PBIResult PortableBaselineInterpret(
      entryPC = Specialized ? pc : frame->script()->code();
    }
  
@@ -150,7 +154,7 @@ index 13e7823d35..523dd59ff2 100644
    bool from_unwind = false;
  
    PBIResult ic_result = PBIResult::Ok;
-@@ -6239,6 +6364,17 @@ PBIResult PortableBaselineInterpret(
+@@ -6239,6 +6368,17 @@ PBIResult PortableBaselineInterpret(
        ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
        return PBIResult::Error;
      }
@@ -192,7 +196,7 @@ index cc503a794c..6a69f58ff7 100644
  // Scratch-buffer layout (shared with WasmJitRuntime.cpp's gWJScratch + the host
  // call marshalling). Sized for nargs<=64 with slack.
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index b8f5e013c0..81b073238b 100644
+index b8f5e013c0..106a71ad20 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -1799,9 +1799,40 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
@@ -318,7 +322,34 @@ index b8f5e013c0..81b073238b 100644
      if (!JS::Call(cx, thisv, callee, argv, &rval)) {
        return 1.0;  // callee threw -> propagate
      }
-@@ -7266,6 +7349,105 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
+@@ -5702,6 +5785,15 @@ static double wjhelpImpl(double kindF, double siteF) {
+       for (uint32_t i = 0; i < len; i++) av.infallibleAppend(arr.getDenseElement(i));
+     }
+     JS::RootedValue rv(cx);
++    static int applyValDbg = getenv("GECKO_WJ_CALLDBG") ? 1 : 0;
++    if (applyValDbg) {
++      if (!arrObj->is<js::ArrayObject>()) {
++        fprintf(stderr, "[wj-calldbg] applyarray args object class=%s\n",
++                arrObj->getClass()->name);
++      }
++      WJCheckCallValues(cx, uint32_t(siteF) | 0x80000000u, thisv, callee,
++                        JS::HandleValueArray(av));
++    }
+     if (!JS::Call(cx, thisv, callee, JS::HandleValueArray(av), &rv)) return 1.0;
+     gWJScratch[js::wasm::kWJResultSlot] = rv.get().asRawBits();
+     return 0.0;
+@@ -6757,6 +6849,10 @@ static double wjhelpImpl(double kindF, double siteF) {
+             for (uint32_t i = 0; i < argc; i++) {
+               iargv.infallibleAppend(JS::Value::fromRawBits(gWJScratch[i]));
+             }
++            static int initValDbg = getenv("GECKO_WJ_CALLDBG") ? 1 : 0;
++            if (initValDbg)
++              WJCheckCallValues(cx, 0x40000000u, thisv, initv,
++                                JS::HandleValueArray(iargv));
+             if (!JS::Call(cx, thisv, initv, JS::HandleValueArray(iargv),
+                           &ignored)) {
+               return 1.0;
+@@ -7266,6 +7362,105 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
    if (v > 0) js::wasm::gWJJitDepthLimit = v;
  }
  

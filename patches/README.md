@@ -702,12 +702,24 @@ the thread at 469 levels.
   no fixed charge both stops before the limit and lets recursion that fits
   finish. It applies with the JIT off and on every thread.
   `GECKO_PBL_HEADROOM=0` disables it; `GECKO_PBL_HEADROOMFRAMES=<n>` sizes it.
+  The `InternalError` carries no captured stack. Capturing one walks every frame
+  of the deep JIT↔PBL recursion; in Surf that walk read past linear memory in
+  5 of 10 JIT-on YouTube loads, while the same reports without a stack never
+  crashed (0 of 7). `GECKO_WJ_OVERCAPTURE=1` captures one anyway.
+- **Diagnostics.** `GECKO_WJ_FRAMEDBG` walks every JIT activation's frame
+  chain with bounds checks before a headroom report and prints the first bad
+  link (`[wj-frames]`). `GECKO_WJ_CALLDBG` names any value from another
+  compartment or zone before `wjhelp` calls `JS::Call` (the generic call, the
+  `apply` fast path, class field initializers) and flags an `apply` arguments
+  object that is not an `ArrayObject` (`[wj-calldbg]`): a mismatched value there
+  is a `js::ContextChecks` crash (`unreachable`).
 - **Watermark reset.** PBL activations keep the charged depth above 0, so
   `RunCall` now clears a stale watermark whenever it runs below it (nothing
   below the watermark is inside a delegated subtree), not only at depth 0.
 
-`GECKO_WJ_HOSTCHARGE=0` turns the charges off (A/B opt-out for the JIT
-overflow). They are off with `GECKO_NOWASMJIT` and on worker runtimes
+`GECKO_WJ_HOSTCHARGE=0` turns the charges off and restores `WasmJitRunCall`'s
+original watermark rule exactly (A/B opt-out for the JIT overflow; add
+`GECKO_PBL_HEADROOM=0` for the whole patch off). They are off with `GECKO_NOWASMJIT` and on worker runtimes
 (`parentRuntime` set): the JIT's depth globals belong to the main runtime's
 thread. `GECKO_WJ_SUSDBG` adds `[wj-hostsus]` (edge refusals) and
 `[wj-hostcap]` (headroom refusals).
