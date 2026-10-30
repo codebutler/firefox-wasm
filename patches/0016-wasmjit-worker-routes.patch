@@ -1,0 +1,150 @@
+diff --git a/js/src/gc/RootMarking.cpp b/js/src/gc/RootMarking.cpp
+index 034685eb7c..eda6c580ae 100644
+--- a/js/src/gc/RootMarking.cpp
++++ b/js/src/gc/RootMarking.cpp
+@@ -39,6 +39,15 @@ using RootEntry = RootedValueMap::Entry;
+ // objects held in a Mode VS frame across a safepoint are forwarded (otherwise
+ // they go stale on tenuring -> heap corruption).
+ extern "C" void WJTraceRoots(JSTracer* trc, void* data);
++// The wasm JIT runs on the main runtime only (patch 0015), so its roots are
++// the main runtime's cells. A worker runtime's GC must not trace them: its
++// major GC would mark (and traverse) main-runtime cells from the worker thread,
++// racing the main thread's marker and mutator (patch 0016).
++// GECKO_WJ_WORKERTRACE=1 traces them from every runtime again (A/B).
++static bool WJTraceRootsFor(JSRuntime* rt) {
++  static int sAll = getenv("GECKO_WJ_WORKERTRACE") ? 1 : 0;
++  return sAll || !rt->parentRuntime;
++}
+ #endif
+ 
+ template <typename Base, typename T>
+@@ -259,7 +268,9 @@ void js::gc::GCRuntime::traceRuntimeForMajorGC(JSTracer* trc,
+   // left gWJPropShape pointing at moved/dead shapes -> a new shape at the old
+   // address falsely matched the IC -> wrong slot loaded (raytrace "Scene rendered
+   // incorrectly" after enough allocation triggered a compacting GC).
+-  WJTraceRoots(trc, nullptr);
++  if (WJTraceRootsFor(rt)) {
++    WJTraceRoots(trc, nullptr);
++  }
+ #endif
+ }
+ 
+@@ -279,7 +290,9 @@ void js::gc::GCRuntime::traceRuntimeForMinorGC(JSTracer* trc,
+   traceRuntimeCommon(trc, TraceRuntime);
+ 
+ #ifdef __EMSCRIPTEN__
+-  WJTraceRoots(trc, nullptr);
++  if (WJTraceRootsFor(rt)) {
++    WJTraceRoots(trc, nullptr);
++  }
+ #endif
+ }
+ 
+diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
+index d50bbc3db8..450828f0c0 100644
+--- a/js/src/vm/Interpreter.cpp
++++ b/js/src/vm/Interpreter.cpp
+@@ -410,6 +410,7 @@ namespace js {
+ namespace wasm {
+ extern bool WasmJitObserveCall(JSScript* script);
+ extern int WasmJitFamilyObserve(JSScript* script);
++extern bool WasmJitActiveOnThread();
+ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
+                           const JS::Value* argv, uint32_t argc,
+                           JSObject* envChain, uint64_t* retBits);
+@@ -477,8 +478,11 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+   // reaches the interpreter/PBL call-site observe hooks, so it would run in
+   // PBL forever. Observe it here and, once lowered, run the wasm entry
+   // directly -- the same dispatch the PBL IC scripted-call path uses.
++  // Only where the JIT runs (patch 0016): the counters and the per-function
++  // table below are unsynchronized statics, and DOM workers -- with the JIT
++  // off too -- mutated them concurrently.
+   static int sNoNativeObs = getenv("GECKO_WJ_NONATIVEOBS") ? 1 : 0;
+-  if (!sNoNativeObs && state.isInvoke() &&
++  if (!sNoNativeObs && js::wasm::WasmJitActiveOnThread() && state.isInvoke() &&
+       !state.asInvoke()->constructing() &&
+       !cx->realm()->debuggerObservesNativeCall()) {
+     const CallArgs& cargs = state.asInvoke()->args();
+@@ -487,6 +491,9 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+       JSFunction* wjFun = &calleeObj.as<JSFunction>();
+       if (wjFun->isInterpreted() && !wjFun->isClassConstructor()) {
+         static int noDbg = getenv("GECKO_WJ_NOBSDBG") ? 0 : 1;
++        // The per-function table grows with every distinct script and keeps
++        // dangling keys; it is opt-in (GECKO_WJ_NOBSFN=1) (patch 0016).
++        static int perFnOn = (noDbg && getenv("GECKO_WJ_NOBSFN")) ? 1 : 0;
+         static uint64_t calls = 0, routed = 0;
+         static std::unordered_map<JSScript*, std::pair<uint64_t, std::string>> perFn;
+         // Cold clones (new-Function siblings) reach here before any per-script
+@@ -495,7 +502,7 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+         js::wasm::WasmJitFamilyObserve(state.script());
+         bool obs = js::wasm::WasmJitObserveCall(state.script());
+         if (obs) routed++;
+-        {
++        if (perFnOn) {
+           auto& slot = perFn[state.script()];
+           slot.first++;
+           if (noDbg && slot.second.empty()) {
+@@ -522,7 +529,8 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+           fprintf(stderr, "[wj-nobs] calls=%llu routed=%llu\n",
+                   (unsigned long long)calls, (unsigned long long)routed);
+           std::vector<std::pair<JSScript*, uint64_t>> v;
+-          for (auto& kv : perFn) v.push_back({kv.first, kv.second.first});
++          if (perFnOn)
++            for (auto& kv : perFn) v.push_back({kv.first, kv.second.first});
+           std::partial_sort(v.begin(), v.begin() + std::min<size_t>(v.size(), 6),
+                             v.end(),
+                             [](auto& a, auto& b) { return a.second > b.second; });
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index bdd8663922..857a681fc3 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -888,6 +888,14 @@ static bool WJThreadAllowed() {
+   return sAllowed;
+ }
+ 
++// True on a worker runtime's thread (patch 0016). Unlike !WJThreadAllowed(),
++// a thread with no JSContext is not a worker: state the main runtime owns is
++// left to the paths that already ran there.
++static bool WJOnWorkerRuntime() {
++  JSContext* cx = js::TlsContext.get();
++  return cx && cx->runtime()->parentRuntime;
++}
++
+ bool js::wasm::WasmJitActiveOnThread() {
+   static int sEnabled = -1;
+   if (sEnabled < 0) sEnabled = getenv("GECKO_NOWASMJIT") ? 0 : 1;
+@@ -950,7 +958,9 @@ int js::wasm::WasmJitFamilyObserve(JSScript* script) {
+   return 0;
+ }
+ 
+-bool js::wasm::WasmJitInWasm() { return js::wasm::gWJExecDepth > 0; }
++bool js::wasm::WasmJitInWasm() {
++  return js::wasm::gWJExecDepth > 0 && WJThreadAllowed();
++}
+ 
+ // __wjStats() backend: aggregate the ALWAYS-ON JIT counters into a JSON string
+ // (no env flags, queryable mid-run -- the printf-free introspection of task #57).
+@@ -1056,6 +1066,12 @@ void js::wasm::WJStatsJSON(char* buf, size_t n) {
+ }
+ 
+ void js::wasm::WasmJitInvalidateAll(const char* reason) {
++  // A worker realm's fuse never guards code the JIT compiled (the JIT runs on
++  // the main runtime only), and the tables below belong to the main thread:
++  // clearing them from a worker raced the main thread's use (patch 0016).
++  // GECKO_WJ_WORKERFUSE=1 lets worker fuse pops invalidate again (A/B).
++  static int sWorkerFuse = getenv("GECKO_WJ_WORKERFUSE") ? 1 : 0;
++  if (!sWorkerFuse && WJOnWorkerRuntime()) return;
+   uint32_t n = 0;
+   if (gEntries) {
+     for (auto& kv : *gEntries) {
+@@ -7385,6 +7401,10 @@ int32_t gWJSuspendWatermark = INT32_MAX;
+ }  // namespace js
+ 
+ extern "C" EMSCRIPTEN_KEEPALIVE void wj_set_depth_limit(int32_t v) {
++  // Each pthread realm calibrates on its first wasm instantiation, but the
++  // limit is the JIT's, so only the main runtime's thread sets it; a worker's
++  // calibration used to overwrite it (last writer won) (patch 0016).
++  if (WJOnWorkerRuntime()) return;
+   if (v > 0) js::wasm::gWJJitDepthLimit = v;
+ }
+ 
