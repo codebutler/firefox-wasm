@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 13 patches apply in order and reverse back to the pristine selected source
+All 15 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -649,6 +649,134 @@ content JS gets only ~452KB of the 64MB linear-memory stack -- measured
 Expected effect: untrusted recursion budget ~452KB -> ~31MB (~60x), i.e.
 ~620k host-boundary levels. Still catchable: quota < real stack, so
 over-quota throws `InternalError` before a real wasm stack overflow.
+
+## 0015-wasmjit-host-stack-charge.patch
+
+With the wasm JIT on, YouTube killed the app pthread in every trial: an
+uncatchable V8 `RangeError: Maximum call stack size exceeded` a few seconds
+after the home page loaded. The overflowing stack (named on a `wasm-opt -g`
+build) is BotGuard's nested-eval VM recursing through JIT and PBL in turn:
+
+```text
+JIT fn → hostImports/_wjhelp (JS) → wjhelp → wjhelpImpl
+  → PortableBaselineInterpret → ICInterpretOps → ICCallFallback
+  → InternalCallOrConstruct → RunScript → Interpret → MaybeEnterJit
+  → PortableBaselineInterpret → … → WasmJitRunCall → JIT fn → …
+```
+
+The 0005/0007 depth guard charges only emitted JIT frames. Everything else in
+that cycle stays on the host (V8) stack and never moves the linear-memory
+stack that SpiderMonkey's recursion quota watches (0010 widened that quota to
+~31 MB, so it cannot fire first). In four identical 1357-frame overflows there
+were 214 JIT frames, 67 PBL→JIT crossings and 129 PBL activations, and the
+guard had charged 151584 of its 298080 limit: the host stack ran out at about
+half the budget, before the suspend latch could fire. PBL alone overflows too:
+with the JIT off, a page recursing through `Function.prototype.apply` killed
+the thread at 469 levels. This patch does not fix that JIT-off case in a JSPI
+embedding (see the headroom check below).
+
+- **PBL→JIT edge charge.** `WasmJitRunCall` adds a fixed cost to
+  `gWJJitDepth` for the duration of the JIT call (default 12288,
+  `GECKO_WJ_HOSTCHARGE`). Past the limit it refuses and latches the suspend
+  watermark, so the callee's subtree runs on PBL's heap stack exactly as if
+  the callee's prologue guard had refused; a callee's own flag-3 refusal
+  re-latches at the caller's depth. A crossing costs about four times a PBL
+  level on the host stack, so the large charge latches a mixed recursion at
+  roughly a fifth of the stack and leaves the PBL tail the rest — BotGuard's
+  recursion then completes, as it does with the JIT off.
+- **PBL activation charge.** Every `PortableBaselineInterpret` activation on
+  the JIT's runtime charges `GECKO_WJ_PBLCHARGE` (default 1792) for its
+  lifetime, so the JIT does not start a deep recursion on top of a deep PBL
+  one.
+- **The charges are tuning, not safety.** 12288 and 1792 come from one machine
+  and one Chromium build (114 vs 469 apply levels at limit 298080). They are in
+  the limit's byte-like units, so they do not scale with the calibrated limit.
+  They decide only when the JIT latches: a wrong value costs speed, not a
+  crash. The headroom check is the safety net; do not retune the charges
+  expecting them to prevent an overflow.
+- **Host-stack headroom check.** A PBL activation nested more than 24 deep on
+  the JIT's thread, and at least 8 levels deeper than the last probe that
+  passed, asks the host whether 256 more frames of a probe module fit
+  (`wasmhost_stack_headroom`, in both `wasm-host-bridge.js` files). Each probe
+  frame keeps 64 `f64`s loaded from memory that deeper frames overwrite live
+  across its call, so it costs ~580 B under Liftoff and TurboFan alike (~145 KB
+  in all). A first probe whose values could be recomputed after the call shrank
+  more than 2× once TurboFan compiled it, and the JIT-off path still overflowed
+  between checks in Surf. If the probe does not fit, the activation
+  reports a catchable `InternalError: too much recursion` instead of letting
+  V8's stack overflow. Only probe frames unwind on the probe's `RangeError`,
+  inside the host's try/catch. This measures instead of estimating: a PBL
+  level's real cost varies several-fold with V8's tier for the interpreter, so
+  no fixed charge both stops before the limit and lets recursion that fits
+  finish. One passing probe vouches for ~145 KB, about 30 JIT↔PBL crossings at
+  the measured ~4.4 KB each, hence the 8-level step.
+  `GECKO_PBL_HEADROOM=0` disables it; `GECKO_PBL_HEADROOMFRAMES=<n>` sizes it.
+- **JIT-off / JSPI gap.** The probe is a JS import, so it measures the host's
+  central stack, which a JIT↔PBL recursion fills through the JS shims. In an
+  embedding that runs threads under JSPI, a JIT-off recursion stays in wasm on
+  the secondary stack, which this JS-hosted probe cannot measure; that case can
+  still overflow. The probe therefore runs only where the JIT does (it would
+  cost a 145 KB recursion per check and never fire). In the JS-only shell
+  (no JSPI) it would cover JIT-off recursion too, but it is skipped there as
+  well.
+- **Stackless over-recursion error.** The headroom `InternalError` is built by
+  `JSContext::onOverRecursedStackless`: `message` is `"too much recursion"`,
+  `instanceof InternalError` holds and the exception status is `OverRecursed`
+  as for `ReportOverRecursed` (so wasm `catch` and `Debugger` treat it the
+  same), but it carries no captured stack: `e.stack === ""` (a string, so
+  `e.stack.split()` is safe, but `if (e.stack)` takes the other branch),
+  `fileName` is `""`, `lineNumber` 0, `columnNumber` 1. If building it fails,
+  the OOM stays pending. The capture walks at most `MAX_REPORTED_STACK_DEPTH`
+  (128) frames, yet at this point in Surf it read past linear memory in 5 of
+  10 JIT-on YouTube loads, while reports without it never crashed (0 of 7,
+  then 0 of 12): a frame link near the top of a deep JIT↔PBL stack is
+  sometimes unwalkable. Dropping this capture avoids one walker of that
+  chain; the root cause is open. Other full walks at that depth (page
+  `new Error().stack`, `console.trace`, the embedder's caller lookups, GC
+  tracing of JIT activations) may still hit it — likely the same family as the
+  GC stale-pointer crashes still seen with the JIT on.
+  `GECKO_WJ_OVERCAPTURE=1` captures a stack anyway (A/B).
+- **Diagnostics.** `GECKO_WJ_FRAMEDBG` walks every JIT activation's frame
+  chain with bounds checks before a headroom report and prints the first bad
+  link (`[wj-frames]`). It follows `jsExitFP → callerFramePtr`, not
+  `JSJitFrameIter`'s stepping, so finding no bad link does not prove the chain
+  a capture reads is intact. `GECKO_WJ_CALLDBG` names any value from another
+  compartment or zone before `wjhelp` calls `JS::Call` (the generic call, the
+  `apply` fast path, class field initializers) and flags an `apply` arguments
+  object that is not an `ArrayObject` (`[wj-calldbg]`): a mismatched value there
+  is a `js::ContextChecks` crash (`unreachable`).
+- **Watermark reset.** PBL activations keep the charged depth above 0, so
+  `RunCall` now clears a stale watermark whenever it runs below it (nothing
+  below the watermark is inside a delegated subtree), not only at depth 0.
+- **The JIT runs on the main runtime only.** `WasmJitPreCall`,
+  `WasmJitObserveCall`, `WasmJitFamilyObserve` and `WasmJitRunCall` now refuse
+  on worker runtimes (`parentRuntime` set; cached per thread), so DOM workers
+  run on PBL alone. Before, a worker's PBL could compile and enter JIT code,
+  and its prologues and epilogues saved and restored the same process-global
+  `gWJJitDepth`, `gWJSuspendWatermark`, `gWJScratch` and `gWJCallRoots` the
+  main thread used, with no synchronization (`gEntries`, an
+  `std::unordered_map` keyed by `JSScript*`, too). Interleaved save/restore
+  pairs leave the depth drifted, and the activation charges above would have
+  widened that window to the main thread's whole script lifetime. The race
+  may be related to the GC stale-pointer crashes seen with the JIT on.
+
+`GECKO_WJ_HOSTCHARGE=0` turns the charges off and makes `WasmJitRunCall` the
+original code exactly (A/B opt-out for the JIT overflow; add
+`GECKO_PBL_HEADROOM=0` for the whole patch off). They are off with
+`GECKO_NOWASMJIT` and on worker runtimes. `GECKO_WJ_SUSDBG` adds
+`[wj-hostsus]` (edge refusals) and `[wj-hostcap]` (headroom refusals).
+
+Regression probe: `node bench/main.ts micro host-reentry` recurses 200000
+levels through `Function.prototype.call` and `Array.prototype.map` callbacks.
+With 0015 and the JIT on, both recursions end in a catchable `InternalError`
+and the run prints `MICROSUM=3202` (node's default stack). With
+`GECKO_PBL_HEADROOM=0` the embed dies with V8's `RangeError`, and
+`GECKO_WJ_HOSTCHARGE=0` alone still lets a JIT↔native recursion
+(`f.apply` at depth 2000) overflow. With `GECKO_NOWASMJIT` the probe does not
+run and the embed dies as it did before 0015 (the JIT-off gap above). Octane richards/deltablue/earley/raytrace
+and the call-chain/native-call/try-catch/kitchen-sink micros keep their `--ab`
+checksums; earley no longer latches at any charge and moves by run-to-run noise
+(12587 at the default charge vs 13295 with charges off).
 
 ## Surf integration refresh
 

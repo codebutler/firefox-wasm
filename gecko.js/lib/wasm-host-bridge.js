@@ -26,6 +26,40 @@
 // a single thread.
 
 mergeInto(LibraryManager.library, {
+
+  // Host-stack headroom for the engine's over-recursion check (patch 0015):
+  // recurse a probe module `frames` levels deep and report whether V8 allowed
+  // it. Each frame keeps 64 f64s loaded from memory that the deeper frames
+  // overwrite live across its call, so every V8 tier must spill them (~580 B a
+  // frame under Liftoff and TurboFan alike); values the optimizer could
+  // recompute after the call made an earlier probe shrink 2x+ once tiered up.
+  // Only probe frames unwind on the RangeError, inside this try/catch, so the
+  // check itself is safe near the limit.
+  wasmhost_stack_headroom: function (frames) {
+    var inst = globalThis.__wjHeadroomProbe;
+    if (inst === undefined) {
+      inst = null;
+      try {
+        var bin = atob('AGFzbQEAAAABBgFgAX8BfwMCAQAFAwEAAQcFAQFjAAAK4wUB4AUBQHxBACAAtzkDAEEAKwMAIQFBACsDCCECQQArAxAhA0EAKwMYIQRBACsDICEFQQArAyghBkEAKwMwIQdBACsDOCEIQQArA0AhCUEAKwNIIQpBACsDUCELQQArA1ghDEEAKwNgIQ1BACsDaCEOQQArA3AhD0EAKwN4IRBBACsDgAEhEUEAKwOIASESQQArA5ABIRNBACsDmAEhFEEAKwOgASEVQQArA6gBIRZBACsDsAEhF0EAKwO4ASEYQQArA8ABIRlBACsDyAEhGkEAKwPQASEbQQArA9gBIRxBACsD4AEhHUEAKwPoASEeQQArA/ABIR9BACsD+AEhIEEAKwOAAiEhQQArA4gCISJBACsDkAIhI0EAKwOYAiEkQQArA6ACISVBACsDqAIhJkEAKwOwAiEnQQArA7gCIShBACsDwAIhKUEAKwPIAiEqQQArA9ACIStBACsD2AIhLEEAKwPgAiEtQQArA+gCIS5BACsD8AIhL0EAKwP4AiEwQQArA4ADITFBACsDiAMhMkEAKwOQAyEzQQArA5gDITRBACsDoAMhNUEAKwOoAyE2QQArA7ADITdBACsDuAMhOEEAKwPAAyE5QQArA8gDITpBACsD0AMhO0EAKwPYAyE8QQArA+ADIT1BACsD6AMhPkEAKwPwAyE/QQArA/gDIUAgAEEATARAQQAPCyAAQQFrEAAaQQBEAAAAAAAAAAAgAaAgAqAgA6AgBKAgBaAgBqAgB6AgCKAgCaAgCqAgC6AgDKAgDaAgDqAgD6AgEKAgEaAgEqAgE6AgFKAgFaAgFqAgF6AgGKAgGaAgGqAgG6AgHKAgHaAgHqAgH6AgIKAgIaAgIqAgI6AgJKAgJaAgJqAgJ6AgKKAgKaAgKqAgK6AgLKAgLaAgLqAgL6AgMKAgMaAgMqAgM6AgNKAgNaAgNqAgN6AgOKAgOaAgOqAgO6AgPKAgPaAgPqAgP6AgQKA5A4AIQQAL');
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+      } catch (e) {
+        // Fail open (every check then "fits"), but visibly.
+        console.warn('[wasm-host] stack headroom probe unavailable; ' +
+          'over-recursion falls back to the host stack limit:',
+          e && e.message ? e.message : e);
+      }
+      globalThis.__wjHeadroomProbe = inst;
+    }
+    if (!inst) return 1;
+    try {
+      inst.exports.c(frames);
+      return 1;
+    } catch (e) {
+      return e instanceof RangeError ? 0 : 1;
+    }
+  },
   // ---- compile / instantiate -------------------------------------------------
   wasmhost_compile: function (ptr, len) {
     try {
