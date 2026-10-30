@@ -1,0 +1,19 @@
+patches/0016-wasmjit-worker-routes.patch
+  s_e37d6ae11e2174::t_952eba245d20fb 97-132,134,163,170-172,176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e01262c763db9a5bb1e7ee22f48194280ce1962f",
+  "prompts": {},
+  "sessions": {
+    "s_e37d6ae11e2174": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_e37d6ae11e2174",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
