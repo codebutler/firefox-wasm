@@ -1,0 +1,23 @@
+bench/spidermonkey.js/embed.cpp
+  s_aca093c46da282::t_73c888a8e88a29 433,436-442
+gecko.js/build-lib.sh
+  s_aca093c46da282::t_2c8119ff0fcd67 168
+mozconfig.full.emscripten
+  s_aca093c46da282::t_7c62511666dafe 21-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9658761de182975cbe5905ffdf46bfc2aa4838d2",
+  "prompts": {},
+  "sessions": {
+    "s_aca093c46da282": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6a30f233-98a6-4524-9174-d6e29096e244",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
