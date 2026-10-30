@@ -1,0 +1,183 @@
+diff --git a/js/src/gc/RootMarking.cpp b/js/src/gc/RootMarking.cpp
+index eda6c580ae..4d03809e62 100644
+--- a/js/src/gc/RootMarking.cpp
++++ b/js/src/gc/RootMarking.cpp
+@@ -34,10 +34,11 @@ using RootEntry = RootedValueMap::Entry;
+ #ifdef __EMSCRIPTEN__
+ // The JS->wasm JIT (Mode VS, WasmJS.cpp) keeps live Values in C++ buffers
+ // (gWJFrameMem/gWJScratch/gWJHelp*) written by JIT code without store-buffer
+-// post-barriers. WJTraceRoots traces them; it is registered as an extra GC roots
+-// tracer, but those run only on MAJOR GC. Call it on MINOR GC too so nursery
+-// objects held in a Mode VS frame across a safepoint are forwarded (otherwise
+-// they go stale on tenuring -> heap corruption).
++// post-barriers. WJTraceRoots traces them. It is called directly from
++// traceRuntimeForMajorGC (marking, and the compaction pointer update) and from
++// traceRuntimeForMinorGC, so nursery objects held in a Mode VS frame across a
++// safepoint are forwarded (otherwise they go stale on tenuring -> heap
++// corruption). It is not registered as an extra-roots tracer.
+ extern "C" void WJTraceRoots(JSTracer* trc, void* data);
+ // The wasm JIT runs on the main runtime only (patch 0015), so its roots are
+ // the main runtime's cells. A worker runtime's GC must not trace them: its
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 470d116520..cec5381080 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -202,20 +202,19 @@ static void WJDumpFrameChain(JSContext* cx) {
+           bad, (void*)lo, (void*)hi, cx->portableBaselineStack().top);
+ }
+ 
+-// The host-stack over-recursion is reported as an InternalError with no
+-// captured stack (JSContext::onOverRecursedStackless: status OverRecursed as
+-// usual; e.stack === "", fileName "", lineNumber 0). The capture walks at most
+-// MAX_REPORTED_STACK_DEPTH (128) frames, yet in a browser it read past linear
+-// memory in 5 of 10 JIT-on YouTube loads at this point, while the same reports
+-// without a capture never crashed (0 of 7, then 0 of 12): a frame link near
+-// the top of a deep JIT<->PBL stack is sometimes unwalkable. This avoids one
+-// walker of that chain; the root cause is open, and other full walks at that
+-// depth (new Error().stack, console.trace, the embedder's caller lookups, GC
+-// tracing of JIT activations) may still hit it. GECKO_WJ_OVERCAPTURE=1
+-// captures one anyway (A/B).
++// The host-stack over-recursion is reported like any other: js::ReportOverRecursed,
++// with a captured stack (patch 0018). 0015 made it stackless after the capture
++// read past linear memory in 5 of 10 JIT-on YouTube loads; that crash was the
++// cross-activation unwind re-raise's capture from a stale exit FP (fixed by
++// 0017), not this one, and with 0017 12 of 12 loads captured here safely.
++// GECKO_WJ_OVERSTACKLESS set to any value but "0" keeps the stackless report
++// (JSContext::onOverRecursedStackless: e.stack === "", status OverRecursed).
+ static void WJReportOverRecursed(JSContext* cx) {
+   static int framedbg = getenv("GECKO_WJ_FRAMEDBG") ? 1 : 0;
+-  static int stackless = getenv("GECKO_WJ_OVERCAPTURE") ? 0 : 1;
++  static int stackless = [] {
++    const char* v = getenv("GECKO_WJ_OVERSTACKLESS");
++    return v && strcmp(v, "0") != 0 ? 1 : 0;
++  }();
+   if (framedbg) {
+     static uint64_t n = 0;
+     if (++n <= 6) WJDumpFrameChain(cx);
+@@ -311,12 +310,23 @@ static bool gPBLResumeInError = false;
+ // exception), the intermediate wasm frames can only propagate a flag -- the
+ // unwind TARGET must be carried here so the outer PBI's call-into-JIT site
+ // can continue its own unwind chain instead of erroring with no exception.
+-static bool gPBLUnwinding = false;
+-static void* gPBLUnwindFP = nullptr;
+-static void* gPBLUnwindSP = nullptr;
+-static JS::Value gPBLUnwindExc;
+-static JS::Value gPBLUnwindExcStack;
+-static bool gPBLUnwindHaveExc = false;
++// Per thread (patch 0018): PBL runs on every thread, so a worker catching an
++// exception must not write the carry another thread is between saving and
++// reading.
++static thread_local bool gPBLUnwinding = false;
++static thread_local void* gPBLUnwindFP = nullptr;
++static thread_local void* gPBLUnwindSP = nullptr;
++static thread_local JS::Value gPBLUnwindExc;
++static thread_local JS::Value gPBLUnwindExcStack;
++static thread_local bool gPBLUnwindHaveExc = false;
++
++// Drop the carried exception: the flag and the untraced values together, so no
++// GC pointer stays behind in them (patch 0018).
++static void PBLClearUnwindException() {
++  gPBLUnwindHaveExc = false;
++  gPBLUnwindExc = JS::UndefinedValue();
++  gPBLUnwindExcStack = JS::UndefinedValue();
++}
+ 
+ // Re-raise the in-flight exception when a catch/finally target lies beyond
+ // this activation (patch 0017). The exit frame HandleException ran under has
+@@ -331,7 +341,6 @@ static bool gPBLUnwindHaveExc = false;
+ // old re-raise (A/B).
+ static void PBLReraiseUnwindException(JSContext* cx) {
+   if (!gPBLUnwindHaveExc) return;
+-  gPBLUnwindHaveExc = false;
+   // GECKO_PBL_REUNWINDDBG: log each cross-activation re-raise.
+   static int sDbg = getenv("GECKO_PBL_REUNWINDDBG") ? 1 : 0;
+   if (sDbg) {
+@@ -344,18 +353,21 @@ static void PBLReraiseUnwindException(JSContext* cx) {
+               : gPBLUnwindExc.isObject() ? "object" : "other",
+               gPBLUnwindExcStack.isObject() ? "object" : "none");
+   }
++  // Take the values into roots and clear the carry before anything allocates.
++  JS::RootedValue rexc(cx, gPBLUnwindExc);
++  JS::RootedValue rstackv(cx, gPBLUnwindExcStack);
++  PBLClearUnwindException();
+   static int sOld = getenv("GECKO_PBL_OLDREUNWIND") ? 1 : 0;
+   if (sOld) {
+-    JS::RootedValue rexc(cx, gPBLUnwindExc);
+     cx->setPendingException(rexc, js::ShouldCaptureStack::Maybe);
+     return;
+   }
+   if (cx->isExceptionPending()) return;
+-  JS::RootedValue rexc(cx, gPBLUnwindExc);
++  // HandleException wraps the stack into the current compartment, so it may be
++  // a cross-compartment wrapper (as ThrowWithStackOperation handles it).
+   JS::Rooted<js::SavedFrame*> rstack(cx);
+-  if (gPBLUnwindExcStack.isObject() &&
+-      gPBLUnwindExcStack.toObject().is<js::SavedFrame>()) {
+-    rstack = &gPBLUnwindExcStack.toObject().as<js::SavedFrame>();
++  if (rstackv.isObject()) {
++    rstack = rstackv.toObject().maybeUnwrapIf<js::SavedFrame>();
+   }
+   cx->setPendingException(rexc, rstack);
+ }
+@@ -9683,7 +9695,7 @@ error:
+       gPBLUnwindExcStack = rfe.exceptionStack;
+       gPBLUnwindHaveExc = true;
+     } else {
+-      gPBLUnwindHaveExc = false;
++      PBLClearUnwindException();
+     }
+ 
+     switch (rfe.kind) {
+@@ -9769,7 +9781,7 @@ unwind:
+   // The target is in this activation: nothing is left to re-raise. A flag
+   // left set would make a later cross-activation unwind re-raise this stale,
+   // untraced exception value (patch 0017).
+-  gPBLUnwindHaveExc = false;
++  PBLClearUnwindException();
+   sp = ctx.stack.unwindingSP;
+   ctx.stack.fp = ctx.stack.unwindingFP;
+   frame = reinterpret_cast<BaselineFrame*>(
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 857a681fc3..7186b07ade 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -5835,6 +5835,39 @@ static double wjhelpImpl(double kindF, double siteF) {
+       }
+       WJCheckCallValues(cx, uint32_t(siteF) | 0x80000000u, thisv, callee,
+                         JS::HandleValueArray(av));
++      // Which side is foreign: the context, the array, or an element? (patch
++      // 0018, for the cross-compartment apply argument.)
++      auto compOf = [](const JS::Value& v) -> void* {
++        return v.isObject() ? (void*)v.toObject().compartment() : nullptr;
++      };
++      bool foreign = false;
++      for (size_t i = 0; i < av.length(); i++) {
++        if (av[i].isObject() && av[i].toObject().compartment() != cx->compartment())
++          foreign = true;
++      }
++      if (foreign || arrObj->compartment() != cx->compartment()) {
++        static uint64_t n = 0;
++        if (++n <= 20) {
++          fprintf(stderr,
++                  "[wj-calldbg] apply cx.comp=%p cx.realm=%p arr.comp=%p "
++                  "callee.comp=%p this.comp=%p len=%u packed=%d\n",
++                  (void*)cx->compartment(), (void*)cx->realm(),
++                  (void*)arrObj->compartment(), compOf(callee), compOf(thisv),
++                  len, int(arrObj->as<js::NativeObject>().denseElementsArePacked()));
++          for (size_t i = 0; i < av.length() && i < 8; i++) {
++            if (!av[i].isObject()) continue;
++            JSObject& o = av[i].toObject();
++            fprintf(stderr,
++                    "[wj-calldbg]   elem[%zu] comp=%p class=%s wrapper=%d "
++                    "callee.realm=%p\n",
++                    i, (void*)o.compartment(), o.getClass()->name,
++                    int(js::IsWrapper(&o)),
++                    callee.isObject() && callee.toObject().is<JSFunction>()
++                        ? (void*)callee.toObject().as<JSFunction>().realm()
++                        : nullptr);
++          }
++        }
++      }
+     }
+     if (!JS::Call(cx, thisv, callee, JS::HandleValueArray(av), &rv)) return 1.0;
+     gWJScratch[js::wasm::kWJResultSlot] = rv.get().asRawBits();

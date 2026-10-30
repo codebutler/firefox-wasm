@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 15 patches apply in order and reverse back to the pristine selected source
+All 18 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -719,7 +719,8 @@ embedding (see the headroom check below).
   cost a 145 KB recursion per check and never fire). In the JS-only shell
   (no JSPI) it would cover JIT-off recursion too, but it is skipped there as
   well.
-- **Stackless over-recursion error.** The headroom `InternalError` is built by
+- **Stackless over-recursion error (superseded by 0018; now opt-in with
+  `GECKO_WJ_OVERSTACKLESS=1`).** The headroom `InternalError` is built by
   `JSContext::onOverRecursedStackless`: `message` is `"too much recursion"`,
   `instanceof InternalError` holds and the exception status is `OverRecursed`
   as for `ReportOverRecursed` (so wasm `catch` and `Debugger` treat it the
@@ -735,7 +736,8 @@ embedding (see the headroom check below).
   `new Error().stack`, `console.trace`, the embedder's caller lookups, GC
   tracing of JIT activations) may still hit it — likely the same family as the
   GC stale-pointer crashes still seen with the JIT on.
-  `GECKO_WJ_OVERCAPTURE=1` captures a stack anyway (A/B).
+  `GECKO_WJ_OVERCAPTURE=1` captured a stack anyway (A/B). The crashing walk
+  turned out to be 0017's re-raise; 0018 captures a normal stack again.
 - **Diagnostics.** `GECKO_WJ_FRAMEDBG` walks every JIT activation's frame
   chain with bounds checks before a headroom report and prints the first bad
   link (`[wj-frames]`). It follows `jsExitFP → callerFramePtr`, not
@@ -836,7 +838,10 @@ in-flight exception so every boundary sees one pending (`gPBLUnwindExc`). That
 re-raise had three faults:
 
 - It called `setPendingException(v, ShouldCaptureStack::Maybe)`, which captures
-  a stack for the realm's first 50 throws. By then the exit frame
+  a stack for a realm's first 50 throws, and on every throw in a debuggee realm
+  or one with the trusted (chrome) principals
+  (`Realm::shouldCaptureStackForThrow`), so chrome code met this on every
+  cross-activation unwind. By then the exit frame
   `HandleException` ran under had been popped, so the walk started from a stale
   exit FP in unwound PBL stack, and under a deep recursion it read past linear
   memory.
@@ -863,8 +868,46 @@ On the named diagnostic build, with JIT-on YouTube watch→home:
 | JIT off | 5 | 0 |
 
 The stack-capture crash that 0015 attributed to its over-recursion report has
-the same chain. It was likely this re-raise. 0015's stackless report stays,
-because an over-recursion error should not walk a deep stack in any case.
+the same chain. It was likely this re-raise; 0018 drops the stackless default.
+
+## 0018-pbl-unwind-carry.patch
+
+Follow-ups to 0017 from its review, plus 0015's report:
+
+- **The unwind carry is per thread.** `gPBLUnwinding`, `gPBLUnwindFP`,
+  `gPBLUnwindSP`, `gPBLUnwindExc`, `gPBLUnwindExcStack` and
+  `gPBLUnwindHaveExc` are `static thread_local`. PBL runs on every thread,
+  so a DOM worker catching an exception wrote the same process-wide carry the
+  main thread could be between saving and re-raising: with 0017 only the
+  cross-activation Finally read it, but a worker could clear the flag (the
+  finally then ended with nothing pending) or swap in a value from its own
+  runtime.
+- **The carried values are cleared with the flag** (`PBLClearUnwindException`),
+  so no GC pointer stays behind in an untraced global, and the re-raise roots
+  them before clearing.
+- **A cross-compartment stack survives the re-raise.** `HandleException` wraps
+  the saved stack into the current compartment, so it can be a wrapper; the
+  re-raise unwraps it with `maybeUnwrapIf<SavedFrame>()`, as
+  `ThrowWithStackOperation` does, instead of dropping it.
+- **The headroom over-recursion report has a stack again.** 0015 reported it
+  without one after its capture crashed in 5 of 10 JIT-on YouTube loads; that
+  crash was 0017's re-raise. On the 0016+0017 candidate, with
+  `GECKO_WJ_OVERCAPTURE=1`, 12 JIT-on loads had 13 headroom reports and no
+  deaths, and the recursion page ended in catchable errors as before. So the
+  report is `js::ReportOverRecursed` again: `e.stack`, `fileName` and
+  `lineNumber` are normal. `GECKO_WJ_OVERSTACKLESS` set to any value but `0`
+  keeps the stackless form (and `GECKO_WJ_OVERCAPTURE` is gone). On the 0018
+  build, 24 JIT-on YouTube loads made 45 captured reports in 19 of them, none
+  fatal; with the 13 above, 58 captured reports and no crash.
+- `RootMarking.cpp`'s comment no longer says `WJTraceRoots` is registered as an
+  extra-roots tracer: both GC paths call it directly.
+- `GECKO_WJ_CALLDBG` reports more on the `apply` fast path (`WJH_APPLYARRAY`).
+  When an argument or the array itself is from another compartment than the
+  context, it prints the context's, the array's, the callee's and `this`'s
+  compartments, and each object element's compartment, class and wrapper
+  flag. A JIT-on YouTube run hit a `js::ContextChecks` crash
+  (`unreachable`) there: one element of a packed `ArrayObject` belonged to
+  another compartment, while `this` and the callee did not.
 
 ## Surf integration refresh
 
