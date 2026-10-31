@@ -1,0 +1,23 @@
+bench/microbenches/resume-gc.js
+  s_c5d56e78d89691::t_b853e8b3b99142 1-25
+patches/0025-wasmjit-resume-snapshot.patch
+  s_c5d56e78d89691::t_3a355f8ed6a6f4 1-265
+patches/README.md
+  s_c5d56e78d89691::t_55b93c641dca75 28,1078-1119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "75aada489f6481e01d99c824b5ba3d261fe71ce9",
+  "prompts": {},
+  "sessions": {
+    "s_c5d56e78d89691": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bbfeb54f-6644-4725-9893-2d5b957aa9ba",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
