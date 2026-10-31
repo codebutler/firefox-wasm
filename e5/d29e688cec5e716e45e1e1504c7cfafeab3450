@@ -1,0 +1,19 @@
+patches/README.md
+  s_7ccb968dcbb940::t_019fe0691ce320 1042-1045
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e5d29e688cec5e716e45e1e1504c7cfafeab3450",
+  "prompts": {},
+  "sessions": {
+    "s_7ccb968dcbb940": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19359-64e5-7612-8c8d-45e894a15bbc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

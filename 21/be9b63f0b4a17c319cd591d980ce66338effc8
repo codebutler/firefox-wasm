@@ -1,0 +1,19 @@
+patches/0027-wasmjit-args-callobj.patch
+  s_1d8ffc1a026959::t_aea7007d4aa974 2,5,17,26,44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "21be9b63f0b4a17c319cd591d980ce66338effc8",
+  "prompts": {},
+  "sessions": {
+    "s_1d8ffc1a026959": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_1d8ffc1a026959",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
