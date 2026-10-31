@@ -106,21 +106,22 @@ index 3dbd12200e..9ddb278ddf 100644
  static constexpr uint32_t kWJThisOff = kWJThisSlot * 8;
  
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 7186b07ade..eae4707e80 100644
+index 7186b07ade..f0837c7cd6 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
-@@ -5319,16 +5319,21 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5319,16 +5319,20 @@ static double wjhelpImpl(double kindF, double siteF) {
  
    if (kind == js::wasm::WJH_NEWARGUMENTS) {
      // MCreateArgumentsObject: materialize the `arguments` object from the staged
 -    // actuals. scratch[0..argc-1]=actuals (boxed), [8]=callee, [9]=scopeChain,
 -    // [10]=argc. createForWasmJit roots the actuals + builds via the mapped/unmapped
+-    // create() path (uglify-js etc. are non-strict -> mapped args alias formals via
+-    // the CallObject). argc is bounded by kWJMaxArgs (fns with more already bail).
+-    uint32_t argc = uint32_t(gWJScratch[10]);  // raw (backend stores zero-extended i32)
 +    // actuals. scratch[0..argc-1]=actuals (boxed); from kWJArgsMetaSlot: callee,
 +    // scopeChain, argc. createForWasmJit roots the actuals + builds via the
-+    // mapped/unmapped
-     // create() path (uglify-js etc. are non-strict -> mapped args alias formals via
-     // the CallObject). argc is bounded by kWJMaxArgs (fns with more already bail).
--    uint32_t argc = uint32_t(gWJScratch[10]);  // raw (backend stores zero-extended i32)
++    // mapped/unmapped create() path (uglify-js etc. are non-strict -> mapped args
++    // alias formals via the CallObject). argc is bounded by kWJMaxArgs (fns with more already bail).
 +    // raw (the backend stores a zero-extended i32)
 +    uint32_t argc = uint32_t(gWJScratch[js::wasm::kWJArgsMetaSlot + 2]);
      if (argc > js::wasm::kWJMaxArgs) argc = js::wasm::kWJMaxArgs;
@@ -136,16 +137,18 @@ index 7186b07ade..eae4707e80 100644
      JS::Value actuals[js::wasm::kWJMaxArgs];
      for (uint32_t i = 0; i < argc; i++) {
        actuals[i] = JS::Value::fromRawBits(gWJScratch[i]);
-@@ -5379,12 +5384,13 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -5379,12 +5383,13 @@ static double wjhelpImpl(double kindF, double siteF) {
    if (kind == js::wasm::WJH_REST) {
      // MRest: build the rest-parameter array from the staged actuals. The
      // actuals live in gWJScratch[0..argc-1] (boxed, layout-compatible with
 -    // JS::Value's raw bits), numFormals in [8], argc in [9]. argc<=kWJMaxArgs is
-+    // JS::Value's raw bits); numFormals and argc from kWJArgsMetaSlot.
-+    // argc<=kWJMaxArgs is
-     // guaranteed by the function-entry argc guard (needsArgcGuard). Passing a
-     // null arrRes makes InitRestParameter allocate via NewDenseCopiedArray.
+-    // guaranteed by the function-entry argc guard (needsArgcGuard). Passing a
+-    // null arrRes makes InitRestParameter allocate via NewDenseCopiedArray.
 -    uint32_t argc = uint32_t(gWJScratch[9]);
++    // JS::Value's raw bits); numFormals and argc from kWJArgsMetaSlot.
++    // argc<=kWJMaxArgs is guaranteed by the function-entry argc guard
++    // (needsArgcGuard). Passing a null arrRes makes InitRestParameter allocate
++    // via NewDenseCopiedArray.
 +    uint32_t argc = uint32_t(gWJScratch[js::wasm::kWJArgsMetaSlot + 1]);
      if (argc > js::wasm::kWJMaxArgs) argc = js::wasm::kWJMaxArgs;
 -    uint32_t numFormals = uint32_t(gWJScratch[8]);

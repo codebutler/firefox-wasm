@@ -1028,13 +1028,15 @@ the construct slots (`kWJCalleeSlot`). The slots stay inside the traced
 scratch range, so the callee and environment are still updated by a moving
 GC.
 
-`bench/microbenches/wide-args.js` calls three functions with 12 actuals:
-one reads `arguments`, one a rest array, one two formals plus a rest array.
-Each sums its actuals 200000 times; every half should print 15600000.
-Before the patch the `arguments` half threw `TypeError: can't convert ({})
+`bench/microbenches/wide-args.js` calls three functions, with 12 actuals and
+again with 16 (the most the JIT accepts): one reads `arguments`, one a rest
+array, one two formals plus a rest array. Each sums its actuals 200000 times;
+the 12-actual cases should print 15600000 and the 16-actual cases 27200000.
+Before the patch the `arguments` cases threw `TypeError: can't convert ({})
 to primitive type` (the environment object among the actuals) and the rest
-halves printed 11815181 and 11807600. After it, two runs printed 15600000
-for all three, matching the interpreter (`GECKO_NOWASMJIT=1`).
+cases came out short (for example 11815181 and 23401900). After it, every
+case printed the expected value, matching the interpreter
+(`GECKO_NOWASMJIT=1`).
 
 ## Surf integration refresh
 
