@@ -1,0 +1,109 @@
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 714208a3df..1d7acff872 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -71,6 +71,11 @@
+ #include "vm/PlainObject-inl.h"
+ #include "vm/Realm-inl.h"  // js::AutoRealm (JS->wasm JIT Phase F resume realm entry)
+ 
++#if defined(__EMSCRIPTEN__)
++#  include <atomic>
++#  include <emscripten/heap.h>
++#endif
++
+ #ifdef ENABLE_JS_PBL_WEVAL
+ #  include "vm/Weval.h"
+ WEVAL_DEFINE_GLOBALS()
+@@ -319,6 +324,54 @@ static thread_local ArgumentsObject* gPBLResumeArgsObj = nullptr;
+ // catch/finally in PBL (Warp skips catch blocks, so the JIT cannot run them). No
+ // re-execution of the throwing op. Cleared on consume.
+ static thread_local bool gPBLResumeInError = false;
++#if defined(__EMSCRIPTEN__)
++// DIAG (revert before PR): count resume hand-offs set on one thread and not
++// yet consumed, so another thread's activation in that window -- which the
++// process-wide statics before 0028 let it consume -- can be counted.
++static std::atomic<int> gPBLDiagPendingResumes{0};
++static thread_local bool tPBLDiagPendingMine = false;
++static void PBLDiagConsumeMine() {
++  if (tPBLDiagPendingMine) {
++    tPBLDiagPendingMine = false;
++    gPBLDiagPendingResumes.fetch_sub(1);
++  }
++}
++// DIAG: validate a function activation's environment before
++// InitFunctionEnvironmentObjects uses it (#2197: stale env on a worker).
++static void PBLDiagCheckEnv(JSContext* cx, JSFunction* func, JSObject* env,
++                            bool fromResume) {
++  bool worker = cx->runtime()->parentRuntime != nullptr;
++  if (worker && gPBLDiagPendingResumes.load() > 0) {
++    static std::atomic<uint32_t> n{0};
++    uint32_t k = ++n;
++    if (k <= 20 || k % 1000 == 0)
++      fprintf(stderr, "[pbl-steal] #%u worker activation while another thread's resume hand-off was pending (pre-0028 would have consumed it)\n", unsigned(k));
++  }
++  uintptr_t a = uintptr_t(env);
++  const char* why = nullptr;
++  if (!env) {
++    why = "null";
++  } else if (a >= uintptr_t(emscripten_get_heap_size()) || (a & 7)) {
++    why = "out-of-heap";
++  } else if (!js::gc::IsCellPointerValid(env)) {
++    why = "invalid-cell";
++  } else if (env->compartment() != cx->compartment()) {
++    why = "other-compartment";
++  }
++  if (!why) return;
++  JSScript* sc = func->hasBytecode() ? func->nonLazyScript() : nullptr;
++  fprintf(stderr,
++          "[pbl-envchk] BAD %s worker=%d fromResume=%d env=%p envNursery=%d "
++          "func=%p funcNursery=%d minorGC=%llu majorGC=%llu %s:%u\n",
++          why, int(worker), int(fromResume), (void*)env,
++          int(env && js::gc::IsInsideNursery(env)), (void*)func,
++          int(js::gc::IsInsideNursery(func)),
++          (unsigned long long)cx->runtime()->gc.minorGCCount(),
++          (unsigned long long)cx->runtime()->gc.majorGCCount(),
++          sc && sc->filename() ? sc->filename() : "?",
++          sc ? unsigned(sc->lineno()) : 0);
++}
++#endif
+ // Cross-wasm-boundary EXCEPTION UNWIND carry. When a resumed (nested) PBI
+ // returns Unwind/UnwindError whose target frame lies in an OUTER PBI
+ // activation (HandleException already found the catch in the SHARED portable
+@@ -6549,6 +6602,14 @@ PBIResult PortableBaselineInterpret(
+     bool keepEnv = gPBLResumeKeepEnv;
+     gPBLResumeEnclosingEnv = nullptr;  // consume: only the resumed frame uses it
+     gPBLResumeKeepEnv = false;
++#if defined(__EMSCRIPTEN__)
++    PBLDiagConsumeMine();
++    if (!keepEnv) {
++      PBLDiagCheckEnv(ctx.frameMgr.cxForLocalUseOnly(), func,
++                      resumeEnclosingEnv ? resumeEnclosingEnv : func->environment(),
++                      resumeEnclosingEnv != nullptr);
++    }
++#endif
+     if (keepEnv) {
+       // Resume that captured the deopt-time frame env (pushed as envChain): keep
+       // it exactly -- it already holds the function's own CallObject (if any) with
+@@ -10125,6 +10186,12 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
+   gPBLResumeKeepEnv = keepFrameEnv;
+   gPBLResumeInError = resumeInError;
+   gPBLResumeArgsObj = argsObj;
++#if defined(__EMSCRIPTEN__)
++  if (!tPBLDiagPendingMine) {
++    tPBLDiagPendingMine = true;
++    gPBLDiagPendingResumes.fetch_add(1);
++  }
++#endif
+   PBIResult ret = PortableBaselineInterpret<false, false, kHybridICsInterp>(
+       cx, state, stack, sp, envChain, &result, pc, isd, nullptr, nullptr,
+       nullptr, PBIResult::Ok, osrLocals, nLocals, osrStack, osrStackDepth);
+@@ -10149,6 +10216,9 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
+   gPBLResumeEnclosingEnv = nullptr;
+   gPBLResumeKeepEnv = false;
+   gPBLResumeArgsObj = nullptr;
++#if defined(__EMSCRIPTEN__)
++  PBLDiagConsumeMine();
++#endif
+   static int resumeResDbg = getenv("GECKO_WJ_RESUMERESDBG") ? 1 : 0;
+   if (resumeResDbg) {
+     fprintf(stderr, "[wj-resume-res] %s:%u pcOff=%u ret=%d result=%s/%g\n",

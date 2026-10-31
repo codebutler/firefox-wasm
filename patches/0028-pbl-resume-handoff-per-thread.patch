@@ -1,0 +1,57 @@
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 9bab1b401c..714208a3df 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -269,8 +269,18 @@ static const bool kHybridICsInterp = PBL_HYBRID_ICS_DEFAULT;
+ // frame being resumed (set by WasmJitResumeViaPBL right before re-entering PBL,
+ // consumed by the function prologue). Avoids the canonical
+ // script->function()->environment() being used for a re-instantiated closure.
+-// Single-threaded shell; cleared on consume so nested frames don't inherit it.
+-static JSObject* gPBLResumeEnclosingEnv = nullptr;
++// Cleared on consume so nested frames don't inherit it.
++//
++// This and the other resume hand-offs below are per thread (patch 0028). They
++// are set by WasmJitResumeViaPBL and consumed by the next PBL activation's
++// prologue, which must be on the same thread: as process-wide statics, any
++// thread's next function activation consumed them. A DOM worker entering a
++// function in that window took the main thread's enclosing environment as
++// its own frame env (InitFunctionEnvironmentObjects then failed ContextChecks,
++// or a class check read a cell of the other runtime) and its arguments object,
++// and the main thread's resumed frame fell back to the canonical environment
++// with no arguments object.
++static thread_local JSObject* gPBLResumeEnclosingEnv = nullptr;
+ // GECKO_WJ_EXITFPDBG=<decimal addr>: print every setter that installs the target
+ // exitFP value (task #60: the zeal crash's stale exitFP is address-deterministic).
+ static inline void WJExitFPDbg(int siteId, void* v) {
+@@ -288,19 +298,19 @@ static inline void WJExitFPDbg(int siteId, void* v) {
+ }
+ // GECKO_WJ_RESUMETRACE=<n>: trace the first n ops of the FIRST JIT-deopt-resumed
+ // frame (op name + pc offset + stack top) -- diagnosing resume misexecution.
+-static int gPBLWJResumeTraceN = 0;
++static int gPBLWJResumeTraceN = 0;  // debug only (GECKO_WJ_RESUMETRACE), read per op
+ // When true, the resumed frame was pushed with the CAPTURED deopt-time frame env
+ // (gWJResumeEnvPtr -- the actual env at the deopt, including any own CallObject
+ // the JIT already created/populated). The prologue must KEEP it and NOT re-run
+ // InitFunctionEnvironmentObjects (which would discard live mid-function env state
+ // -> navier wrong values). Cleared on consume.
+-static bool gPBLResumeKeepEnv = false;
++static thread_local bool gPBLResumeKeepEnv = false;
+ // JS->wasm JIT deopt resume: the resumed frame's arguments object when the deopt
+ // is past JSOp::Arguments (set by WasmJitResumeViaPBL, consumed by the prologue
+ // before anything can GC). Without it frame->argsObj() is whatever the reused
+ // frame memory held, and JSOp::GetArg in a function whose arguments object
+ // aliases its formals reads another call's arguments.
+-static ArgumentsObject* gPBLResumeArgsObj = nullptr;
++static thread_local ArgumentsObject* gPBLResumeArgsObj = nullptr;
+ // JS->wasm JIT try/catch: when true, the deopt resume is due to an exception thrown
+ // inside a try region of a JIT'd function (signalled at an in-try call's intact
+ // flag-check, NOT via lossy wasm-EH unwinding). After reconstructing the frame at the
+@@ -308,7 +318,7 @@ static ArgumentsObject* gPBLResumeArgsObj = nullptr;
+ // (`goto error` -> HandleException), which walks the frame's trynotes and runs the
+ // catch/finally in PBL (Warp skips catch blocks, so the JIT cannot run them). No
+ // re-execution of the throwing op. Cleared on consume.
+-static bool gPBLResumeInError = false;
++static thread_local bool gPBLResumeInError = false;
+ // Cross-wasm-boundary EXCEPTION UNWIND carry. When a resumed (nested) PBI
+ // returns Unwind/UnwindError whose target frame lies in an OUTER PBI
+ // activation (HandleException already found the catch in the SHARED portable
