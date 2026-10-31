@@ -1054,10 +1054,16 @@ in `RunScript`, always uses `ReportOverRecursed`.
   and `String.prototype.replace` callbacks are self-hosted, stay in one
   activation, and end at SpiderMonkey's own limits (12,650 and 8,533) as
   before.
-- **Open question: the default.** A page that legitimately nests more than
-  320 counted activations now gets an `InternalError` where it used to work.
-  Nested `eval` is the likely case (counted twice a level). Measure real
-  pages with the cap off and `GECKO_WJ_SUSDBG` before trusting 320.
+- **Why 320: measured in the browser** (optimized engine, JIT off, cap off,
+  `GECKO_WJ_SUSDBG`). Six loads of a heavy video site, home → watch →
+  home, all finished with peak nestings of 96, 128, 96, 96, 224 and 192
+  (logged in steps of 32, so under 256). The page's startup reaches 96, and
+  the rest comes from a bot-detection script built on nested `eval`. The
+  apply recursion page killed the thread at a nesting between 480 and 511.
+  So 320 is at least 25% above anything seen on that site and two thirds of
+  the stack. A page that legitimately nests deeper now gets an
+  `InternalError` where it used to work; nested `eval`, counted twice a
+  level, is the likely case.
 - **Gaps.** The cap is a count, not a measurement. A path whose levels cost
   more host stack than an apply level (DOM bindings that call back into
   script, say) has less margin, and one that costs more than about 1.5× an
@@ -1083,7 +1089,8 @@ in `RunScript`, always uses `ReportOverRecursed`.
   984 KB stack it still overflows before 320 levels: run it with
   `--stack-size=1968` (`bench/main.ts`'s children use 8000).
 - **Diagnostics.** `GECKO_WJ_SUSDBG` prints each thread's deepest nesting in
-  steps of 32 (`[host-nest] high=`) and the cap's reports (`[host-nest] cap`).
+  steps of 32 (`[host-nest] high=`) and the cap's reports (`[host-nest] cap`),
+  each with `ptr=` (the pthread, as an embedder's thread logs name it).
 - **Regression probe.** `bench/microbenches/native-reentry.js` recurses through
   apply, an accessor, a Proxy trap, `toJSON` and a sort comparator; with the
   cap each ends in an `InternalError` (`MICROSUM=8005`, JIT on or off). The

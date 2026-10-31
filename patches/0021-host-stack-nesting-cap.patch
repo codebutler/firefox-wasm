@@ -1,8 +1,16 @@
 diff --git a/gfx/gl/GLContextProviderEmscripten.cpp b/gfx/gl/GLContextProviderEmscripten.cpp
-index 7dcada5f80..1cd4ac9e4d 100644
+index 7dcada5f80..8b823f44d7 100644
 --- a/gfx/gl/GLContextProviderEmscripten.cpp
 +++ b/gfx/gl/GLContextProviderEmscripten.cpp
-@@ -57,6 +57,9 @@ static bool ContentPassthroughEnabled() {
+@@ -27,6 +27,7 @@
+ #include <emscripten/html5_webgl.h>
+ #include <cstdio>
+ #include <cstdlib>
++#include <pthread.h>
+ #include <cstring>
+ #include <pthread.h>
+ 
+@@ -57,6 +58,9 @@ static bool ContentPassthroughEnabled() {
  // browser implicit-presents the OffscreenCanvas to its #screen placeholder. Requires
  // the final link's -sJSPI.
  extern "C" void gl_present_yield(void);
@@ -12,7 +20,7 @@ index 7dcada5f80..1cd4ac9e4d 100644
  
  // Host-GPU image passthrough: when the compositor GL context is created on the
  // Renderer thread, record this thread's id + install the JS handler that uploads
-@@ -247,6 +250,19 @@ class GLContextEmscripten final : public GLContext {
+@@ -247,6 +251,19 @@ class GLContextEmscripten final : public GLContext {
      // yields, so yield here via JSPI: gl_present_yield suspends the wasm stack for one
      // macrotask (the present fires during it), then we resume. No
      // transferToImageBitmap / postMessage / #glout overlay -- #screen shows the frame.
@@ -25,30 +33,31 @@ index 7dcada5f80..1cd4ac9e4d 100644
 +      static uint32_t sYields = 0;
 +      int32_t nest = js::HostNestDepth();
 +      if (++sYields <= 3 || nest != 0) {
-+        fprintf(stderr, "[host-nest] suspend #%u nest=%d\n", unsigned(sYields),
-+                int(nest));
++        fprintf(stderr, "[host-nest] suspend #%u nest=%d ptr=%lu\n",
++                unsigned(sYields), int(nest), (unsigned long)pthread_self());
 +      }
 +    }
      gl_present_yield();
      return true;
    }
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
-index 0fdda89b7d..93c27a47dd 100644
+index 0fdda89b7d..d2b88d9d9b 100644
 --- a/js/src/vm/Interpreter.cpp
 +++ b/js/src/vm/Interpreter.cpp
-@@ -16,6 +16,11 @@
+@@ -16,6 +16,12 @@
  #include "mozilla/TimeStamp.h"
  
  #include <string.h>
 +#if defined(__EMSCRIPTEN__)
 +#  include <atomic>
++#  include <pthread.h>
 +#  include <stdio.h>
 +#  include <stdlib.h>
 +#endif
  
  #include "jsapi.h"
  
-@@ -422,6 +427,84 @@ extern uint64_t gWJCallCallee;
+@@ -422,6 +428,87 @@ extern uint64_t gWJCallCallee;
  }  // namespace js
  #endif
  
@@ -99,7 +108,8 @@ index 0fdda89b7d..93c27a47dd 100644
 +
 +bool js::HostNestOverLimit(JSContext* cx) {
 +  int32_t nest = sHostNest;
-+  // GECKO_WJ_SUSDBG: report this thread's deepest nesting, in steps of 32, so
++  // GECKO_WJ_SUSDBG: report this thread's deepest nesting, in steps of 32
++  // (ptr= is the pthread, as the embedder's thread logs name it), so
 +  // a page's real depth can be compared against the cap (with the cap off
 +  // too, which measures it unperturbed).
 +  static const bool sDbg = getenv("GECKO_WJ_SUSDBG") != nullptr;
@@ -107,7 +117,8 @@ index 0fdda89b7d..93c27a47dd 100644
 +    thread_local int32_t sHigh = 0;
 +    if (nest >= sHigh + 32) {
 +      sHigh = nest - nest % 32;
-+      fprintf(stderr, "[host-nest] high=%d\n", int(nest));
++      fprintf(stderr, "[host-nest] high=%d ptr=%lu\n", int(nest),
++              (unsigned long)pthread_self());
 +    }
 +  }
 +  int32_t cap = HostNestCap();
@@ -122,8 +133,9 @@ index 0fdda89b7d..93c27a47dd 100644
 +    static std::atomic<uint32_t> sReports{0};
 +    uint32_t n = ++sReports;
 +    if (n <= 20 || n % 1000 == 0) {
-+      fprintf(stderr, "[host-nest] cap #%u nest=%d cap=%d system=%d\n",
-+              unsigned(n), int(nest), int(cap), int(system));
++      fprintf(stderr, "[host-nest] cap #%u nest=%d cap=%d system=%d ptr=%lu\n",
++              unsigned(n), int(nest), int(cap), int(system),
++              (unsigned long)pthread_self());
 +    }
 +  }
 +  return true;
@@ -133,7 +145,7 @@ index 0fdda89b7d..93c27a47dd 100644
  bool js::RunScript(JSContext* cx, RunState& state) {
    AutoCheckRecursionLimit recursion(cx);
    if (!recursion.check(cx)) {
-@@ -523,6 +606,17 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+@@ -523,6 +610,17 @@ bool js::RunScript(JSContext* cx, RunState& state) {
        break;
    }
  
