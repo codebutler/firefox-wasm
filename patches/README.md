@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 19 patches apply in order and reverse back to the pristine selected source
+All 20 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -399,6 +399,8 @@ Reproduced on the v0.0.6 release gecko.js; absent with GECKO_WJ_NOBSDBG=1.
 Fix: resolve filename/line/name eagerly at insertion; the print reads only
 the stored string. (Also explains the earlier embed sighting of the same
 trap shape.)
+0020 has since removed the map, its counters and the print, so
+`GECKO_WJ_NOBSDBG` no longer does anything.
 
 ## 0004-wasmjit-vibey-shape-fold.patch
 
@@ -811,7 +813,8 @@ DOM worker's thread:
   with the JIT off too, bumping unsynchronized static counters and inserting
   into a static `std::unordered_map<JSScript*, …>` on every native→JS
   callback. It now runs only where the JIT does, and the per-function table
-  (unbounded, with dangling keys) is opt-in: `GECKO_WJ_NOBSFN=1`.
+  (unbounded, with dangling keys) is opt-in: `GECKO_WJ_NOBSFN=1`. 0020
+  removes the table and the counters.
 
 `WasmJitInWasm` (the decompiler's "inside JIT code" check) also answers false
 off the JIT's thread. A thread with no `JSContext` is treated as the main
@@ -955,6 +958,26 @@ call. Every worker death in these runs had this stack:
 The patch removes the element unconditionally and asserts on the result. A
 search of the tree for the same shape (`#if RELEASE_OR_BETA` with a side effect
 inside the `MOZ_DIAGNOSTIC_ASSERT` branch) finds only this site.
+
+## 0020-runscript-observe-no-debug-table.patch
+
+`js::RunScript`'s native-callback observe block (0003, made main-thread only
+by 0016) still carried debug bookkeeping: a static
+`std::unordered_map<JSScript*, …>` of per-function call counts (opt-in since
+0016 with `GECKO_WJ_NOBSFN=1`), two static counters, and a `[wj-nobs]` print
+every 500,000 calls, on unless `GECKO_WJ_NOBSDBG` was set.
+
+Before 0016 the block ran on every thread with the JIT on or off: DOM worker
+threads inserted into the map, and rehashed it, while the main thread did the
+same and the print iterated it. That is undefined behaviour, and a key whose
+script was collected could be reused by a new script and merge their counts.
+0016 already confined the block to the main runtime's thread with the JIT on,
+which ended the race; the DOM worker deaths it was suspected of were still
+there with 0016 (5 of 5 JIT-off loads) and turned out to be 0019's.
+
+This patch deletes the table, the counters and the print. The routing stays,
+as does `GECKO_WJ_NONATIVEOBS=1`; `GECKO_WJ_NOBSDBG` and `GECKO_WJ_NOBSFN` no
+longer do anything.
 
 ## Surf integration refresh
 
