@@ -399,6 +399,8 @@ Reproduced on the v0.0.6 release gecko.js; absent with GECKO_WJ_NOBSDBG=1.
 Fix: resolve filename/line/name eagerly at insertion; the print reads only
 the stored string. (Also explains the earlier embed sighting of the same
 trap shape.)
+0020 has since removed the map, its counters and the print, so
+`GECKO_WJ_NOBSDBG` no longer does anything.
 
 ## 0004-wasmjit-vibey-shape-fold.patch
 
