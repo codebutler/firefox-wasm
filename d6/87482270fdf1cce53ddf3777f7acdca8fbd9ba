@@ -1,0 +1,29 @@
+bench/microbenches/host-reentry.js
+  s_2541cc69f91286::t_03483adda4b5d0 10-11
+bench/microbenches/native-reentry.js
+  s_2541cc69f91286::t_15f36609fb6d2c 1-70
+bench/spidermonkey.js/embed.cpp
+  s_2541cc69f91286::t_fbc80fca1cd98a 435-442
+patches/0020-runscript-observe-no-debug-table.patch
+  s_2541cc69f91286::t_1058c3836d38e1 1-72
+patches/0021-host-stack-nesting-cap.patch
+  s_2541cc69f91286::t_f348d730722e32 1-274
+patches/README.md
+  s_2541cc69f91286::t_f2a6e591335fd4 28-29,402-403,678,723,816-817,962-1109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d687482270fdf1cce53ddf3777f7acdca8fbd9ba",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
