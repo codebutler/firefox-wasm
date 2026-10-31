@@ -1262,7 +1262,9 @@ direct `eval` forces), and every such function gets a `FunctionEnvironment`.
 So the resume point's environment operand is either:
 
 - a constant object, spilled through the traced constant pool as both the
-  environment and the enclosing environment; or
+  environment and the enclosing environment (Warp gives only module and global
+  scripts a constant environment, and those never compile, so this is a
+  guard); or
 - for `NoEnvironment`, the slot's initial Undefined (a phi of the entry's and
   the OSR block's Undefined past a loop head, since `MOsrEnvironmentChain` is
   built only for a script that uses its chain), or optimized out. The frame's
@@ -1277,8 +1279,10 @@ The one remaining observer of the substitute environment would be the
 Debugger (`Frame.environment`). The JIT had no Debugger gate; it now refuses
 to compile a debuggee script, a script in a debuggee realm, or a script with a
 debug script (breakpoints, step mode), the way Ion leaves debuggee code to
-Baseline. Not covered: a realm that becomes a debuggee after a function was
-compiled keeps calling the compiled code, as before this patch (calls between
+Baseline. Entry is not gated (a check on every interpreter-to-JIT call
+measured as a likely cost on a call-heavy microbench and was dropped). Not
+covered: a realm that becomes a debuggee after a function was compiled keeps
+calling the compiled code, as before this patch (calls between
 compiled functions bypass the interpreter's routing), and a resume in it gets
 the substitute. The test embed has no Debugger, so the gate is not exercised by
 a test.
@@ -1290,8 +1294,11 @@ Richards and 14% on DeltaBlue, so it was dropped for the above.
 entry and before each frame's reads. `bench/microbenches/resume-env.js` covers
 the enclosing environment (a closure over a fresh outer `let`, read only after
 a deopt; with only the GC hook it crashed with "memory access out of bounds")
-and a function without an env root (2400 resumes through the global lexical
-environment); with the patch it prints 0, in every `GECKO_WJ_RESUMEGC` mode
+and functions without an env root (resumes through the global lexical
+environment: at entry, mid-body, inside a loop, and in a frame that throws to
+its caller; the nested ones are created inside an outer function's call
+object, so their real closure environment differs from the substitute); with
+the patch it prints 0, in every `GECKO_WJ_RESUMEGC` mode
 including the full GCs that 0026 adds. `bench/microbenches/resume-gc.js`, run
 with it, resumes 2000 frames (500 per shape), including resumes nested inside
 another resume's interpreter run; each line should print 0. With only the GC
