@@ -1105,7 +1105,18 @@ fresh nursery call object but only reads it in a cold branch) left it stale,
 and the snapshot would then have traced a stale pointer. With the env always
 rooted, the spill reads the persistent root slot, which a moving GC keeps
 current; the `envLocal` spill path is gone (a compile that would need it
-fails).
+fails). One visible change: when the resume point's own environment
+operand cannot be read, a function that used to have no env root spilled 0 for
+the frame's environment (the interpreter then used the canonical function's
+environment); it now gets the closure's environment from the root slot.
+
+No test can show the old `envLocal` hole in practice. Warp emits a
+`FunctionEnvironment` in the entry block whenever the script's bytecode uses its
+environment chain (`ScriptUsesEnvironmentChain`), cold branches included, and
+that already set `useEnvRoot`. Without one, the environment is either unused
+(`NoEnvironment`) or a compile-time constant object, which cannot be a fresh
+nursery call object. Always rooting closes the hole by construction rather than
+relying on that.
 
 `GECKO_WJ_RESUMEGC=1` (test only) forces a minor GC inside every resume, at
 entry and before each frame's reads. `bench/microbenches/resume-env.js` covers

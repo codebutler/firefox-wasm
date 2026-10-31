@@ -5,7 +5,9 @@
 // object) per call, and reads it only in a branch that is cold when `inner`
 // is compiled: the read runs in the interpreter after a type-guard deopt, through
 // the enclosing environment the resume supplied. Before the patch the run crashed
-// with "memory access out of bounds" (0024 with only the GC hook).
+// with "memory access out of bounds" (0024 with only the GC hook). Warp still
+// emits a FunctionEnvironment for `inner` (its bytecode reads the environment),
+// so this exercises the rooted path, not a function without an env root.
 var bad = 0;
 for (var c = 0; c < 60; c++) {
   // A separate script per round, so each round compiles and deopts afresh.
