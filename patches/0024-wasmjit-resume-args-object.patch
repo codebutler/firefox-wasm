@@ -58,10 +58,10 @@ index cec5381080..9bab1b401c 100644
    if (resumeResDbg) {
      fprintf(stderr, "[wj-resume-res] %s:%u pcOff=%u ret=%d result=%s/%g\n",
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index c32ccb968d..4ef52d5ba8 100644
+index c32ccb968d..a35b76d4a2 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -1580,6 +1580,32 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+@@ -1580,6 +1580,41 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
      if (!e.writeOp(Op::I32Store) || !e.writeVarU32(2) || !e.writeVarU32(0))
        return false;
  
@@ -74,17 +74,26 @@ index c32ccb968d..4ef52d5ba8 100644
 +        !e.writeVarS32(int32_t(uintptr_t(&gWJResumeArgsObj[f]))))
 +      return false;
 +    {
++      // 0 only when there is no object to hand over: the script has none, or
++      // the slot is still Undefined (the frame is before JSOp::Arguments). Any
++      // other slot we cannot read fails the compile: writing 0 there would
++      // bring back the stale frame->argsObj() read.
 +      MDefinition* aoDef =
 +          info.needsArgsObj() ? rp->getOperand(info.argsObjSlot()) : nullptr;
-+      if (aoDef && aoDef->type() == MIRType::Object) {
++      if (!aoDef || aoDef->type() == MIRType::Undefined) {
++        if (!e.writeOp(Op::I64Const) || !e.writeVarS64(0)) return false;
++      } else if (aoDef->type() == MIRType::Object) {
 +        if (!EmitObjPtr(e, be, aoDef) || !e.writeOp(Op::I64ExtendI32U) ||
 +            !e.writeOp(Op::I64Const) ||
 +            !e.writeVarS64(int64_t(uint64_t(TagWord(JSVAL_TYPE_OBJECT)) << 32)) ||
 +            !e.writeOp(Op::I64Or))
 +          return false;
-+      } else if (aoDef && aoDef->type() == MIRType::Value && WJCanGetOp(be, aoDef)) {
-+        if (!GetOp(e, be, aoDef)) return false;  // the runtime checks the tag
-+      } else if (!e.writeOp(Op::I64Const) || !e.writeVarS64(0)) {
++      } else if (aoDef->type() == MIRType::Value && WJCanGetOp(be, aoDef)) {
++        // Undefined or the object; the runtime checks it and crashes on
++        // anything else.
++        if (!GetOp(e, be, aoDef)) return false;
++      } else {
++        js::wasm::gWJBailReason = "resume-argsobj-slot";
 +        return false;
 +      }
 +    }
@@ -113,7 +122,7 @@ index 9ddb278ddf..3eeb30e36f 100644
  // the closure's environment() = gWJCurrentEnv at entry (snapshotted to envLocal).
  // WJH_RESUME passes it so the PBL prologue sets up the frame env from the CORRECT
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index f0837c7cd6..2d727d3e5f 100644
+index f0837c7cd6..21fc70597d 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -126,7 +126,8 @@ extern bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBi
@@ -134,18 +143,22 @@ index f0837c7cd6..2d727d3e5f 100644
  uint32_t gWJResumeEnclosingEnv[kWJMaxResumeFrames] = {0};
  // The RUNTIME callee function for the resumed frame (0 -> canonical fallback).
  // Closures sharing a script differ from script->function(); resuming with the
-@@ -3851,10 +3853,18 @@ static double wjhelpImpl(double kindF, double siteF) {
+@@ -3851,10 +3853,22 @@ static double wjhelpImpl(double kindF, double siteF) {
                  int(rcValid), int(rcIsFun), int(rcInterp), rcScript,
                  int(scriptMatch), gWJRootSP, int(gWJResumeActive));
        }
 +      // The frame's arguments object, if the deopt is after JSOp::Arguments:
 +      // PBL resumes past that op, so it must be handed the object (read here,
 +      // after any GC in an inner frame's resume, from the traced slot).
++      // 0 / Undefined = no object yet; anything but an ArgumentsObject means
++      // the spill is wrong, and resuming without it would read a stale one.
 +      JS::Value argsObjV = JS::Value::fromRawBits(gWJResumeArgsObj[f]);
-+      JS::Rooted<js::ArgumentsObject*> argsObj(
-+          cx, argsObjV.isObject() && argsObjV.toObject().is<js::ArgumentsObject>()
-+                  ? &argsObjV.toObject().as<js::ArgumentsObject>()
-+                  : nullptr);
++      JS::Rooted<js::ArgumentsObject*> argsObj(cx, nullptr);
++      if (argsObjV.isObject() && argsObjV.toObject().is<js::ArgumentsObject>()) {
++        argsObj = &argsObjV.toObject().as<js::ArgumentsObject>();
++      } else if (gWJResumeArgsObj[f] != 0 && !argsObjV.isUndefined()) {
++        MOZ_CRASH("wasm JIT resume: args-object slot holds a non-arguments value");
++      }
        if (!js::pbl::WasmJitResumeViaPBL(cx, script, thisBits, args, nargs, env,
                                          locals, nlocals, gWJResumePc[f], &rbits,
                                          stack, depth, enclosingEnv, keepFrameEnv,
@@ -154,7 +167,7 @@ index f0837c7cd6..2d727d3e5f 100644
          if (getenv("GECKO_WJ_DEPTHDBG")) {
            JSContext* dcx = js::TlsContext.get();
            fprintf(stderr,
-@@ -7819,6 +7829,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7819,6 +7833,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
        WJDbgLogRoot(trc, "resumeval", i, &gWJResumeVals[i]);
        WJTraceValueRoot(trc, &gWJResumeVals[i], "wjresumeval", i);
      }

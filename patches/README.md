@@ -1053,9 +1053,12 @@ freed by a GC.
 
 The deopt spill now stores each frame's arguments object, taken from the
 resume point's args-object slot (`CompileInfo::argsObjSlot()`), as a boxed
-Value in `gWJResumeArgsObj[f]`. It is 0 when the script has no arguments
-object or the deopt is before `JSOp::Arguments` (the slot is not an object
-yet, and the interpreter creates the object itself). The slots are traced
+Value in `gWJResumeArgsObj[f]`. It is 0 only when the script has no arguments
+object or the slot is still Undefined (the deopt is before `JSOp::Arguments`,
+and the interpreter creates the object itself). A slot of any other kind that
+the backend cannot read fails the compile, and a spilled value that is neither
+Undefined nor an `ArgumentsObject` crashes the resume: quietly writing 0 there
+would bring the stale read back. The slots are traced
 while a resume is active. The resume passes the object to the interpreter,
 whose prologue attaches it with `initArgsObj` before anything can GC; from
 then on the frame traces it.
@@ -1067,7 +1070,10 @@ interpreter. Three shapes compare a formal with a captured copy of it and
 count mismatches; each should print 0. Before the patch each printed 500 (in
 two runs): every resumed call read the formals of the first resumed call.
 After it, two runs printed 0 for all three, matching the interpreter
-(`GECKO_NOWASMJIT=1`).
+(`GECKO_NOWASMJIT=1`). Two controls print 0 on both shells: a strict-mode
+shape (its arguments object does not alias the formals) and a shape that
+assigns a formal (no such function was seen to deopt-resume, so the stale
+`SetArg` path is not reached today).
 
 ## Surf integration refresh
 
