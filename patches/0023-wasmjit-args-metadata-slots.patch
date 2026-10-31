@@ -1,0 +1,158 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index 36e59d9087..c32ccb968d 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -5978,10 +5978,11 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+     case MDefinition::Opcode::Rest: {
+       // Rest parameter `function f(a, ...rest)`: build the array from actuals
+       // [numFormals..argc). Stage the kWJMaxArgs actuals (wasm params), numFormals
+-      // (const) and the argc snapshot into scratch, then WJH_REST ->
++      // (const) and the argc snapshot into scratch (bookkeeping from
++      // kWJArgsMetaSlot), then WJH_REST ->
+       // js::jit::InitRestParameter. The function-entry argc>kWJMaxArgs guard
+       // (needsArgcGuard) ensures the body only runs with argc<=kWJMaxArgs, so the
+-      // 8-param staging captures every actual. Wider calls return flag-2 -> PBL.
++      // kWJMaxArgs-param staging captures every actual. Wider calls return flag-2 -> PBL.
+       // 14 real-tool bail sites.
+       if (ins->block()->info().script() != be.info->script()) return false;
+       if (!be.usesArgc) return false;
+@@ -5994,13 +5995,16 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(i * 8))
+           return false;
+       }
+-      if (!GetLocal(e, be.scratchBase) ||                          // scratch[8]=numFormals
++      // Bookkeeping past the actuals (kWJArgsMetaSlot), not over actuals 8-9.
++      if (!GetLocal(e, be.scratchBase) ||                          // [meta+0]=numFormals
+           !e.writeOp(Op::I64Const) || !e.writeVarS64(int64_t(numFormals)) ||
+-          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(8 * 8))
++          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
++          !e.writeVarU32((kWJArgsMetaSlot + 0) * 8))
+         return false;
+-      if (!GetLocal(e, be.scratchBase) ||                          // scratch[9]=argc (raw)
++      if (!GetLocal(e, be.scratchBase) ||                          // [meta+1]=argc (raw)
+           !GetLocal(e, be.actualArgcLocal) || !e.writeOp(Op::I64ExtendI32U) ||
+-          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(9 * 8))
++          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
++          !e.writeVarU32((kWJArgsMetaSlot + 1) * 8))
+         return false;
+       if (!EmitHelperCallResult(e, be, ins, WJH_REST, 0)) return false;
+       return EmitHelperResultAsType(e, be, jit::MIRType::Object);
+@@ -10765,7 +10769,8 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       // >=8 read scratch metadata as garbage; browser NaN) is now handled by the
+       // function-ENTRY argc>kWJMaxArgs guard (see the prologue `needsArgcGuard` flag-2
+       // return): the body only ever runs with actualArgc<=kWJMaxArgs, so this staging
+-      // (8 params -> scratch[0..7], metadata at 8/9/10) is correct with no collision.
++      // (kWJMaxArgs params -> scratch[0..kWJMaxArgs-1], bookkeeping from
++      // kWJArgsMetaSlot) is correct with no collision.
+       // Wider calls return flag-2 "did not run" -> PBL (reliable, no deopt valve).
+       if (WJGETENV("GECKO_WJ_NOARGSOBJ")) return false;
+       if (ins->block()->info().script() != be.info->script()) return false;
+@@ -10795,15 +10800,19 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(i * 8))
+           return false;
+       }
+-      if (!GetLocal(e, be.scratchBase) || !emitEnvRootLoad(8) ||  // scratch[8]=callee
+-          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(8 * 8))
++      // Bookkeeping past the actuals (kWJArgsMetaSlot), not over actuals 8-10.
++      if (!GetLocal(e, be.scratchBase) || !emitEnvRootLoad(8) ||  // [meta+0]=callee
++          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
++          !e.writeVarU32((kWJArgsMetaSlot + 0) * 8))
+         return false;
+-      if (!GetLocal(e, be.scratchBase) || !emitEnvRootLoad(0) ||  // scratch[9]=env
+-          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(9 * 8))
++      if (!GetLocal(e, be.scratchBase) || !emitEnvRootLoad(0) ||  // [meta+1]=env
++          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
++          !e.writeVarU32((kWJArgsMetaSlot + 1) * 8))
+         return false;
+-      if (!GetLocal(e, be.scratchBase) ||                          // scratch[10]=argc (raw)
++      if (!GetLocal(e, be.scratchBase) ||                          // [meta+2]=argc (raw)
+           !GetLocal(e, be.actualArgcLocal) || !e.writeOp(Op::I64ExtendI32U) ||
+-          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(10 * 8))
++          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
++          !e.writeVarU32((kWJArgsMetaSlot + 2) * 8))
+         return false;
+       if (!EmitHelperCallResult(e, be, ins, WJH_NEWARGUMENTS, 0)) return false;
+       return EmitHelperResultAsType(e, be, jit::MIRType::Object);
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index 3dbd12200e..9ddb278ddf 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -173,11 +173,11 @@ enum WJHelpKind : int {
+   WJH_GETFIRSTDOLLARINDEX = 94, // scratch[0]=string(String) -> Int32 (first '$' index or -1); MGetFirstDollarIndex (js::GetFirstDollarIndexRaw); no throw
+   WJH_INSHAPELISTOFFSET = 95,   // scratch[0]=obj(Object),[1]=shapeList(Object) -> Int32 (matched shape's slot offset, or -1 -> deopt); MGuardMultipleShapesToOffset. List is [shape,offset] pairs.
+   WJH_NEWTYPEDARRFROMBUF = 96,  // scratch[0]=buffer(Object),[1]=byteOffset(Value),[2]=length(Value),[3]=template(Object) -> Object; MNewTypedArrayFromArrayBuffer (js::NewTypedArrayWithTemplateAndBuffer). May throw.
+-  WJH_NEWARGUMENTS = 97,        // scratch[0..argc-1]=actuals(Value),[8]=callee(Object),[9]=scopeChain(Object),[10]=argc(Int32) -> Object; MCreateArgumentsObject (ArgumentsObject::createForWasmJit).
++  WJH_NEWARGUMENTS = 97,        // scratch[0..argc-1]=actuals(Value),[kWJArgsMetaSlot+0]=callee(Object),[+1]=scopeChain(Object),[+2]=argc(Int32) -> Object; MCreateArgumentsObject (ArgumentsObject::createForWasmJit).
+   WJH_OBJCLASSTOSTRING = 98,    // scratch[0]=obj(Object) -> String (js::ObjectClassToString "[object X]") or 0-ptr sentinel (interesting @@toStringTag -> emitted code deopts). No throw.
+   WJH_OPTGETITER = 99,          // scratch[0]=value(Value) -> Boolean; MOptimizeGetIteratorCache (js::OptimizeGetIterator: can this value use the fast for-of/spread iterator?). No throw.
+   WJH_OPTSPREADCALL = 100,      // scratch[0]=value(Value) -> Value (the array to spread, or undefined if not optimizable); MOptimizeSpreadCallCache (js::OptimizeSpreadCall). May GC/throw (arguments-spread path).
+-  WJH_REST = 101,               // scratch[0..7]=actuals(boxed), [8]=numFormals, [9]=argc(raw) -> Object; MRest rest-parameter array via js::jit::InitRestParameter (nullptr arrRes -> NewDenseCopiedArray). May GC/OOM.
++  WJH_REST = 101,               // scratch[0..argc-1]=actuals(boxed), [kWJArgsMetaSlot+0]=numFormals, [+1]=argc(raw) -> Object; MRest rest-parameter array via js::jit::InitRestParameter (nullptr arrRes -> NewDenseCopiedArray). May GC/OOM.
+   WJH_GETSPARSEELEM = 102,      // scratch[0]=obj(Object), [1]=index(boxed Int32) -> Value; MCallGetSparseElement via js::GetSparseElementHelper. May GC/throw.
+   WJH_NEWNAMEDLAMBDA = 103,     // scratch[0]=callee(function, boxed) -> Object; MNewNamedLambdaObject via js::NamedLambdaObject::createWithoutEnclosing (enclosing set by a later store). May GC/OOM.
+   WJH_NEWVARENV = 104,          // gWJVarScope=VarScope* (raw) -> VarEnvironmentObject::createWithoutEnclosing (Object); MNewVarEnvironmentObject. May GC/OOM.
+@@ -612,6 +612,13 @@ static constexpr uint32_t kWJThisSlot = 65;
+ static constexpr uint32_t kWJCalleeSlot = 62;
+ static constexpr uint32_t kWJNewTargetSlot = 63;
+ static constexpr uint32_t kWJScratchSlots = 72;
++// Bookkeeping staged next to the actuals for WJH_NEWARGUMENTS / WJH_REST:
++// [+0] callee or numFormals, [+1] environment or argc, [+2] argc. It starts past
++// the last actual (scratch[0..kWJMaxArgs-1]); at slot 8 it overwrote actuals
++// 8-10 of a 9-16 argument call.
++static constexpr uint32_t kWJArgsMetaSlot = kWJMaxArgs;
++static_assert(kWJArgsMetaSlot + 3 <= kWJCalleeSlot,
++              "argument bookkeeping must not reach the construct slots");
+ static constexpr uint32_t kWJResultOff = kWJResultSlot * 8;
+ static constexpr uint32_t kWJThisOff = kWJThisSlot * 8;
+ 
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 7186b07ade..f0837c7cd6 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -5319,16 +5319,20 @@ static double wjhelpImpl(double kindF, double siteF) {
+ 
+   if (kind == js::wasm::WJH_NEWARGUMENTS) {
+     // MCreateArgumentsObject: materialize the `arguments` object from the staged
+-    // actuals. scratch[0..argc-1]=actuals (boxed), [8]=callee, [9]=scopeChain,
+-    // [10]=argc. createForWasmJit roots the actuals + builds via the mapped/unmapped
+-    // create() path (uglify-js etc. are non-strict -> mapped args alias formals via
+-    // the CallObject). argc is bounded by kWJMaxArgs (fns with more already bail).
+-    uint32_t argc = uint32_t(gWJScratch[10]);  // raw (backend stores zero-extended i32)
++    // actuals. scratch[0..argc-1]=actuals (boxed); from kWJArgsMetaSlot: callee,
++    // scopeChain, argc. createForWasmJit roots the actuals + builds via the
++    // mapped/unmapped create() path (uglify-js etc. are non-strict -> mapped args
++    // alias formals via the CallObject). argc is bounded by kWJMaxArgs (fns with more already bail).
++    // raw (the backend stores a zero-extended i32)
++    uint32_t argc = uint32_t(gWJScratch[js::wasm::kWJArgsMetaSlot + 2]);
+     if (argc > js::wasm::kWJMaxArgs) argc = js::wasm::kWJMaxArgs;
+     JS::RootedFunction callee(
+-        cx, &JS::Value::fromRawBits(gWJScratch[8]).toObject().as<JSFunction>());
++        cx, &JS::Value::fromRawBits(gWJScratch[js::wasm::kWJArgsMetaSlot + 0])
++                .toObject()
++                .as<JSFunction>());
+     JS::RootedObject scopeChain(
+-        cx, &JS::Value::fromRawBits(gWJScratch[9]).toObject());
++        cx,
++        &JS::Value::fromRawBits(gWJScratch[js::wasm::kWJArgsMetaSlot + 1]).toObject());
+     JS::Value actuals[js::wasm::kWJMaxArgs];
+     for (uint32_t i = 0; i < argc; i++) {
+       actuals[i] = JS::Value::fromRawBits(gWJScratch[i]);
+@@ -5379,12 +5383,13 @@ static double wjhelpImpl(double kindF, double siteF) {
+   if (kind == js::wasm::WJH_REST) {
+     // MRest: build the rest-parameter array from the staged actuals. The
+     // actuals live in gWJScratch[0..argc-1] (boxed, layout-compatible with
+-    // JS::Value's raw bits), numFormals in [8], argc in [9]. argc<=kWJMaxArgs is
+-    // guaranteed by the function-entry argc guard (needsArgcGuard). Passing a
+-    // null arrRes makes InitRestParameter allocate via NewDenseCopiedArray.
+-    uint32_t argc = uint32_t(gWJScratch[9]);
++    // JS::Value's raw bits); numFormals and argc from kWJArgsMetaSlot.
++    // argc<=kWJMaxArgs is guaranteed by the function-entry argc guard
++    // (needsArgcGuard). Passing a null arrRes makes InitRestParameter allocate
++    // via NewDenseCopiedArray.
++    uint32_t argc = uint32_t(gWJScratch[js::wasm::kWJArgsMetaSlot + 1]);
+     if (argc > js::wasm::kWJMaxArgs) argc = js::wasm::kWJMaxArgs;
+-    uint32_t numFormals = uint32_t(gWJScratch[8]);
++    uint32_t numFormals = uint32_t(gWJScratch[js::wasm::kWJArgsMetaSlot + 0]);
+     uint32_t length = argc > numFormals ? argc - numFormals : 0;
+     JS::Value* rest = reinterpret_cast<JS::Value*>(&gWJScratch[numFormals]);
+     JS::Rooted<js::ArrayObject*> arrRes(cx, nullptr);
