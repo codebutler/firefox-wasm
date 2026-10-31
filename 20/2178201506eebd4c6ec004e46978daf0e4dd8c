@@ -1,0 +1,27 @@
+bench/microbenches/compact-under-jit.js
+  s_2541cc69f91286::t_5b6ea2fed6b6f2 1-37
+bench/microbenches/script-keys.js
+  s_2541cc69f91286::t_c52785a495fbff 1-24
+bench/spidermonkey.js/embed.cpp
+  s_2541cc69f91286::t_4f1068f7fca416 304-320,349
+patches/0026-wasmjit-no-compact-under-jit.patch
+  s_2541cc69f91286::t_bdbe84c457e816 1-306
+patches/README.md
+  s_2541cc69f91286::t_7a2115f7e3ffeb 28,1120-1205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "202178201506eebd4c6ec004e46978daf0e4dd8c",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
