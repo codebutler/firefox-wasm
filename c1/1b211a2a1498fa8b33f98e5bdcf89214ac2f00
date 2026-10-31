@@ -1,0 +1,14 @@
+patches/0019-DIAG-oob-root-guard.patch
+  h_74fbce6cd3ee90 1-285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c11b211a2a1498fa8b33f98e5bdcf89214ac2f00",
+  "prompts": {},
+  "humans": {
+    "h_74fbce6cd3ee90": {
+      "author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
