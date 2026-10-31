@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 23 patches apply in order and reverse back to the pristine selected source
+All 24 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -1188,6 +1188,43 @@ to primitive type` (the environment object among the actuals) and the rest
 cases came out short (for example 11815181 and 23401900). After it, every
 case printed the expected value, matching the interpreter
 (`GECKO_NOWASMJIT=1`).
+
+## 0024-wasmjit-resume-args-object.patch
+
+A JIT deopt resumes the function in the interpreter at the deopt's bytecode
+offset. When that offset is past `JSOp::Arguments`, the interpreter never runs
+the op, so it never attached the frame's arguments object: the resumed
+`BaselineFrame` is fresh (its flags are reset) but its `argsObj_` field is
+whatever the reused stack memory held. In a non-strict function whose
+arguments object aliases its formals, every `JSOp::GetArg` reads
+`frame->argsObj().arg(i)` and every `JSOp::SetArg` writes through it, so the
+resumed code read (and could write) another call's arguments object. That
+object is untraced through this frame, so it may also have been moved or
+freed by a GC.
+
+The deopt spill now stores each frame's arguments object, taken from the
+resume point's args-object slot (`CompileInfo::argsObjSlot()`), as a boxed
+Value in `gWJResumeArgsObj[f]`. It is 0 only when the script has no arguments
+object or the slot is still Undefined (the deopt is before `JSOp::Arguments`,
+and the interpreter creates the object itself). A slot of any other kind that
+the backend cannot read fails the compile, and a spilled value that is neither
+Undefined nor an `ArgumentsObject` crashes the resume: quietly writing 0 there
+would bring the stale read back. The slots are traced
+while a resume is active. The resume passes the object to the interpreter,
+whose prologue attaches it with `initArgsObj` before anything can GC; from
+then on the frame traces it.
+
+`bench/microbenches/resume-args.js` reproduces it. Each call makes a new
+lambda, so the JIT's `GuardSpecificFunction` deopts on every call until its
+valve recompiles the function after 500 deopts; those 500 calls resume in the
+interpreter. Three shapes compare a formal with a captured copy of it and
+count mismatches; each should print 0. Before the patch each printed 500 (in
+two runs): every resumed call read the formals of the first resumed call.
+After it, two runs printed 0 for all three, matching the interpreter
+(`GECKO_NOWASMJIT=1`). Two controls print 0 on both shells: a strict-mode
+shape (its arguments object does not alias the formals) and a shape that
+assigns a formal (no such function was seen to deopt-resume, so the stale
+`SetArg` path is not reached today).
 
 ## Surf integration refresh
 
