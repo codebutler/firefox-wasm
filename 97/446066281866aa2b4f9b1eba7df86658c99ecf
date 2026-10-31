@@ -1,0 +1,19 @@
+patches/0099-DIAG-stale-read.patch
+  s_d26ea5b35e31f0::t_a183ac0c2548ca 1-599
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "97446066281866aa2b4f9b1eba7df86658c99ecf",
+  "prompts": {},
+  "sessions": {
+    "s_d26ea5b35e31f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "974ffa7c-08d4-4ae2-8017-fc1a4227e8f4",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
