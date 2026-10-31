@@ -135,10 +135,10 @@ index 1c10d73235..36a502253c 100644
  // cleared). Called when an invalidating fuse pops: compiled code may have
  // baked a fuse-guarded elision (e.g. the array-destructuring iterator
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index a35b76d4a2..2cb3675dfb 100644
+index a35b76d4a2..3b4f351a9d 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -1538,17 +1538,18 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+@@ -1538,17 +1538,19 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
        // rewritten -> resume reads a moved-away script -> script->function() garbage -> OOB;
        // crypto/pako deopt-resume-under-compaction). Instead intern it into the traced+
        // relocated gWJScriptPool and LOAD the slot at runtime so the CURRENT (relocated)
@@ -157,7 +157,8 @@ index a35b76d4a2..2cb3675dfb 100644
 -                      int32_t(uintptr_t(info.script()))))
 -          return false;
 +      if (!scrSlot) {
-+        js::wasm::gWJBailReason = "intern-script-full";
++        js::wasm::gWJBailReason =
++            noScriptPool ? "script-pool-off" : "intern-script-full";
 +        return false;
        }
 +      if (!storeI32FromSlot(uintptr_t(&gWJResumeScriptPtr[f]), scrSlot)) return false;
