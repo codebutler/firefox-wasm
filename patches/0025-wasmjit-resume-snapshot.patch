@@ -1,0 +1,265 @@
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 21fc70597d..57ae5767ab 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -150,6 +150,32 @@ uint32_t gWJResumeStackDepth[kWJMaxResumeFrames] = {0};
+ uint32_t gWJResumeScriptPtr[kWJMaxResumeFrames] = {0};
+ uint32_t gWJResumeEnvPtr[kWJMaxResumeFrames] = {0};
+ uint64_t gWJResumeArgsObj[kWJMaxResumeFrames] = {0};
++// A deopt resume's own copy of the spilled state, taken at WJH_RESUME entry
++// before anything can allocate. The frame loop reads only this copy: the
++// gWJResume* globals are overwritten by any nested resume (an inner frame's PBL
++// run can deopt other JIT code), and their object/script fields are raw
++// pointers a GC does not update. Every active copy is traced (WJTraceRoots
++// walks gWJResumeSnapTop), so a GC between the spill and a frame's resume
++// leaves the copy current. One buffer per nesting depth, reused.
++struct WJResumeSnap {
++  WJResumeSnap* prev = nullptr;
++  uint32_t nframes = 0;
++  uint32_t count = 0;  // vals in use
++  uint32_t pc[kWJMaxResumeFrames];
++  uint32_t stackDepth[kWJMaxResumeFrames];
++  uint32_t nargs[kWJMaxResumeFrames];
++  uint32_t nlocals[kWJMaxResumeFrames];
++  uint32_t valsOff[kWJMaxResumeFrames];
++  JSScript* script[kWJMaxResumeFrames];
++  JSObject* env[kWJMaxResumeFrames];
++  JSObject* enclosingEnv[kWJMaxResumeFrames];
++  JSObject* calleeFn[kWJMaxResumeFrames];
++  uint64_t argsObj[kWJMaxResumeFrames];
++  uint64_t vals[1024];
++};
++static WJResumeSnap* gWJResumeSnapTop = nullptr;
++static std::vector<WJResumeSnap*> gWJResumeSnapPool;
++static uint32_t gWJResumeSnapDepth = 0;
+ uint32_t gWJResumeEnclosingEnv[kWJMaxResumeFrames] = {0};
+ // The RUNTIME callee function for the resumed frame (0 -> canonical fallback).
+ // Closures sharing a script differ from script->function(); resuming with the
+@@ -3078,6 +3104,15 @@ static void WJCheckCallValues(JSContext* cx, uint32_t site, JS::HandleValue this
+   report("callee", 0, callee);
+   for (size_t i = 0; i < argv.length(); i++) report("arg", int(i), argv[i]);
+ }
++// GECKO_WJ_RESUMEGC=1 (test only): run a minor GC inside each deopt resume, once
++// at entry and again before each frame's reads, where one can happen in
++// production (ensureHasJitScript, the PBL run of an inner frame). A raw pointer
++// read after it shows up as a crash or a wrong result instead of rarely.
++static void WJResumeInjectGC(JSContext* cx) {
++  static int on = getenv("GECKO_WJ_RESUMEGC") ? atoi(getenv("GECKO_WJ_RESUMEGC")) : 0;
++  if (on == 1) cx->runtime()->gc.minorGC(JS::GCReason::API);
++}
++
+ static double wjhelpImpl(double kindF, double siteF) {
+   int kind = int(kindF);
+   // DEBUG (GECKO_WJ_VALIDATEHELPER): validate GC-tagged Values staged in the
+@@ -3494,6 +3529,39 @@ static double wjhelpImpl(double kindF, double siteF) {
+       if (gWJResumeValsCount > 1024) gWJResumeValsCount = 1024;
+       gWJResumeActive = true;
+     }
++    // Snapshot (see WJResumeSnap). Nothing above allocates, so the raw pointers
++    // in the globals are still current here.
++    if (gWJResumeSnapDepth == gWJResumeSnapPool.size()) {
++      gWJResumeSnapPool.push_back(new WJResumeSnap());
++    }
++    WJResumeSnap* snap = gWJResumeSnapPool[gWJResumeSnapDepth++];
++    {
++      uint32_t nf = gWJResumeNFrames;
++      if (nf > js::wasm::kWJMaxResumeFrames) nf = js::wasm::kWJMaxResumeFrames;
++      snap->nframes = nf;
++      snap->count = gWJResumeValsCount;
++      memcpy(snap->vals, gWJResumeVals, size_t(snap->count) * 8);
++      for (uint32_t f = 0; f < nf; f++) {
++        snap->pc[f] = gWJResumePc[f];
++        snap->stackDepth[f] = gWJResumeStackDepth[f];
++        snap->nargs[f] = gWJResumeNArgs[f];
++        snap->nlocals[f] = gWJResumeNLocals[f];
++        snap->valsOff[f] = gWJResumeValsOff[f];
++        snap->script[f] = reinterpret_cast<JSScript*>(uintptr_t(gWJResumeScriptPtr[f]));
++        snap->env[f] = reinterpret_cast<JSObject*>(uintptr_t(gWJResumeEnvPtr[f]));
++        snap->enclosingEnv[f] =
++            reinterpret_cast<JSObject*>(uintptr_t(gWJResumeEnclosingEnv[f]));
++        snap->calleeFn[f] = reinterpret_cast<JSObject*>(uintptr_t(gWJResumeCalleeFn[f]));
++        snap->argsObj[f] = gWJResumeArgsObj[f];
++      }
++      snap->prev = gWJResumeSnapTop;
++      gWJResumeSnapTop = snap;
++    }
++    auto snapGuard = mozilla::MakeScopeExit([snap] {
++      gWJResumeSnapTop = snap->prev;
++      gWJResumeSnapDepth--;
++    });
++    WJResumeInjectGC(cx);
+     auto resumeGuard = mozilla::MakeScopeExit([] { gWJResumeActive = false; });
+     // OSR cheap-resume (GECKO_WJ_OSR): a single-frame deopt landing AT a compiled
+     // loop head re-enters the JIT there instead of interpreting the rest of the fn
+@@ -3591,8 +3659,9 @@ static double wjhelpImpl(double kindF, double siteF) {
+     uint64_t rbits = JS::UndefinedValue().asRawBits();
+     bool haveInner = false;
+     for (uint32_t f = 0; f < nframes; f++) {
++      WJResumeInjectGC(cx);
+       RootedScript script(
+-          cx, reinterpret_cast<JSScript*>(uintptr_t(gWJResumeScriptPtr[f])));
++          cx, snap->script[f]);
+       if (script && !script->hasJitScript()) {
+         // A GC (esp. gczeal) can DISCARD this script's JitScript between the deopt
+         // spill and this resume. PBL needs the JitScript (it interprets the Baseline
+@@ -3614,7 +3683,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+                   (void*)script, script ? script->hasJitScript() : -1);
+         return 1.0;
+       }
+-      JSObject* envObj = reinterpret_cast<JSObject*>(uintptr_t(gWJResumeEnvPtr[f]));
++      JSObject* envObj = snap->env[f];
+       static int forceFuncEnv = getenv("GECKO_WJ_FORCEFUNCENV") ? 1 : 0;
+       if (forceFuncEnv && script->function()) envObj = script->function()->environment();
+       if (!envObj && script->function()) envObj = script->function()->environment();
+@@ -3622,7 +3691,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+       // Correct enclosing env for the frame's PBL prologue (see header). 0 ->
+       // PBL falls back to the canonical func->environment().
+       RootedObject enclosingEnv(
+-          cx, reinterpret_cast<JSObject*>(uintptr_t(gWJResumeEnclosingEnv[f])));
++          cx, snap->enclosingEnv[f]);
+       // keepFrameEnv: reuse the spilled gWJResumeEnvPtr (the RP environmentChain
+       // operand) as the resumed frame's env, skipping the Init path that rebuilds
+       // ONLY the function-level env. The spilled env is the TRUE current env chain at
+@@ -3634,11 +3703,11 @@ static double wjhelpImpl(double kindF, double siteF) {
+       // instead of the block env). Now that the spill is EmitObjPtr(RP env operand)
+       // (reliable), keep it whenever present.
+       constexpr int noKeepEnv = 0;  // keep-frame-env resume fix is permanent
+-      bool keepFrameEnv = !noKeepEnv && (gWJResumeEnvPtr[f] != 0);
+-      uint32_t nargs = gWJResumeNArgs[f];
+-      uint32_t nlocals = gWJResumeNLocals[f];
+-      uint32_t depth = gWJResumeStackDepth[f];
+-      uint32_t off = gWJResumeValsOff[f];
++      bool keepFrameEnv = !noKeepEnv && (snap->env[f] != nullptr);
++      uint32_t nargs = snap->nargs[f];
++      uint32_t nlocals = snap->nlocals[f];
++      uint32_t depth = snap->stackDepth[f];
++      uint32_t off = snap->valsOff[f];
+       uint32_t total = 1 + nargs + nlocals + depth;
+       // Return-threading: an inlined CALLER frame (f>0) was reconstructed to resume
+       // AFTER its call (pc advanced, stack = values-below-the-call-inputs + a result
+@@ -3647,16 +3716,16 @@ static double wjhelpImpl(double kindF, double siteF) {
+       // post-call WITHOUT re-executing the (possibly side-effecting) callee. This is
+       // the real-bailout behavior; the old "re-execute the call" path double-ran
+       // side-effecting inlined callees (deltablue incrementalAdd corruption).
+-      if (f > 0 && total >= 1) gWJResumeVals[off + total - 1] = rbits;
++      if (f > 0 && total >= 1) snap->vals[off + total - 1] = rbits;
+       (void)haveInner;
+-      // gWJResumeVals[off..] is ALREADY a rooted GC region (gWJResumeActive, count set
+-      // above) and a JS::Value is bit-identical to its uint64_t slot, so view it
++      // snap->vals[off..] is ALREADY a rooted GC region (every active snapshot is
++      // traced) and a JS::Value is bit-identical to its uint64_t slot, so view it
+       // DIRECTLY instead of copying every value into a per-resume RootedValueVector
+       // (a heap alloc + a copy of `total` boxed values on EVERY deopt -- cdjs storms
+       // 3.3M deopts/iter). PBL copies args/locals/stack onto its own frame at setup, so
+       // later mutations of gWJResumeVals don't alias the running frame.
+       const JS::Value* vals =
+-          reinterpret_cast<const JS::Value*>(&gWJResumeVals[off]);
++          reinterpret_cast<const JS::Value*>(&snap->vals[off]);
+       static int rchk = getenv("GECKO_WJ_RESUMECHK") ? 1 : 0;
+       if (rchk) {
+         for (uint32_t i = 0; i < total; i++) {
+@@ -3716,8 +3785,8 @@ static double wjhelpImpl(double kindF, double siteF) {
+         fprintf(stderr,
+                 "[wb-resume] frame %u/%u %s:%u pc=%u(%s) nargs=%u nlocals=%u depth=%u this=%s",
+                 f, nframes, script->filename() ? script->filename() : "?",
+-                uint32_t(script->lineno()), gWJResumePc[f],
+-                js::CodeName(JSOp(*(script->code() + gWJResumePc[f]))),
++                uint32_t(script->lineno()), snap->pc[f],
++                js::CodeName(JSOp(*(script->code() + snap->pc[f]))),
+                 nargs, nlocals, depth,
+                 vals[0].isObject() ? (vals[0].toObject().is<JSFunction>() ? "fn" : "obj")
+                                    : (vals[0].isUndefined() ? "undef" : "prim"));
+@@ -3756,7 +3825,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+         // resumed op sequence is visible (no disassembler native in the embed).
+         static int rdisas = getenv("GECKO_WJ_RESUMEDISAS") ? 1 : 0;
+         if (rdisas) {
+-          jsbytecode* p = script->code() + gWJResumePc[f];
++          jsbytecode* p = script->code() + snap->pc[f];
+           jsbytecode* endp = script->codeEnd();
+           fprintf(stderr, "\n  [ops]");
+           for (int k = 0; k < 25 && p < endp; k++) {
+@@ -3812,9 +3881,9 @@ static double wjhelpImpl(double kindF, double siteF) {
+       // WJH_RESUME for an in-try exception deopt.
+       bool inErr = (resumeErr != 0) && (f == 0);
+       JSFunction* runtimeCallee =
+-          reinterpret_cast<JSFunction*>(uintptr_t(gWJResumeCalleeFn[f]));
++          (snap->calleeFn[f] ? &snap->calleeFn[f]->as<JSFunction>() : nullptr);
+       if (getenv("GECKO_WJ_RESUMECALLEEDBG")) {
+-        JSScript* sp = reinterpret_cast<JSScript*>(uintptr_t(gWJResumeScriptPtr[f]));
++        JSScript* sp = snap->script[f];
+         bool scrValid = sp && js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(sp));
+         JSFunction* rc = runtimeCallee;
+         bool rcValid = rc && js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(rc));
+@@ -3835,18 +3904,18 @@ static double wjhelpImpl(double kindF, double siteF) {
+           fprintf(stderr,
+                   "[wj-rc-MISMATCH] f=%u nframes=%u resume=%s:%u callee=%s:%u "
+                   "resumeNargs=%u calleeNargs=%u pc=%u rootSP=%u\n",
+-                  f, gWJResumeNFrames,
++                  f, snap->nframes,
+                   script->filename() ? script->filename() : "?",
+                   unsigned(script->lineno()),
+                   rbs->filename() ? rbs->filename() : "?", unsigned(rbs->lineno()),
+                   unsigned(script->function() ? script->function()->nargs() : 999),
+-                  unsigned(rc->nargs()), gWJResumePc[f], gWJRootSP);
++                  unsigned(rc->nargs()), snap->pc[f], gWJRootSP);
+         }
+         fprintf(stderr,
+                 "[wj-resumecallee] f=%u calleeFn=%08x scriptPtr=%08x scrValid=%d "
+                 "paramScript=%p paramScrValid=%d rcValid=%d rcIsFun=%d rcInterp=%d "
+                 "rcScript=%p SCRIPT_MATCH=%d rootSP=%u resumeActive=%d\n",
+-                f, (unsigned)gWJResumeCalleeFn[f], (unsigned)gWJResumeScriptPtr[f],
++                f, (unsigned)uintptr_t(snap->calleeFn[f]), (unsigned)uintptr_t(snap->script[f]),
+                 int(scrValid), (void*)script.get(),
+                 int(script.get() && js::gc::IsCellPointerValid(
+                                         reinterpret_cast<js::gc::Cell*>(script.get()))),
+@@ -3858,15 +3927,15 @@ static double wjhelpImpl(double kindF, double siteF) {
+       // after any GC in an inner frame's resume, from the traced slot).
+       // 0 / Undefined = no object yet; anything but an ArgumentsObject means
+       // the spill is wrong, and resuming without it would read a stale one.
+-      JS::Value argsObjV = JS::Value::fromRawBits(gWJResumeArgsObj[f]);
++      JS::Value argsObjV = JS::Value::fromRawBits(snap->argsObj[f]);
+       JS::Rooted<js::ArgumentsObject*> argsObj(cx, nullptr);
+       if (argsObjV.isObject() && argsObjV.toObject().is<js::ArgumentsObject>()) {
+         argsObj = &argsObjV.toObject().as<js::ArgumentsObject>();
+-      } else if (gWJResumeArgsObj[f] != 0 && !argsObjV.isUndefined()) {
++      } else if (snap->argsObj[f] != 0 && !argsObjV.isUndefined()) {
+         MOZ_CRASH("wasm JIT resume: args-object slot holds a non-arguments value");
+       }
+       if (!js::pbl::WasmJitResumeViaPBL(cx, script, thisBits, args, nargs, env,
+-                                        locals, nlocals, gWJResumePc[f], &rbits,
++                                        locals, nlocals, snap->pc[f], &rbits,
+                                         stack, depth, enclosingEnv, keepFrameEnv,
+                                         inErr, runtimeCallee, argsObj)) {
+         if (getenv("GECKO_WJ_DEPTHDBG")) {
+@@ -3874,7 +3943,7 @@ static double wjhelpImpl(double kindF, double siteF) {
+           fprintf(stderr,
+                   "[wj-resume-false] f=%u %s:%u pc=%u callee=%p pending=%d\n", f,
+                   script->filename() ? script->filename() : "?",
+-                  unsigned(script->lineno()), gWJResumePc[f],
++                  unsigned(script->lineno()), snap->pc[f],
+                   (void*)runtimeCallee,
+                   dcx ? int(JS_IsExceptionPending(dcx)) : -1);
+         }
+@@ -7844,6 +7913,22 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+     // (traced) before any allocation, and stale slots from earlier deopts may
+     // hold dangling pointers (tracing them crashed the object-args repro).
+   }
++  // Every active resume's own copy (nested resumes each have one).
++  for (WJResumeSnap* rs = gWJResumeSnapTop; rs; rs = rs->prev) {
++    uint32_t rc = rs->count < 1024 ? rs->count : 1024;
++    for (uint32_t i = 0; i < rc; i++) {
++      WJTraceValueRoot(trc, &rs->vals[i], "wjresumesnapval", i);
++    }
++    for (uint32_t f = 0; f < rs->nframes; f++) {
++      if (rs->script[f]) js::TraceRoot(trc, &rs->script[f], "wjresumesnapscript");
++      if (rs->env[f]) js::TraceRoot(trc, &rs->env[f], "wjresumesnapenv");
++      if (rs->enclosingEnv[f])
++        js::TraceRoot(trc, &rs->enclosingEnv[f], "wjresumesnapencl");
++      if (rs->calleeFn[f]) js::TraceRoot(trc, &rs->calleeFn[f], "wjresumesnapcallee");
++      if (rs->argsObj[f])
++        WJTraceValueRoot(trc, &rs->argsObj[f], "wjresumesnapargsobj", f);
++    }
++  }
+   if (rootLogM && trc->kind() != JS::TracerKind::Marking)
+     fprintf(stderr, "[wjrootlog] === WJTraceRoots DONE ===\n");
+ }
