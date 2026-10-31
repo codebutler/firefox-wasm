@@ -301,6 +301,23 @@ static bool Quit(JSContext* cx, unsigned argc, JS::Value* vp) {
 }
 
 // inIon()/inJit()/inWasmJit(): true while the caller is running wasm-JIT'd code.
+// gc() / gc("shrinking"): a full non-incremental GC, shrinking (compacting)
+// when asked. Called from compiled code it runs under live wasm-JIT frames.
+static bool GcImpl(JSContext* cx, unsigned argc, JS::Value* vp) {
+  JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
+  bool shrink = false;
+  if (args.length() > 0 && args[0].isString()) {
+    bool match = false;
+    if (!JS_StringEqualsLiteral(cx, args[0].toString(), "shrinking", &match)) return false;
+    shrink = match;
+  }
+  JS::PrepareForFullGC(cx);
+  JS::NonIncrementalGC(cx, shrink ? JS::GCOptions::Shrink : JS::GCOptions::Normal,
+                       JS::GCReason::API);
+  args.rval().setUndefined();
+  return true;
+}
+
 static bool InWasmJit(JSContext* cx, unsigned argc, JS::Value* vp) {
   JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
   args.rval().setBoolean(js::wasm::WasmJitInWasm());
@@ -329,6 +346,7 @@ static bool DefineShellGlobal(JSContext* cx, JS::HandleObject global) {
     return false;
   return JS_DefineFunction(cx, global, "wjTraceDump", WjTraceDump, 0, 0) &&
          JS_DefineFunction(cx, global, "print", PrintImpl, 1, 0) &&
+         JS_DefineFunction(cx, global, "gc", GcImpl, 1, 0) &&
          JS_DefineFunction(cx, global, "readWasm", ReadWasmImpl, 1, 0) &&
          JS_DefineFunction(cx, global, "assertEq", AssertEq, 2, 0) &&
          JS_DefineFunction(cx, global, "load", Load, 1, 0) &&
@@ -414,7 +432,14 @@ int main(int argc, char** argv) {
   if (!js::UseInternalJobQueues(cx)) { fprintf(stderr, "[embed] UseInternalJobQueues failed\n"); return 1; }
   if (!JS::InitSelfHostedCode(cx)) { fprintf(stderr, "[embed] InitSelfHostedCode failed\n"); return 1; }
   JS_SetGCParameter(cx, JSGC_MAX_BYTES, 0xffffffff);
-  JS_SetNativeStackQuota(cx, 8 * 1024 * 1024);
+  // GECKO_NATIVE_QUOTAKB=<kb> sizes SpiderMonkey's recursion quota (the
+  // linear-memory C stack it measures); default 8 MB.
+  {
+    size_t quota = 8 * 1024 * 1024;
+    if (const char* q = getenv("GECKO_NATIVE_QUOTAKB"); q && *q)
+      quota = size_t(strtoul(q, nullptr, 10)) * 1024;
+    JS_SetNativeStackQuota(cx, quota);
+  }
   // Diagnostic: disable generational GC (nursery) entirely -> all objects are
   // tenured and never moved by a minor GC. Used to confirm whether a mid-render
   // minor GC moving a nursery object held stale in a wasm local is the raytrace

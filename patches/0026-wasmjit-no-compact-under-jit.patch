@@ -1,0 +1,361 @@
+diff --git a/js/src/gc/Compacting.cpp b/js/src/gc/Compacting.cpp
+index c29a041fe8..84a64067cf 100644
+--- a/js/src/gc/Compacting.cpp
++++ b/js/src/gc/Compacting.cpp
+@@ -29,6 +29,14 @@
+ #include "gc/TraceMethods-inl.h"
+ #include "vm/GeckoProfiler-inl.h"
+ 
++
++#if defined(__EMSCRIPTEN__)
++#  include <stdio.h>
++#  include <stdlib.h>
++namespace js::wasm {
++extern int gWJExecDepth;  // wasm/WasmJitRuntime.cpp
++}
++#endif
+ using namespace js;
+ using namespace js::gc;
+ 
+@@ -108,6 +116,17 @@ IncrementalProgress GCRuntime::compactPhase(SliceBudget& sliceBudget,
+     } while (!relocatedZones.isEmpty());
+   }
+ 
++#if defined(__EMSCRIPTEN__)
++  // GECKO_WJ_COMPACTDBG: how much each compacting slice moved, and whether
++  // wasm-JIT frames were live when it did (patch 0026 keeps them from being).
++  static const bool sCompactDbg = getenv("GECKO_WJ_COMPACTDBG") != nullptr;
++  if (sCompactDbg) {
++    uint32_t arenas = 0;
++    for (Arena* a = relocatedArenas; a; a = a->next) arenas++;
++    fprintf(stderr, "[wj-compact] relocated arenas=%u jitLive=%d\n",
++            unsigned(arenas), int(js::wasm::gWJExecDepth > 0));
++  }
++#endif
+   clearRelocatedArenas(relocatedArenas);
+ 
+ #ifdef DEBUG
+diff --git a/js/src/gc/GC.cpp b/js/src/gc/GC.cpp
+index 1db05b2327..534c2c5f00 100644
+--- a/js/src/gc/GC.cpp
++++ b/js/src/gc/GC.cpp
+@@ -263,6 +263,9 @@
+ #include "vm/Logging.h"
+ #include "vm/PropMap.h"
+ #include "vm/Realm.h"
++#if defined(__EMSCRIPTEN__)
++#  include "wasm/WasmJit.h"  // WasmJitFramesLive, WasmJitSweepScriptTables (0026)
++#endif
+ #include "vm/Shape.h"
+ #include "vm/StringType.h"
+ #include "vm/SymbolType.h"
+@@ -1887,6 +1890,12 @@ void GCRuntime::callWeakPointerZonesCallbacks(JSTracer* trc) const {
+   for (auto const& p : updateWeakPointerZonesCallbacks.ref()) {
+     p.op(trc, p.data);
+   }
++#if defined(__EMSCRIPTEN__)
++  // The wasm JIT's script-keyed tables belong to the main runtime (patch 0026).
++  if (!rt->parentRuntime) {
++    js::wasm::WasmJitSweepScriptTables(trc);
++  }
++#endif
+ }
+ 
+ bool GCRuntime::addWeakPointerCompartmentCallback(
+@@ -2042,6 +2051,14 @@ bool GCRuntime::isCompactingGCEnabled() const {
+     if (noCompact) fprintf(stderr, "[gc] compacting GC DISABLED via GECKO_NO_COMPACT\n");
+   }
+   if (noCompact) return false;
++#if defined(__EMSCRIPTEN__)
++  // Wasm-JIT frames keep values in wasm locals across GC-capable calls, and
++  // the GC cannot update those (patch 0026): a GC that would have compacted
++  // still collects, but nothing moves.
++  if (js::wasm::WasmJitFramesLive(rt)) {
++    return false;
++  }
++#endif
+   return compactingEnabled &&
+          rt->mainContextFromOwnThread()->compactingDisabledCount == 0;
+ }
+@@ -4581,6 +4598,27 @@ void GCRuntime::incrementalSlice(SliceBudget& budget, JS::GCReason reason,
+       [[fallthrough]];
+ 
+     case State::Compact:
++#if defined(__EMSCRIPTEN__)
++      // shouldCompact() ran when the GC began. An incremental GC can reach
++      // this slice from an allocation or interrupt under live wasm-JIT frames,
++      // so check again here and at every later compacting slice (patch 0026).
++      // Before compaction starts, skip it; once started, compact no more
++      // zones (as abortGC does). Zones already compacted ran in slices with no
++      // JIT frames live, and their pointers were updated before those slices
++      // returned.
++      if (isCompacting && !isCompactingGCEnabled()) {
++        static const bool sCompactDbg = getenv("GECKO_WJ_COMPACTDBG") != nullptr;
++        if (sCompactDbg) {
++          fprintf(stderr, "[wj-compact] %s: wasm-JIT frames live\n",
++                  startedCompacting ? "stopped" : "skipped");
++        }
++        if (startedCompacting) {
++          zonesToMaybeCompact.ref().clear();
++        } else {
++          isCompacting = false;
++        }
++      }
++#endif
+       if (isCompacting) {
+         {
+           AutoGCSession commitSession(this, JS::HeapState::Idle);
+diff --git a/js/src/wasm/WasmJit.h b/js/src/wasm/WasmJit.h
+index 1c10d73235..36a502253c 100644
+--- a/js/src/wasm/WasmJit.h
++++ b/js/src/wasm/WasmJit.h
+@@ -26,6 +26,8 @@
+ 
+ #include "js/TypeDecls.h"  // JSScript / JSObject / JS::Value (correct visibility)
+ 
++class JS_PUBLIC_API JSTracer;
++
+ namespace js {
+ namespace wasm {
+ 
+@@ -59,6 +61,15 @@ extern int WasmJitRunCall(JSScript* script, uint64_t thisBits,
+ // (`do { f(); } while (!inIon())`) can detect that `f` got JIT-compiled.
+ extern bool WasmJitInWasm();
+ 
++// True while wasm-JIT frames are live on the given runtime (only the main
++// runtime runs the JIT). The GC defers compaction while it holds, so values a
++// frame keeps in wasm locals across a GC-capable call do not move (patch 0026).
++extern bool WasmJitFramesLive(JSRuntime* rt);
++
++// The GC's weak pass over the JIT's tables keyed by a raw JSScript*: drops
++// entries for dead scripts and re-keys moved ones (patch 0026).
++extern void WasmJitSweepScriptTables(JSTracer* trc);
++
+ // Discard ALL installed wasm-JIT code (entries reset to cold, call ICs
+ // cleared). Called when an invalidating fuse pops: compiled code may have
+ // baked a fuse-guarded elision (e.g. the array-destructuring iterator
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index a35b76d4a2..3b4f351a9d 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -1538,17 +1538,19 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+       // rewritten -> resume reads a moved-away script -> script->function() garbage -> OOB;
+       // crypto/pako deopt-resume-under-compaction). Instead intern it into the traced+
+       // relocated gWJScriptPool and LOAD the slot at runtime so the CURRENT (relocated)
+-      // script is spilled. GECKO_WJ_NOSCRIPTPOOL reverts to baking.
++      // script is spilled. When the script cannot be interned (the pool is
++      // full, or GECKO_WJ_NOSCRIPTPOOL), the function does not compile, as with
++      // the const and shape pools: a baked pointer goes stale after ANY
++      // compaction, frame live or not (patch 0026).
+       static int noScriptPool = WJGETENV("GECKO_WJ_NOSCRIPTPOOL") ? 1 : 0;
+       uintptr_t scrSlot =
+           noScriptPool ? 0 : js::wasm::WJInternScript(uintptr_t(info.script()));
+-      if (scrSlot) {
+-        if (!storeI32FromSlot(uintptr_t(&gWJResumeScriptPtr[f]), scrSlot)) return false;
+-      } else {
+-        if (!storeI32(uintptr_t(&gWJResumeScriptPtr[f]),
+-                      int32_t(uintptr_t(info.script()))))
+-          return false;
++      if (!scrSlot) {
++        js::wasm::gWJBailReason =
++            noScriptPool ? "script-pool-off" : "intern-script-full";
++        return false;
+       }
++      if (!storeI32FromSlot(uintptr_t(&gWJResumeScriptPtr[f]), scrSlot)) return false;
+     }
+     if (!storeI32(uintptr_t(&gWJResumeNArgs[f]), int32_t(nargs))) return false;
+     if (!storeI32(uintptr_t(&gWJResumeNLocals[f]), int32_t(nlocals))) return false;
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 57ae5767ab..1951cbcb07 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -692,6 +692,12 @@ static void WJAliasInstall(WJEntry& e, WJFamily* f) {
+ 
+ // Per-script compile state. Keyed by JSScript*; entries persist for the process.
+ static std::unordered_map<JSScript*, WJEntry>* gEntries = nullptr;
++// RunCall's direct-mapped cache over gEntries (see WasmJitRunCall). File scope
++// so the GC's weak pass (WasmJitSweepScriptTables) can clear it.
++static const uint32_t kLCBits = 13;
++static const uint32_t kLCMask = (1u << kLCBits) - 1;
++static JSScript* sLScript[1u << kLCBits] = {};
++static WJEntry* sLEntry[1u << kLCBits] = {};
+ 
+ // DEFERRED-COMPILE queue: scripts that crossed the warmup threshold but whose
+ // synchronous compile was deferred OFF the current (load) critical path. Drained by
+@@ -702,18 +708,20 @@ static std::vector<JSScript*> gWJDeferQueue;
+ // inline (the drain reuses the same observe->compile logic without re-deferring).
+ static bool gWJDrainingNow = false;
+ 
++// Direct-mapped cache: a 1-entry cache thrashed on uBlock's alternating callees ->
++// the operator[] emplace showed ~0.9% in the profile. Element addresses are stable
++// across rehashes, so caching WJEntry* is safe. 8192-way (was 512): typescript's
++// working set is ~2500 scripts (1409 compiled + ~1017 cold), which 5x-oversubscribed
++// a 512-slot cache -> collision thrash on hot alternating callees; 8192 slots holds
++// the set at ~0.3 load (2026-07-11 profile follow-up; 128KB, negligible).
++// File scope so the GC's weak pass (WasmJitSweepScriptTables) can clear it.
++static const uint32_t kECBits = 13;
++static const uint32_t kECMask = (1u << kECBits) - 1;
++static JSScript* sECScript[1u << kECBits] = {};
++static WJEntry* sECEntry[1u << kECBits] = {};
++
+ static WJEntry& EntryFor(JSScript* script) {
+   if (!gEntries) gEntries = new std::unordered_map<JSScript*, WJEntry>();
+-  // Direct-mapped cache: a 1-entry cache thrashed on uBlock's alternating callees ->
+-  // the operator[] emplace showed ~0.9% in the profile. Element addresses are stable
+-  // across rehashes, so caching WJEntry* is safe. 8192-way (was 512): typescript's
+-  // working set is ~2500 scripts (1409 compiled + ~1017 cold), which 5x-oversubscribed
+-  // a 512-slot cache -> collision thrash on hot alternating callees; 8192 slots holds
+-  // the set at ~0.3 load (2026-07-11 profile follow-up; 128KB, negligible).
+-  static const uint32_t kECBits = 13;
+-  static const uint32_t kECMask = (1u << kECBits) - 1;
+-  static JSScript* sECScript[1u << kECBits] = {};
+-  static WJEntry* sECEntry[1u << kECBits] = {};
+   uint32_t h = uint32_t(uintptr_t(script) >> 3) & kECMask;
+   if (sECScript[h] == script && sECEntry[h]) return *sECEntry[h];
+   WJEntry& e = (*gEntries)[script];
+@@ -990,6 +998,21 @@ bool js::wasm::WasmJitInWasm() {
+   return js::wasm::gWJExecDepth > 0 && WJThreadAllowed();
+ }
+ 
++// Compaction must not run while JIT code is on the stack (patch 0026): a value
++// a frame has read into a wasm local and uses again after a GC-capable helper
++// call is a raw pointer the GC neither sees nor updates. (Baked constants are
++// not covered: they outlive the frame, so every GC-thing constant must load
++// from a traced pool, and a compile that cannot intern one fails.) gWJExecDepth counts every way into JIT code
++// (WasmJitRunCall and the OSR re-entry in WJH_RESUME; every other call into a
++// JIT function comes from a helper that JIT code called, so an outer frame is
++// already counted). The JIT runs only on the main runtime, so a worker
++// runtime's GC never needs to wait.
++bool js::wasm::WasmJitFramesLive(JSRuntime* rt) {
++  // GECKO_WJ_COMPACTUNDERJIT=1 lets compaction run under JIT frames again (A/B).
++  static const bool sAllow = getenv("GECKO_WJ_COMPACTUNDERJIT") != nullptr;
++  return !sAllow && !rt->parentRuntime && js::wasm::gWJExecDepth > 0;
++}
++
+ // __wjStats() backend: aggregate the ALWAYS-ON JIT counters into a JSON string
+ // (no env flags, queryable mid-run -- the printf-free introspection of task #57).
+ // Per-entry deopts/jitRuns are maintained unconditionally (they drive recompiles),
+@@ -1606,6 +1629,19 @@ bool js::wasm::WasmJitObserveCall(JSScript* script) {
+ // compile path instead of re-deferring. Bounded per-call by GECKO_WJ_DRAINBUDGET
+ // (0 = all) so a huge backlog doesn't stall one idle slot.
+ void js::wasm::WasmJitDrainDeferred() {
++  // The embedder calls this between tasks, with no script on the stack, so no
++  // JIT frame can be live. gWJExecDepth is a plain counter: an unwind that
++  // skipped a frame's decrement (a trap or host overflow, which ends the thread
++  // in practice) would leave it above 0 and disable compaction for good. Put it
++  // back here (patch 0026).
++  if (js::wasm::gWJExecDepth != 0 && WJThreadAllowed()) {
++    static const bool sCompactDbg = getenv("GECKO_WJ_COMPACTDBG") != nullptr;
++    if (sCompactDbg) {
++      fprintf(stderr, "[wj-compact] reset gWJExecDepth=%d at an idle boundary\n",
++              js::wasm::gWJExecDepth);
++    }
++    js::wasm::gWJExecDepth = 0;
++  }
+   if (!gWJDeferQueue.empty() && !gWJDrainingNow) {
+     static uint32_t budget = 0xffffffffu;
+     if (budget == 0xffffffffu) {
+@@ -1915,10 +1951,6 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+   // is safe; state is re-read fresh each call. 8192-way (was 512): sized to the
+   // ~2500-script working set (typescript) so the RunCall dispatch stops thrashing this
+   // cache (2026-07-11 profile follow-up; 128KB, negligible).
+-  static const uint32_t kLCBits = 13;
+-  static const uint32_t kLCMask = (1u << kLCBits) - 1;
+-  static JSScript* sLScript[1u << kLCBits] = {};
+-  static WJEntry* sLEntry[1u << kLCBits] = {};
+   uint32_t lch = uint32_t(uintptr_t(script) >> 3) & kLCMask;
+   WJEntry* ep;
+   if (sLScript[lch] == script) {
+@@ -2436,6 +2468,74 @@ int js::wasm::WasmJitRunCall(JSScript* script, uint64_t thisBits,
+ // Result cached per-script (constructs are hot). All wrappers share one script.
+ static std::unordered_map<JSScript*, char>* gWJFwdCache = nullptr;
+ 
++// The GC's weak pass over the tables keyed by a raw JSScript* (patch 0026).
++// Nothing traces those keys, so a script could be finalized, or moved by a
++// compacting GC, while its key stayed; a new script allocated at the old
++// address then matched the old one's entry and ran another function's code.
++// Called by GCRuntime::callWeakPointerZonesCallbacks, so it runs when a sweep
++// group's weak pointers are swept (dead keys are dropped) and when compaction
++// updates pointers to moved cells (moved keys are re-keyed). Re-keying moves the
++// map node, so a WJEntry's address, which callers and the caches hold, does not
++// change. The direct-mapped caches over gEntries are cleared on any change, and
++// the construct cache, whose function and environment keys are raw too, is
++// emptied every time (it refills on its next miss).
++template <typename V>
++static bool WJSweepScriptMap(JSTracer* trc, std::unordered_map<JSScript*, V>* map,
++                             uint32_t* dead, uint32_t* moved) {
++  if (!map) return false;
++  using Node = typename std::unordered_map<JSScript*, V>::node_type;
++  std::vector<Node> rekeyed;
++  bool changed = false;
++  for (auto it = map->begin(); it != map->end();) {
++    JSScript* s = it->first;
++    auto r = js::TraceManuallyBarrieredWeakEdge(trc, &s, "wj-script-key");
++    if (r.isDead()) {
++      it = map->erase(it);
++      (*dead)++;
++      changed = true;
++    } else if (s != it->first) {
++      Node nh = map->extract(it++);
++      nh.key() = s;
++      rekeyed.push_back(std::move(nh));
++      (*moved)++;
++      changed = true;
++    } else {
++      ++it;
++    }
++  }
++  for (Node& nh : rekeyed) {
++    auto res = map->insert(std::move(nh));
++    if (!res.inserted) {
++      // A stale entry already sat at the new address; the moved one is current.
++      map->erase(res.position);
++      map->insert(std::move(res.node));
++    }
++  }
++  return changed;
++}
++
++void js::wasm::WasmJitSweepScriptTables(JSTracer* trc) {
++  // GECKO_WJ_NOWEAKSWEEP=1 leaves the tables unswept, as before 0026 (A/B).
++  static const bool sOff = getenv("GECKO_WJ_NOWEAKSWEEP") != nullptr;
++  if (sOff) return;
++  uint32_t dead = 0, moved = 0;
++  bool changed = WJSweepScriptMap(trc, gEntries, &dead, &moved);
++  WJSweepScriptMap(trc, gWJFwdCache, &dead, &moved);
++  if (changed) {
++    memset(sECScript, 0, sizeof(sECScript));
++    memset(sECEntry, 0, sizeof(sECEntry));
++    memset(sLScript, 0, sizeof(sLScript));
++    memset(sLEntry, 0, sizeof(sLEntry));
++  }
++  memset(gWJCC_key, 0, sizeof(gWJCC_key));
++  static const bool sDbg = getenv("GECKO_WJ_WEAKDBG") != nullptr;
++  if (sDbg && (dead || moved)) {
++    fprintf(stderr, "[wj-weak] kind=%d dead=%u moved=%u entries=%zu\n",
++            int(trc->kind()), unsigned(dead), unsigned(moved),
++            gEntries ? gEntries->size() : size_t(0));
++  }
++}
++
+ // Per-class (keyed by wrapper fn ptr) construct cache: a forwarding `new X` repeats
+ // the SAME resolution every time (WJIsForwardingWrapper + GetProperty("initialize")
+ // + gEntries lookup ~5% of raytrace). Cache the resolved initialize (compiled
+@@ -3108,9 +3208,17 @@ static void WJCheckCallValues(JSContext* cx, uint32_t site, JS::HandleValue this
+ // at entry and again before each frame's reads, where one can happen in
+ // production (ensureHasJitScript, the PBL run of an inner frame). A raw pointer
+ // read after it shows up as a crash or a wrong result instead of rarely.
++// GECKO_WJ_RESUMEGC=2 runs a full shrinking (compacting) GC there instead: the
++// last-ditch, memory-pressure and idle GCs that can run under live JIT frames
++// in a browser (patch 0026).
+ static void WJResumeInjectGC(JSContext* cx) {
+   static int on = getenv("GECKO_WJ_RESUMEGC") ? atoi(getenv("GECKO_WJ_RESUMEGC")) : 0;
+   if (on == 1) cx->runtime()->gc.minorGC(JS::GCReason::API);
++  if (on == 2 || on == 3) {
++    JS::PrepareForFullGC(cx);
++    JS::NonIncrementalGC(cx, on == 2 ? JS::GCOptions::Shrink : JS::GCOptions::Normal,
++                         JS::GCReason::API);
++  }
+ }
+ 
+ static double wjhelpImpl(double kindF, double siteF) {
