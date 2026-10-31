@@ -1,5 +1,39 @@
+diff --git a/gfx/gl/GLContextProviderEmscripten.cpp b/gfx/gl/GLContextProviderEmscripten.cpp
+index 7dcada5f80..1cd4ac9e4d 100644
+--- a/gfx/gl/GLContextProviderEmscripten.cpp
++++ b/gfx/gl/GLContextProviderEmscripten.cpp
+@@ -57,6 +57,9 @@ static bool ContentPassthroughEnabled() {
+ // browser implicit-presents the OffscreenCanvas to its #screen placeholder. Requires
+ // the final link's -sJSPI.
+ extern "C" void gl_present_yield(void);
++namespace js {
++extern int32_t HostNestDepth();  // vm/Interpreter.cpp
++}
+ 
+ // Host-GPU image passthrough: when the compositor GL context is created on the
+ // Renderer thread, record this thread's id + install the JS handler that uploads
+@@ -247,6 +250,19 @@ class GLContextEmscripten final : public GLContext {
+     // yields, so yield here via JSPI: gl_present_yield suspends the wasm stack for one
+     // macrotask (the present fires during it), then we resume. No
+     // transferToImageBitmap / postMessage / #glout overlay -- #screen shows the frame.
++    //
++    // This is the only JSPI suspension point, and SpiderMonkey's per-thread
++    // interpreter nesting (vm/Interpreter.cpp) assumes no thread suspends with
++    // script activations on its stack. GECKO_WJ_SUSDBG checks it.
++    static const bool sNestDbg = getenv("GECKO_WJ_SUSDBG") != nullptr;
++    if (sNestDbg) {
++      static uint32_t sYields = 0;
++      int32_t nest = js::HostNestDepth();
++      if (++sYields <= 3 || nest != 0) {
++        fprintf(stderr, "[host-nest] suspend #%u nest=%d\n", unsigned(sYields),
++                int(nest));
++      }
++    }
+     gl_present_yield();
+     return true;
+   }
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
-index 0fdda89b7d..fe8bd307b6 100644
+index 0fdda89b7d..93c27a47dd 100644
 --- a/js/src/vm/Interpreter.cpp
 +++ b/js/src/vm/Interpreter.cpp
 @@ -16,6 +16,11 @@
@@ -14,7 +48,7 @@ index 0fdda89b7d..fe8bd307b6 100644
  
  #include "jsapi.h"
  
-@@ -422,6 +427,72 @@ extern uint64_t gWJCallCallee;
+@@ -422,6 +427,84 @@ extern uint64_t gWJCallCallee;
  }  // namespace js
  #endif
  
@@ -33,20 +67,32 @@ index 0fdda89b7d..fe8bd307b6 100644
 +// is about two thirds of a 984 KB host stack at the cost of an apply recursion
 +// in an optimized build (469 levels fill it); system code gets 32 more, so
 +// chrome running on top of a capped content stack can still report it.
-+// GECKO_HOST_NESTCAP=<n> sets the cap; 0 turns it off.
++// GECKO_HOST_NESTCAP=<n> sets the cap; exactly "0" turns it off, and any
++// other value that is not a positive count keeps the default (with a warning).
 +static thread_local int32_t sHostNest = 0;
 +
 +int32_t js::HostNestEnter() { return ++sHostNest; }
 +int32_t js::HostNestExit() { return --sHostNest; }
++int32_t js::HostNestDepth() { return sHostNest; }
 +
 +static int32_t HostNestCap() {
 +  static const int32_t sCap = [] {
++    const int32_t kDefault = 320;
 +    const char* v = getenv("GECKO_HOST_NESTCAP");
 +    if (!v || !*v) {
-+      return int32_t(320);
++      return kDefault;
 +    }
-+    long n = strtol(v, nullptr, 10);
-+    return n > 0 ? int32_t(n) : int32_t(0);
++    if (strcmp(v, "0") == 0) {
++      return int32_t(0);
++    }
++    char* end = nullptr;
++    long n = strtol(v, &end, 10);
++    if (*end || n <= 0 || n > 1000000) {
++      fprintf(stderr, "[host-nest] ignoring GECKO_HOST_NESTCAP=%s (cap %d)\n",
++              v, int(kDefault));
++      return kDefault;
++    }
++    return int32_t(n);
 +  }();
 +  return sCap;
 +}
@@ -87,7 +133,7 @@ index 0fdda89b7d..fe8bd307b6 100644
  bool js::RunScript(JSContext* cx, RunState& state) {
    AutoCheckRecursionLimit recursion(cx);
    if (!recursion.check(cx)) {
-@@ -523,6 +594,17 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+@@ -523,6 +606,17 @@ bool js::RunScript(JSContext* cx, RunState& state) {
        break;
    }
  
@@ -106,10 +152,10 @@ index 0fdda89b7d..fe8bd307b6 100644
    if (!ok) {
      AssertExceptionResult(cx);
 diff --git a/js/src/vm/Interpreter.h b/js/src/vm/Interpreter.h
-index 5345298cd0..97175b5dec 100644
+index 5345298cd0..7bb0165403 100644
 --- a/js/src/vm/Interpreter.h
 +++ b/js/src/vm/Interpreter.h
-@@ -310,6 +310,22 @@ inline void RunState::setReturnValue(const Value& v) {
+@@ -310,6 +310,23 @@ inline void RunState::setReturnValue(const Value& v) {
  }
  
  extern bool RunScript(JSContext* cx, RunState& state);
@@ -127,6 +173,7 @@ index 5345298cd0..97175b5dec 100644
 +// hook wasm-ld resolves to a trapping stub.)
 +extern int32_t HostNestEnter();  // returns the new nesting
 +extern int32_t HostNestExit();   // returns the new nesting
++extern int32_t HostNestDepth();  // this thread's current nesting
 +extern bool HostNestOverLimit(JSContext* cx);
 +#endif
  extern bool Interpret(JSContext* cx, RunState& state);

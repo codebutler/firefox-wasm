@@ -1026,14 +1026,20 @@ recursion costs no host stack per level; a native that calls back into script
 starts a new one. The patch keeps a per-thread count of live activations
 (`js::HostNestEnter`/`HostNestExit`, which also replaces 0015's PBL-only
 `sPBLNest`), and an activation that would pass the cap reports
-`InternalError: too much recursion` (through the same report path as 0015's
-headroom check, so `GECKO_WJ_OVERSTACKLESS` applies) instead of entering.
+`InternalError: too much recursion` instead of entering. A PBL activation
+reports through the same path as 0015's headroom check, so
+`GECKO_WJ_OVERSTACKLESS` applies there; a C++ `Interpret` activation, refused
+in `RunScript`, always uses `ReportOverRecursed`.
 
 - **The cap.** `GECKO_HOST_NESTCAP`, default 320: about two thirds of what an
   apply recursion fits in the optimized engine (469 levels). System code gets
   32 more, as SpiderMonkey reserves `kSystemCodeBuffer`, so chrome running on
-  a content stack at the cap can still report the error. `0` turns the cap off
-  (A/B). It applies on every thread and whatever the JIT setting: with the JIT
+  a content stack at the cap can still report the error. Exactly `0` turns
+  the cap off (A/B); any other value that is not a positive count keeps the
+  default and prints `[host-nest] ignoring GECKO_HOST_NESTCAP=…`. With the
+  JIT on, `0` is not exactly the pre-0021 engine: the headroom check's
+  gating (nested more than 24, 8 past the last pass) now counts C++
+  `Interpret` activations as well as PBL ones, so it may probe earlier. It applies on every thread and whatever the JIT setting: with the JIT
   on, PBL frames still fill the secondary stack while the headroom probe
   watches the central one.
 - **Measured costs in the embed** (`-O1`, JIT off, node `--stack-size=1968`;
@@ -1056,8 +1062,23 @@ headroom check, so `GECKO_WJ_OVERSTACKLESS` applies) instead of entering.
   more host stack than an apply level (DOM bindings that call back into
   script, say) has less margin, and one that costs more than about 1.5× an
   apply level can still overflow before the cap; the high-water log below is
-  how to find one. The count is per thread, so with JSPI it also includes
-  activations on a suspended stack; that only makes it stricter. The JS-only
+  how to find one.
+- **JSPI.** The count is per thread, which is right only if no thread
+  suspends with script activations on its stack. In this embedding the one
+  suspending import is `gl_present_yield` (`gecko.js/patch-gecko-shaderfix.mjs`),
+  called from `GLContextEmscripten::SwapBuffers` only for the presenting
+  context, which lives on WebRender's Renderer thread. That thread has no
+  JS runtime, so its nesting is 0 when it suspends. Every other pthread entry
+  is `WebAssembly.promising` but never reaches a suspending import, so it
+  runs straight through. A suspended count therefore never stays live under
+  other code (no early refusal), and no stack is dropped with a count on it
+  (no leak). Nothing in the engine calls
+  `emscripten_unwind_to_js_event_loop`, the other way a stack is abandoned
+  without its destructors running. A V8 overflow does abandon them, but it also
+  kills the thread. `GECKO_WJ_SUSDBG` logs `[host-nest] suspend #n nest=` at
+  `SwapBuffers` (the first three, and any nonzero) to confirm it. An
+  embedding that adds suspending imports on a script thread must save and
+  restore the count across the suspension. The JS-only
   embed's frames are larger than the optimized engine's, so at node's default
   984 KB stack it still overflows before 320 levels: run it with
   `--stack-size=1968` (`bench/main.ts`'s children use 8000).
