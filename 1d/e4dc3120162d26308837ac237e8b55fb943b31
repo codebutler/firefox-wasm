@@ -1,0 +1,21 @@
+patches/0020-runscript-observe-no-debug-table.patch
+  s_2541cc69f91286::t_3574f381d49e80 1-72
+patches/README.md
+  s_2541cc69f91286::t_34beb3440e76e6 28,814-815,960-979
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1de4dc3120162d26308837ac237e8b55fb943b31",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
