@@ -924,7 +924,14 @@ inside the assertion on non-release builds:
 
 This build's configuration leaves `MOZ_DIAGNOSTIC_ASSERT` disabled while
 `RELEASE_OR_BETA` is undefined, so the macro, and the removal with it, compile
-to nothing. The extracted `RemoveActor` in the shipped `gecko.wasm` has no
+to nothing. Why: `moz.configure` defines `MOZ_DIAGNOSTIC_ASSERT_ENABLED` only
+for debug builds or when `milestone.is_early_beta_or_earlier`, and on a
+non-`--as-milestone` build that comes from `build/defines.sh`. The pinned
+source's `build/defines.sh` has `EARLY_BETA_OR_EARLIER=` (empty), so on this
+`--disable-debug` build with milestone `153.0a1` it is false: not a release
+or beta build, but no diagnostic asserts either. Nothing in this repository's
+mozconfig or build scripts sets it; this patch leaves the configuration as it
+is. The extracted `RemoveActor` in the shipped `gecko.wasm` has no
 `RemoveElement` code. Every DOM Cache actor therefore stayed in its worker
 ref's list after it was destroyed. When the worker shut down,
 `CacheWorkerRef::Notify()` called the virtual `StartDestroy()` on each freed
