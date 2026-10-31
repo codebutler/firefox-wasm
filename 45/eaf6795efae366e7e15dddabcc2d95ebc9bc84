@@ -1,0 +1,19 @@
+patches/README.md
+  s_c5d56e78d89691::t_34fd439318b628 28-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "45eaf6795efae366e7e15dddabcc2d95ebc9bc84",
+  "prompts": {},
+  "sessions": {
+    "s_c5d56e78d89691": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bbfeb54f-6644-4725-9893-2d5b957aa9ba",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
