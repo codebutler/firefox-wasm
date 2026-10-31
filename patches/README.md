@@ -1094,8 +1094,18 @@ script, environment, enclosing environment, callee and arguments object of
 each frame) into a snapshot of its own at entry, before anything can
 allocate, and the frame loop reads only that copy. Snapshots form a chain,
 one per nesting depth, from a reused pool, and `WJTraceRoots` traces every
-snapshot in the chain, so their pointers stay current across a GC. The emitted
-spill is unchanged.
+snapshot in the chain, so their pointers stay current across a GC. The OSR
+fast path reads the snapshot too.
+
+One field is traced only when it can be trusted. For the outer frame the
+enclosing environment comes from the persistent env root when the function
+has one (`useEnvRoot`), and otherwise from `envLocal`, which is not a GC root
+and may have gone stale if a moving GC ran after entry. The spill now tags
+that second case (low bit), and the snapshot leaves a tagged pointer into the
+nursery untraced, used as the spill gave it (the behaviour before this
+patch); a tagged tenured pointer is traced. Measured in the shell: every such
+pointer was tenured and none was forwarded, across about 4.2 million resumes
+(cdjs, richards, deltablue, box2d).
 
 `GECKO_WJ_RESUMEGC=1` (test only) forces a minor GC inside every resume, at
 entry and before each frame's reads. `bench/microbenches/resume-gc.js`, run
