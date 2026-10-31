@@ -1,0 +1,21 @@
+patches/0019-cache-workerref-remove-actor.patch
+  s_d26ea5b35e31f0::t_5c5e6830f094d5 1-22
+patches/README.md
+  s_d26ea5b35e31f0::t_2b0b87d272a30c 28,912-947
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "23757ffac397c09c6524d81974c436f512417ee2",
+  "prompts": {},
+  "sessions": {
+    "s_d26ea5b35e31f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "974ffa7c-08d4-4ae2-8017-fc1a4227e8f4",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
