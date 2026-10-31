@@ -1,0 +1,23 @@
+bench/microbenches/args-gc.js
+  s_d26ea5b35e31f0::t_ce47167f4ad3e5 1-15
+patches/0022-wasmjit-current-actuals.patch
+  s_d26ea5b35e31f0::t_194fccc9cb3a84 1-160
+patches/README.md
+  s_d26ea5b35e31f0::t_47f3f20c8ae402 28,959-1000
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "54b04964ffa02f8b2a9de34fbd24aba21d262fce",
+  "prompts": {},
+  "sessions": {
+    "s_d26ea5b35e31f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "974ffa7c-08d4-4ae2-8017-fc1a4227e8f4",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
