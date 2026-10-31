@@ -1,0 +1,23 @@
+gecko.js/build-lib.sh
+  s_9a0d5cc0d7fcc8::t_6e15068aa2d995 168
+patches/0028-pbl-resume-handoff-per-thread.patch
+  s_9a0d5cc0d7fcc8::t_0fa436c189d968 1-57
+patches/0098-DIAG-pbl-envchk.patch
+  s_9a0d5cc0d7fcc8::t_9d44ee07f0e834 1-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "95daa7869b98302c8ca1b229653ce355b0ec7c9a",
+  "prompts": {},
+  "sessions": {
+    "s_9a0d5cc0d7fcc8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_9a0d5cc0d7fcc8",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
