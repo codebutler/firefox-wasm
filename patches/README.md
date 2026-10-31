@@ -1457,7 +1457,7 @@ JIT and the GC hooks the fork adds:
 | state | where | status |
 |---|---|---|
 | `gPBLResumeEnclosingEnv`, `gPBLResumeKeepEnv`, `gPBLResumeArgsObj`, `gPBLResumeInError` | PBL prologue, every thread | **thread_local (this patch)** |
-| task-#60 frame-walk ring (`gWjWalk`, `gWjWalkN`, `gWjWalkAct`) | `TraceJitFrames`, every thread's GC | **thread_local (this patch)**; diagnostic only, but a shared ring mixed threads' frames in the post-mortem |
+| task-#60 frame-walk ring (`gWjWalk`, `gWjWalkN`, `gWjWalkAct`) | `TraceJitFrames`, every thread's GC | **thread_local (this patch)**; diagnostic only, but a shared ring mixed threads' frames in the post-mortem. `WJDumpCrashState` now dumps the calling thread's ring |
 | PBL unwind carry (`gPBLUnwinding`, FP, SP, exception, stack) | PBL | thread_local since 0018 |
 | headroom pass level (`sLastPassNest`), interpreter nesting | PBL, `RunScript` | thread_local (0015, 0021) |
 | `gWJCallCallee` | `RunScript` observe block, C++ `Interpret` call path, PBL scripted-call IC | main-only: each write sits behind `WasmJitActiveOnThread`/`WasmJitObserveCall` (0015, 0016) |
@@ -1467,12 +1467,12 @@ JIT and the GC hooks the fork adds:
 | JIT roots, script-table sweep, the compaction pin | `RootMarking`, `callWeakPointerZonesCallbacks`, `isCompactingGCEnabled` | main-only: gated on `!parentRuntime` (0016, 0026) |
 | `gWJExecDepth` reads (`WasmJitInWasm`, `WasmJitFramesLive`) | decompiler, GC | written only on the JIT's thread; readers gate on the thread or runtime |
 | `gPBLWJResumeTraceN`, `WJExitFPDbg` state, log throttles (`static uint64_t n`) | PBL | proven safe: active only under a debug env var, or used only to rate-limit log lines; nothing reads them to decide behaviour |
-| `getenv`-cached function statics | throughout | proven safe: thread-safe one-time initialization, never written again |
+| `getenv`-cached function statics | throughout | proven safe: those initialized with a static initializer are thread-safe one-time init; those using a lazy `-1` sentinel race benignly, because every thread writes the same value |
 
 **Test.** The JS-only shell is single-threaded, so it cannot race two
 runtimes. The evidence comes from a browser diagnostic build that carried
 this patch and counted the worker activations the old statics would have
-consumed (see below).
+consumed (results pending).
 
 ## Surf integration refresh
 
