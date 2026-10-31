@@ -1,8 +1,8 @@
 diff --git a/dom/cache/ActorChild.cpp b/dom/cache/ActorChild.cpp
-index 34fe36c130..978a5fcdb5 100644
+index 34fe36c130..f903a60176 100644
 --- a/dom/cache/ActorChild.cpp
 +++ b/dom/cache/ActorChild.cpp
-@@ -7,6 +7,8 @@
+@@ -7,9 +7,21 @@
  #include "mozilla/dom/cache/CacheWorkerRef.h"
  #include "nsThreadUtils.h"
  
@@ -10,8 +10,31 @@ index 34fe36c130..978a5fcdb5 100644
 +
  namespace mozilla::dom::cache {
  
++// DIAG (revert before PR): one line per actor/ref lifecycle edge.
++static bool CacheRefLog() {
++  static uint32_t n = 0;
++  return n++ < 3000;
++}
++
  void CacheActorChild::SetWorkerRef(SafeRefPtr<CacheWorkerRef> aWorkerRef) {
-@@ -40,6 +42,13 @@ const SafeRefPtr<CacheWorkerRef>& CacheActorChild::GetWorkerRefPtr() const {
++  if (CacheRefLog())
++    fprintf(stderr, "[cacheref] set actor=%p(base %p) have=%p new=%p\n", (void*)this,
++            (void*)static_cast<ActorChild*>(this),
++            (void*)mWorkerRef.unsafeGetRawPtr(), (void*)aWorkerRef.unsafeGetRawPtr());
+   // Some of the Cache actors can have multiple DOM objects associated with
+   // them.  In this case the workerRef will be added multiple times.  This is
+   // permitted, but the workerRef should be the same each time.
+@@ -30,6 +42,9 @@ void CacheActorChild::SetWorkerRef(SafeRefPtr<CacheWorkerRef> aWorkerRef) {
+ 
+ void CacheActorChild::RemoveWorkerRef() {
+   MOZ_ASSERT_IF(!NS_IsMainThread(), mWorkerRef);
++  if (CacheRefLog())
++    fprintf(stderr, "[cacheref] unset actor=%p ref=%p\n", (void*)this,
++            (void*)mWorkerRef.unsafeGetRawPtr());
+   if (mWorkerRef) {
+     mWorkerRef->RemoveActor(*this);
+     mWorkerRef = nullptr;
+@@ -40,6 +55,16 @@ const SafeRefPtr<CacheWorkerRef>& CacheActorChild::GetWorkerRefPtr() const {
    return mWorkerRef;
  }
  
@@ -19,6 +42,9 @@ index 34fe36c130..978a5fcdb5 100644
 +CacheActorChild::~CacheActorChild() {
 +  // DIAG (revert before PR): an actor freed while still in its CacheWorkerRef's
 +  // list leaves Notify() a dangling pointer.
++  if (CacheRefLog())
++    fprintf(stderr, "[cacheref] dtor actor=%p(base %p) ref=%p\n", (void*)this,
++            (void*)static_cast<ActorChild*>(this), (void*)mWorkerRef.unsafeGetRawPtr());
 +  if (mWorkerRef)
 +    fprintf(stderr, "[cacheref] actor %p destroyed while registered with ref=%p\n",
 +            (void*)this, (void*)mWorkerRef.unsafeGetRawPtr());
@@ -27,7 +53,7 @@ index 34fe36c130..978a5fcdb5 100644
  
  }  // namespace mozilla::dom::cache
 diff --git a/dom/cache/CacheWorkerRef.cpp b/dom/cache/CacheWorkerRef.cpp
-index baa66d012b..3bc47e2f9a 100644
+index baa66d012b..bc089b3d07 100644
 --- a/dom/cache/CacheWorkerRef.cpp
 +++ b/dom/cache/CacheWorkerRef.cpp
 @@ -8,6 +8,8 @@
@@ -39,7 +65,25 @@ index baa66d012b..3bc47e2f9a 100644
  namespace mozilla::dom::cache {
  
  // static
-@@ -112,8 +114,24 @@ void CacheWorkerRef::Notify() {
+@@ -66,6 +68,8 @@ void CacheWorkerRef::AddActor(ActorChild& aActor) {
+   NS_ASSERT_OWNINGTHREAD(CacheWorkerRef);
+   MOZ_ASSERT(!mActorList.Contains(&aActor));
+ 
++  fprintf(stderr, "[cacheref] add ref=%p actor=%p n=%zu\n", (void*)this, (void*)&aActor,
++          size_t(mActorList.Length()) + 1);
+   mActorList.AppendElement(WrapNotNullUnchecked(&aActor));
+   if (mBehavior == eIPCWorkerRef) {
+     MOZ_ASSERT(mIPCWorkerRef);
+@@ -84,6 +88,8 @@ void CacheWorkerRef::AddActor(ActorChild& aActor) {
+ void CacheWorkerRef::RemoveActor(ActorChild& aActor) {
+   NS_ASSERT_OWNINGTHREAD(CacheWorkerRef);
+ 
++  fprintf(stderr, "[cacheref] remove ref=%p actor=%p contained=%d n=%zu\n", (void*)this,
++          (void*)&aActor, int(mActorList.Contains(&aActor)), size_t(mActorList.Length()));
+ #if defined(RELEASE_OR_BETA)
+   mActorList.RemoveElement(&aActor);
+ #else
+@@ -112,8 +118,24 @@ void CacheWorkerRef::Notify() {
  
    // Start the asynchronous destruction of our actors.  These will call back
    // into RemoveActor() once the actor is destroyed.
@@ -64,8 +108,17 @@ index baa66d012b..3bc47e2f9a 100644
    }
  }
  
+@@ -122,6 +144,8 @@ CacheWorkerRef::CacheWorkerRef(Behavior aBehavior, ConstructorGuard)
+ 
+ CacheWorkerRef::~CacheWorkerRef() {
+   NS_ASSERT_OWNINGTHREAD(CacheWorkerRef);
++  fprintf(stderr, "[cacheref] ~ref=%p actors=%zu\n", (void*)this,
++          size_t(mActorList.Length()));
+   MOZ_DIAGNOSTIC_ASSERT(mActorList.IsEmpty());
+ }
+ 
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
-index 7186b07ade..51d4a65740 100644
+index 7186b07ade..78b09a795a 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
 +++ b/js/src/wasm/WasmJitRuntime.cpp
 @@ -356,6 +356,9 @@ void WJClearPropIC() {
@@ -87,7 +140,70 @@ index 7186b07ade..51d4a65740 100644
    int kind = int(kindF);
    // DEBUG (GECKO_WJ_VALIDATEHELPER): validate GC-tagged Values staged in the
    // scratch slots (and the call callee) on EVERY helper entry. Catches a stale
-@@ -7571,6 +7576,43 @@ static inline void WJDbgLogRoot(JSTracer* trc, const char* cat, uint32_t idx,
+@@ -5829,6 +5834,62 @@ static double wjhelpImpl(double kindF, double siteF) {
+     JS::RootedValue rv(cx);
+     static int applyValDbg = getenv("GECKO_WJ_CALLDBG") ? 1 : 0;
+     if (applyValDbg) {
++      // DIAG (revert before PR; build 2): an element whose shape word is not a
++      // live cell is the #2192 stale pointer. Say where it sits (nursery or
++      // tenured, offset in its 1 MiB chunk), whether the JIT's inline bump wrote
++      // its header (word before the cell == gWJObjHeaderWord), and where the
++      // nursery is now. Everything is bounds-checked: the class name is not read.
++      {
++        uint64_t mem = uint64_t(__builtin_wasm_memory_size(0)) << 16;
++        auto inHeap = [&](uintptr_t a) { return a >= 64 && uint64_t(a) + 32 <= mem; };
++        for (size_t i = 0; i < av.length(); i++) {
++          if (!av[i].isObject()) continue;
++          uintptr_t p = uintptr_t(&av[i].toObject());
++          bool pIn = inHeap(p);
++          uintptr_t shapeWord = pIn ? *reinterpret_cast<uint32_t*>(p) : 0;
++          bool live = pIn && inHeap(shapeWord) &&
++                      js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(shapeWord));
++          if (live) continue;
++          uintptr_t a = uintptr_t(arrObj.get());
++          uintptr_t pos = gWJNurseryPosAddr ? *reinterpret_cast<uint32_t*>(gWJNurseryPosAddr) : 0;
++          uintptr_t end = gWJNurseryPosAddr
++                              ? *reinterpret_cast<uint32_t*>(
++                                    gWJNurseryPosAddr +
++                                    js::Nursery::offsetOfCurrentEndFromPosition())
++                              : 0;
++          uint32_t hdr = (pIn && p >= 8) ? *reinterpret_cast<uint32_t*>(p - 8) : 0;
++          uint32_t hdr4 = (pIn && p >= 4) ? *reinterpret_cast<uint32_t*>(p - 4) : 0;
++          js::gc::GCRuntime& gc = cx->runtime()->gc;
++          static uint64_t sn = 0;
++          if (++sn <= 20) {
++            fprintf(stderr,
++                    "[wj-stale] site=%u elem[%zu]=%#lx chunkOff=%#lx inNursery=%d "
++                    "shapeWord=%#lx hdr[-8]=%#x hdr[-4]=%#x jitHdr=%#lx "
++                    "nursery pos=%#lx end=%#lx sameChunkAsEnd=%d semispace=%d "
++                    "minorGC=%llu majorGC=%llu arr=%#lx arrChunkOff=%#lx "
++                    "arrInNursery=%d elems=%#lx initLen=%u cap=%u lastHelper=%u/%u\n",
++                    unsigned(siteF), i, (unsigned long)p,
++                    (unsigned long)(p & (js::gc::ChunkSize - 1)),
++                    pIn ? int(js::gc::IsInsideNursery(reinterpret_cast<js::gc::Cell*>(p))) : -1,
++                    (unsigned long)shapeWord, hdr, hdr4,
++                    (unsigned long)gWJObjHeaderWord, (unsigned long)pos,
++                    (unsigned long)end,
++                    int((p & ~(js::gc::ChunkSize - 1)) == ((end - 1) & ~(js::gc::ChunkSize - 1))),
++                    int(cx->nursery().semispaceEnabled()),
++                    (unsigned long long)gc.minorGCCount(),
++                    (unsigned long long)gc.majorGCCount(), (unsigned long)a,
++                    (unsigned long)(a & (js::gc::ChunkSize - 1)),
++                    int(js::gc::IsInsideNursery(arrObj.get())),
++                    (unsigned long)uintptr_t(arrObj->as<js::NativeObject>().getElementsHeader()),
++                    len, arrObj->as<js::NativeObject>().getDenseCapacity(),
++                    gWJLastHelperKind, gWJLastHelperSite);
++          }
++          // The stale cell would crash the class-name prints below; stop here
++          // with a clean, named abort instead.
++          fprintf(stderr, "[wj-stale] aborting on stale apply element\n");
++          MOZ_CRASH("wj-stale apply element");
++        }
++      }
+       if (!arrObj->is<js::ArrayObject>()) {
+         fprintf(stderr, "[wj-calldbg] applyarray args object class=%s\n",
+                 arrObj->getClass()->name);
+@@ -7571,6 +7632,44 @@ static inline void WJDbgLogRoot(JSTracer* trc, const char* cat, uint32_t idx,
            (void*)o, (unsigned long)classWord);
  }
  
@@ -101,6 +217,7 @@ index 7186b07ade..51d4a65740 100644
 +  static int off = getenv("GECKO_WJ_OOBROOT") && getenv("GECKO_WJ_OOBROOT")[0] == '0';
 +  if (off) return false;
 +  uint64_t mem = uint64_t(__builtin_wasm_memory_size(0)) << 16;
++  if (p == 0) return false;  // boxed null object: not a cell, skipped by the tracer
 +  if (uint64_t(p) >= 64 && uint64_t(p) + 32 <= mem) return false;
 +  static uint32_t n = 0;
 +  if (n++ < 200)
@@ -131,7 +248,7 @@ index 7186b07ade..51d4a65740 100644
  // Trace a JIT Value-root slot, GUARDING against a GC-tagged-but-INVALID cell during
  // MAJOR-GC marking. A stale/garbage staging or spill slot whose bits happen to carry an
  // object/string tag but a dangling pointer would otherwise be pushed to the mark stack and
-@@ -7583,6 +7625,12 @@ static inline void WJDbgLogRoot(JSTracer* trc, const char* cat, uint32_t idx,
+@@ -7583,6 +7682,12 @@ static inline void WJDbgLogRoot(JSTracer* trc, const char* cat, uint32_t idx,
  // IsCellPointerValid, so there we must trace unconditionally (the existing, working path).
  static inline void WJTraceValueRoot(JSTracer* trc, uint64_t* slot, const char* cat,
                                      uint32_t idx) {
@@ -144,7 +261,7 @@ index 7186b07ade..51d4a65740 100644
    if (trc->kind() == JS::TracerKind::Marking) {
      JS::Value v = JS::Value::fromRawBits(*slot);
      if (v.isGCThing()) {
-@@ -7612,6 +7660,7 @@ static inline void WJTraceValueRoot(JSTracer* trc, uint64_t* slot, const char* c
+@@ -7612,6 +7717,7 @@ static inline void WJTraceValueRoot(JSTracer* trc, uint64_t* slot, const char* c
          uintptr_t shapeWord = uintptr_t(*reinterpret_cast<uint32_t*>(
              reinterpret_cast<char*>(c) + offsetof(JS::shadow::Object, shape)));
          dangling =
@@ -152,7 +269,7 @@ index 7186b07ade..51d4a65740 100644
              !js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(shapeWord));
        } else {
          // For a non-object GC thing (string/symbol/bigint) a stale spill can likewise
-@@ -7643,6 +7692,7 @@ template <typename T, typename Slot>
+@@ -7643,6 +7749,7 @@ template <typename T, typename Slot>
  static inline void WJTracePtrRoot(JSTracer* trc, Slot* slot, const char* cat) {
    uintptr_t raw = (uintptr_t)(*slot);
    if (raw == 0) return;  // empty slot
@@ -160,7 +277,7 @@ index 7186b07ade..51d4a65740 100644
    if (trc->kind() == JS::TracerKind::Marking) {
      if (!js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(raw))) {
        static int logBad = getenv("GECKO_WJ_ROOTVALIDATE") ? 1 : 0;
-@@ -7666,44 +7716,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7666,44 +7773,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
      fprintf(stderr, "[wjtrace] #%llu kind=%d\n", (unsigned long long)(++n),
              int(trc->kind()));
    }
@@ -219,7 +336,7 @@ index 7186b07ade..51d4a65740 100644
    for (int i = 0; i < kWJCtorCacheN; i++) {
      WJTracePtrRoot<js::Shape>(trc, &gWJCC_shape[i], "wjcc");
    }
-@@ -7711,6 +7770,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7711,6 +7827,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
    // Keeps cached shapes live and pointer-current, so a shape match is always
    // correct (no stale/reused-pointer hazard). The paired offset stays valid
    // because a Shape's property layout is immutable.
@@ -227,7 +344,7 @@ index 7186b07ade..51d4a65740 100644
    {
      uint32_t n = js::wasm::gWJNextPropSite * js::wasm::kWJPropWays;
      for (uint32_t i = 0; i < n; i++) {
-@@ -7727,6 +7787,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7727,6 +7844,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
    // GetName IC: trace+relocate the cached holder object AND its shape so both
    // stay pointer-current across a compacting GC (else the holder load reads a
    // moved object / the shape guard compares a stale pointer -> wrong value).
@@ -235,7 +352,7 @@ index 7186b07ade..51d4a65740 100644
    {
      uint32_t n = js::wasm::gWJNextNameSite;
      for (uint32_t i = 0; i < n; i++) {
-@@ -7736,6 +7797,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7736,6 +7854,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
        }
      }
    }
@@ -243,7 +360,7 @@ index 7186b07ade..51d4a65740 100644
    // Polymorphic CALL IC: trace+relocate the cached callee SCRIPT pointers so the
    // IC's `gWJCallFn[w] == callee->[JitInfoOrScript]` dispatch compare stays
    // pointer-current across a GC that MOVES a cached script (nursery promotion on
-@@ -7756,10 +7818,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7756,10 +7875,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
      // and pointer-current or edges attribute to a dead/moved JSScript*.
      for (uint32_t i = 1; i < js::wasm::gWJNextCallSite; i++) {
        if (gWJCallSiteScript[i]) {
@@ -256,7 +373,7 @@ index 7186b07ade..51d4a65740 100644
    // Per-site ctor inline cache: callee fn, `this` shape, and ctor env are GC ptrs.
    // If any moves and a slot isn't updated, the backend's `callee==gWJCtorCallee`
    // gate would mis-hit / the cached shape would be stale -> trace them all.
-@@ -7772,6 +7835,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7772,6 +7892,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
        WJTracePtrRoot<JSObject>(trc, &gWJCtorEnv[i], "wjctorenv");
      }
    }
@@ -264,7 +381,7 @@ index 7186b07ade..51d4a65740 100644
    uint32_t sp = gWJRootSP;
    if (sp > js::wasm::kWJCallRootsSize) sp = js::wasm::kWJCallRootsSize;
    // DEBUG (GECKO_WJ_SLOTWATCH=N): at each GC, dump slot N's contents + validity + script
-@@ -7787,7 +7851,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7787,7 +7908,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
        bool cellOk = false;
        if (v.isObject()) {
          js::gc::Cell* c = reinterpret_cast<js::gc::Cell*>(&v.toObject());
@@ -275,7 +392,7 @@ index 7186b07ade..51d4a65740 100644
          if (cellOk && v.toObject().is<JSFunction>()) {
            JSFunction* fn = &v.toObject().as<JSFunction>();
            kind = "fn";
-@@ -7807,6 +7873,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+@@ -7807,6 +7930,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
    }
    // Active deopt-resume spill area: the boxed pointers spilled at the deopt must
    // survive a GC triggered between the spill and WJH_RESUME reading them.
