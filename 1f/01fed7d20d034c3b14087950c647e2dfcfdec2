@@ -1,0 +1,19 @@
+gecko.js/src/embed-init.cpp
+  s_2e1bce27d07889::t_001953741fc6f8 417-427
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1f01fed7d20d034c3b14087950c647e2dfcfdec2",
+  "prompts": {},
+  "sessions": {
+    "s_2e1bce27d07889": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_2e1bce27d07889",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
