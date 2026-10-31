@@ -1097,18 +1097,21 @@ one per nesting depth, from a reused pool, and `WJTraceRoots` traces every
 snapshot in the chain, so their pointers stay current across a GC. The OSR
 fast path reads the snapshot too.
 
-One field is traced only when it can be trusted. For the outer frame the
-enclosing environment comes from the persistent env root when the function
-has one (`useEnvRoot`), and otherwise from `envLocal`, which is not a GC root
-and may have gone stale if a moving GC ran after entry. The spill now tags
-that second case (low bit), and the snapshot leaves a tagged pointer into the
-nursery untraced, used as the spill gave it (the behaviour before this
-patch); a tagged tenured pointer is traced. Measured in the shell: every such
-pointer was tenured and none was forwarded, across about 4.2 million resumes
-(cdjs, richards, deltablue, box2d).
+Every compile now roots its environment (`useEnvRoot` is always set). The
+outer frame's enclosing environment used to come from `envLocal` when the
+function had no `FunctionEnvironment`; `envLocal` is not a GC root, so a minor
+GC between entry and the deopt (for example in a function that closes over a
+fresh nursery call object but only reads it in a cold branch) left it stale,
+and the snapshot would then have traced a stale pointer. With the env always
+rooted, the spill reads the persistent root slot, which a moving GC keeps
+current; the `envLocal` spill path is gone (a compile that would need it
+fails).
 
 `GECKO_WJ_RESUMEGC=1` (test only) forces a minor GC inside every resume, at
-entry and before each frame's reads. `bench/microbenches/resume-gc.js`, run
+entry and before each frame's reads. `bench/microbenches/resume-env.js` covers
+the enclosing environment (a closure over a fresh outer `let`, read only after
+a deopt); with only the GC hook it crashed with "memory access out of bounds",
+and with the patch it prints 0. `bench/microbenches/resume-gc.js`, run
 with it, resumes 2000 frames (500 per shape), including resumes nested inside
 another resume's interpreter run; each line should print 0. With only the GC
 hook (no snapshot) the run crashed with "memory access out of bounds" in two of
