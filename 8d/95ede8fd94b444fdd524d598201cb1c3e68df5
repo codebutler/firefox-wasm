@@ -1,0 +1,19 @@
+patches/0026-wasmjit-no-compact-under-jit.patch
+  s_ec16a99bd9b305::t_983f2707ea2471 138,141,160-161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8d95ede8fd94b444fdd524d598201cb1c3e68df5",
+  "prompts": {},
+  "sessions": {
+    "s_ec16a99bd9b305": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_ec16a99bd9b305",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
