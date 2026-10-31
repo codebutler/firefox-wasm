@@ -1,0 +1,14 @@
+patches/0099-DIAG-stale-read.patch
+  h_74fbce6cd3ee90 1-609
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9f3ad9d9cb0fc02aeace5fde02d79498d657dc86",
+  "prompts": {},
+  "humans": {
+    "h_74fbce6cd3ee90": {
+      "author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
