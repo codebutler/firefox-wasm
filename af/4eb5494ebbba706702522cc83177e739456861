@@ -1,0 +1,21 @@
+patches/0021-host-stack-nesting-cap.patch
+  s_2541cc69f91286::t_6986c94b430fe5 1-34,36,51,70-71,76,80,83-93,95,136,155,158,176
+patches/README.md
+  s_2541cc69f91286::t_620aed00a29dc3 1029-1032,1037-1042,1065-1081
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "af4eb5494ebbba706702522cc83177e739456861",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
