@@ -1,0 +1,44 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index 6e82ce7218..981a69371d 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -10838,9 +10838,14 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+           !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
+           !e.writeVarU32((kWJArgsMetaSlot + 0) * 8))
+         return false;
+-      if (!GetLocal(e, be.scratchBase) || !emitEnvRootLoad(0) ||  // [meta+1]=env
+-          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
+-          !e.writeVarU32((kWJArgsMetaSlot + 1) * 8))
++      // [meta+1]=env: the op's callObject operand, the frame's CallObject when
++      // the function has one (patch 0027). The entry env root holds the env the
++      // function was called with, which for such a function is the ENCLOSING
++      // scope; handed to createForWasmJit it made a mapped arguments object
++      // whose MAYBE_CALL_SLOT was ObjectValue(nullptr), and the next full GC
++      // to mark it read through the null pointer.
++      if (!EmitStageScratch(e, be, ins->toCreateArgumentsObject()->callObject(),
++                            kWJArgsMetaSlot + 1))
+         return false;
+       if (!GetLocal(e, be.scratchBase) ||                          // [meta+2]=argc (raw)
+           !GetLocal(e, be.actualArgcLocal) || !e.writeOp(Op::I64ExtendI32U) ||
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 1951cbcb07..ea2e17fe9a 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -5528,6 +5528,17 @@ static double wjhelpImpl(double kindF, double siteF) {
+     for (uint32_t i = 0; i < argc; i++) {
+       actuals[i] = JS::Value::fromRawBits(gWJScratch[i]);
+     }
++    // A mapped arguments object whose formals the CallObject aliases keeps
++    // that CallObject in MAYBE_CALL_SLOT; createForWasmJit takes it from the
++    // staged scope. Anything else there would store ObjectValue(nullptr), which
++    // the next full GC dereferences, so fail loudly here instead (patch 0027).
++    if (callee->needsCallObject() && callee->hasBytecode() &&
++        callee->nonLazyScript()->argsObjAliasesFormals() &&
++        !scopeChain->is<js::CallObject>()) {
++      fprintf(stderr, "[wj-args] staged scope is %s, not the CallObject\n",
++              scopeChain->getClass()->name);
++      MOZ_CRASH("WJH_NEWARGUMENTS: staged scope is not the frame's CallObject");
++    }
+     js::ArgumentsObject* obj =
+         js::ArgumentsObject::createForWasmJit(cx, callee, scopeChain, actuals, argc);
+     if (!obj) return 1.0;
