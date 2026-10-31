@@ -1,0 +1,160 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index ce6cf25c54..36e59d9087 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -444,6 +444,7 @@ struct WJBackend {
+ };
+ 
+ static bool GetOpInner(Encoder& e, WJBackend& be, const MDefinition* d);
++static bool EmitCurrentActual(Encoder& e, WJBackend& be, uint32_t i);
+ static bool WJCanGetOp(WJBackend& be, const MDefinition* d);
+ static bool EmitInlinedFEEnv(Encoder& e, WJBackend& be, const MDefinition* feNode);
+ 
+@@ -571,10 +572,11 @@ static bool GetOpInner(Encoder& e, WJBackend& be, const MDefinition* d) {
+       return false;
+     int32_t cl = be.local(d);
+     if (cl >= 0) return e.writeOp(Op::LocalGet) && e.writeVarU32(uint32_t(cl));
+-    uint32_t pidx = (p->index() == MParameter::THIS_SLOT)
+-                        ? kWJThisParam
+-                        : (kWJArg0Param + uint32_t(p->index()));
+-    return e.writeOp(Op::LocalGet) && e.writeVarU32(pidx);
++    // No copy local (every value-typed Parameter gets one, so not expected): a
++    // formal reads the GC-current actual; `this` has no shadow slot.
++    if (p->index() != MParameter::THIS_SLOT)
++      return EmitCurrentActual(e, be, uint32_t(p->index()));
++    return e.writeOp(Op::LocalGet) && e.writeVarU32(kWJThisParam);
+   }
+   // Unbox to a GC-POINTER type (Object/String/Symbol/BigInt): the unboxed value
+   // is a RAW heap pointer. Caching it in a local makes it go STALE across a
+@@ -766,6 +768,30 @@ static bool GetLocal(Encoder& e, uint32_t localIdx) {
+   return e.writeOp(Op::LocalGet) && e.writeVarU32(localIdx);
+ }
+ 
++// Push actual argument i (boxed i64) as it is NOW, not as it was at entry. The
++// raw wasm param (kWJArg0Param + i) is never spilled or reloaded across a GC, so
++// a minor GC earlier in the body (an allocation's out-of-line path) leaves it
++// holding a moved object's old address. Prefer, in order: the traced arg-root
++// shadow slot (gWJCallRoots[envRootIdx + (usesCallee ? 2 : 1) + i], pushed in
++// the prologue and relocated by WJTraceRoots), present whenever needsArgRoots;
++// the formal's GC-rooted copy local; the raw param only when neither exists,
++// which is before any GC point or in a function with no GC point at all.
++static bool EmitCurrentActual(Encoder& e, WJBackend& be, uint32_t i) {
++  if (be.needsArgRoots && be.useEnvRoot) {
++    uintptr_t rootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
++    uint32_t argRootOff = be.usesCallee ? 2 : 1;  // slot offset from envRootIdx
++    return GetLocal(e, be.envRootIdx) && e.writeOp(Op::I32Const) &&
++           e.writeVarS32(int32_t(argRootOff + i)) && e.writeOp(Op::I32Add) &&
++           e.writeOp(Op::I32Const) && e.writeVarS32(8) && e.writeOp(Op::I32Mul) &&
++           e.writeOp(Op::I32Const) && e.writeVarS32(int32_t(rootsBase)) &&
++           e.writeOp(Op::I32Add) && e.writeOp(Op::I64Load) && e.writeVarU32(3) &&
++           e.writeVarU32(0);
++  }
++  uint32_t src = be.argCopyLocal[i] >= 0 ? uint32_t(be.argCopyLocal[i])
++                                         : (kWJArg0Param + i);
++  return GetLocal(e, src);
++}
++
+ // Guard that the i64 value in wasm local `localIdx` has tag word `tag`; deopt if not.
+ static bool EmitTagGuardLocal(Encoder& e, WJBackend& be, uint32_t localIdx,
+                               uint32_t tag) {
+@@ -1120,10 +1146,11 @@ static bool EmitSpillValue(Encoder& e, WJBackend& be, MDefinition* v) {
+       return false;
+     int32_t cl = be.local(v);
+     if (cl >= 0) return GetLocal(e, uint32_t(cl));  // GC-current boxed copy
+-    uint32_t pidx = (p->index() == MParameter::THIS_SLOT)
+-                        ? kWJThisParam
+-                        : (kWJArg0Param + uint32_t(p->index()));
+-    return GetLocal(e, pidx);  // boxed i64 param, no re-boxing needed
++    // No copy local (not expected; see GetOpInner): formals read the GC-current
++    // actual, `this` the raw param.
++    if (p->index() != MParameter::THIS_SLOT)
++      return EmitCurrentActual(e, be, uint32_t(p->index()));
++    return GetLocal(e, kWJThisParam);
+   }
+   if (be.local(v) < 0) return WJBAIL("spill: op#%u type %s has no local\n",
+                                      unsigned(v->op()), StringFromMIRType(v->type()));
+@@ -1619,27 +1646,13 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+           !e.writeVarU32(2) || !e.writeVarU32(0))
+         return false;
+       uintptr_t actBase = uintptr_t(static_cast<void*>(&gWJResumeActuals[0]));
+-      uintptr_t argRootsBase2 = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
+-      uint32_t argRootOff2 = be.usesCallee ? 2 : 1;
+       for (uint32_t i = 0; i < kWJMaxArgs; i++) {
+         if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(actBase)))
+           return false;
+-        if (be.needsArgRoots && be.useEnvRoot) {
+-          // GC-current read from the traced shadow slot: raw params go stale
+-          // across a pre-deopt GC (CreateArgumentsObject alone can trigger one)
+-          // -> grafting them crashed the compartment check (GetCustomDataProperty).
+-          if (!GetLocal(e, be.envRootIdx) || !e.writeOp(Op::I32Const) ||
+-              !e.writeVarS32(int32_t(argRootOff2 + i)) || !e.writeOp(Op::I32Add) ||
+-              !e.writeOp(Op::I32Const) || !e.writeVarS32(8) ||
+-              !e.writeOp(Op::I32Mul) || !e.writeOp(Op::I32Const) ||
+-              !e.writeVarS32(int32_t(argRootsBase2)) || !e.writeOp(Op::I32Add) ||
+-              !e.writeOp(Op::I64Load) || !e.writeVarU32(3) || !e.writeVarU32(0))
+-            return false;
+-        } else {
+-          uint32_t src = be.argCopyLocal[i] >= 0 ? uint32_t(be.argCopyLocal[i])
+-                                                 : (kWJArg0Param + i);
+-          if (!e.writeOp(Op::LocalGet) || !e.writeVarU32(src)) return false;
+-        }
++        // GC-current read (traced shadow slot): raw params go stale across a
++        // pre-deopt GC (CreateArgumentsObject alone can trigger one) -> grafting
++        // them crashed the compartment check (GetCustomDataProperty).
++        if (!EmitCurrentActual(e, be, i)) return false;
+         if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(i * 8))
+           return false;
+       }
+@@ -5209,8 +5222,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         js::wasm::gWJBailReason = "too-many-args";
+         return false;  // too many args: bail
+       }
+-      return e.writeOp(Op::LocalGet) &&
+-             e.writeVarU32(kWJArg0Param + uint32_t(p->index()));
++      // The GC-current actual, not the raw param: the entry block's Parameters
++      // precede its GC points today, but this read must not depend on order.
++      return EmitCurrentActual(e, be, uint32_t(p->index()));
+     }
+     case MDefinition::Opcode::Constant: {
+       MConstant* c = ins->toConstant();
+@@ -5976,7 +5990,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       if (numFormals > uint32_t(kWJMaxArgs)) return false;
+       for (uint32_t i = 0; i < kWJMaxArgs; i++) {  // scratch[i] = actual arg i
+         if (!GetLocal(e, be.scratchBase)) return false;
+-        if (!e.writeOp(Op::LocalGet) || !e.writeVarU32(kWJArg0Param + i)) return false;
++        if (!EmitCurrentActual(e, be, i)) return false;  // not the raw param (GC)
+         if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(i * 8))
+           return false;
+       }
+@@ -8852,21 +8866,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       // formal Parameter's rooted copy local; (3) raw param (beyond-formal/unused, no GC
+       // hazard for int-ish args). Reading the raw param directly is UNSAFE across a GC
+       // that moves an object arg (the copy/slot is relocated, the raw param is not).
+-      uintptr_t argRootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
+-      uint32_t argRootOff = be.usesCallee ? 2 : 1;  // slot offset from envRootIdx
+-      auto emitArg = [&](uint32_t i) -> bool {
+-        if (be.needsArgRoots) {
+-          return GetLocal(e, be.envRootIdx) && e.writeOp(Op::I32Const) &&
+-                 e.writeVarS32(int32_t(argRootOff + i)) && e.writeOp(Op::I32Add) &&
+-                 e.writeOp(Op::I32Const) && e.writeVarS32(8) && e.writeOp(Op::I32Mul) &&
+-                 e.writeOp(Op::I32Const) && e.writeVarS32(int32_t(argRootsBase)) &&
+-                 e.writeOp(Op::I32Add) && e.writeOp(Op::I64Load) && e.writeVarU32(3) &&
+-                 e.writeVarU32(0);
+-        }
+-        uint32_t src = be.argCopyLocal[i] >= 0 ? uint32_t(be.argCopyLocal[i])
+-                                               : (kWJArg0Param + i);
+-        return e.writeOp(Op::LocalGet) && e.writeVarU32(src);
+-      };
++      auto emitArg = [&](uint32_t i) -> bool { return EmitCurrentActual(e, be, i); };
+       if (idx->isConstant() && idx->toConstant()->type() == MIRType::Int32) {
+         int32_t i = idx->toConstant()->toInt32();
+         if (i < 0 || uint32_t(i) >= kWJMaxArgs) return false;
+@@ -10791,7 +10791,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+       };
+       for (uint32_t i = 0; i < kWJMaxArgs; i++) {  // scratch[i] = actual arg i
+         if (!GetLocal(e, be.scratchBase)) return false;
+-        if (!e.writeOp(Op::LocalGet) || !e.writeVarU32(kWJArg0Param + i)) return false;
++        if (!EmitCurrentActual(e, be, i)) return false;  // not the raw param (GC)
+         if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(i * 8))
+           return false;
+       }

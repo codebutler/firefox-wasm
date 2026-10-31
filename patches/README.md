@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 19 patches apply in order and reverse back to the pristine selected source
+All 20 patches (0020 and 0021 are reserved for a parallel change) apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -955,6 +955,48 @@ call. Every worker death in these runs had this stack:
 The patch removes the element unconditionally and asserts on the result. A
 search of the tree for the same shape (`#if RELEASE_OR_BETA` with a side effect
 inside the `MOZ_DIAGNOSTIC_ASSERT` branch) finds only this site.
+
+## 0022-wasmjit-current-actuals.patch
+
+The wasm JIT staged a function's actual arguments for `arguments` objects
+(`CreateArgumentsObject`) and rest arrays (`Rest`) from the raw wasm params
+(`kWJArg0Param + i`). Raw params are never spilled or reloaded across a GC. When
+a minor GC ran earlier in the same function, for example in the out-of-line
+path of an inline allocation that found the nursery full, an object argument
+had moved but the raw param still held its old address. The `arguments` object
+or rest array then captured that stale pointer. A later `apply` or copy built an
+array around it, and the next GC or property read hit garbage. In the browser
+it showed up as an `apply` element whose class word was garbage (a forwarded
+nursery cell), and as GC-time out-of-bounds reads. The deopt-resume actuals
+graft had the same bug earlier and was fixed to read the traced arg-root slots;
+these two staging paths were not.
+
+The patch adds `EmitCurrentActual(i)`, which pushes the actual as it is now:
+- the traced arg-root shadow slot when the function roots its actuals
+  (`needsArgRoots`, which every staging op sets for its own script);
+- else the formal's GC-rooted copy local;
+- else the raw param.
+
+Every read of a raw arg param now goes through it or is proven safe:
+
+| Site | Status |
+|---|---|
+| `CreateArgumentsObject` staging | fixed (was the raw param) |
+| `Rest` staging | fixed (was the raw param) |
+| deopt-resume actuals graft | uses the helper (same behaviour as before) |
+| `GetFrameArgument` | uses the helper (same behaviour as before) |
+| `Parameter` value emission | uses the helper: the entry block's Parameters precede its GC points today, but the read no longer depends on that order |
+| `GetOp` / spill fallback for a Parameter with no copy local | uses the helper for formals; every value-typed Parameter gets a copy local, so the fallback is not expected to run |
+| `this` (`kWJThisParam`) fallback in `GetOp` / spill | safe: `this` always has a copy local, initialised in the prologue |
+| prologue copy of each param into its copy local | safe: runs at entry, before any GC point |
+| prologue push of the actuals into the arg-root slots | safe: runs at entry, before any GC point |
+
+`bench/microbenches/args-gc.js` reproduces it in the shell. The test is a
+function that captures a formal (so it allocates a call object), reads
+`arguments`, and passes them through `apply`, plus the same shape with a rest
+parameter. Its result should be `ARGSGC=2700000`. Before the patch, a run with
+ordinary minor GCs printed `ARGSGC=2699866`, a wrong result from stale
+arguments; after it, three runs printed `2700000`, as did runs under GC zeal 7.
 
 ## Surf integration refresh
 
