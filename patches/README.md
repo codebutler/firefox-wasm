@@ -1120,8 +1120,8 @@ two runs each.
 ## 0026-wasmjit-no-compact-under-jit.patch
 
 A compacting GC moves tenured cells and updates every pointer the GC can see.
-Pointers wasm-JIT frames hold in wasm locals or baked constants are not among
-them. Compacting GCs can run while such frames are live in ordinary use: the
+A value a wasm-JIT frame has read into a wasm local, and uses again after a
+GC-capable helper call, is not among them. Compacting GCs can run while such frames are live in ordinary use: the
 last-ditch GC on a failing allocation (`attemptLastDitchGC`, always
 `GCOptions::Shrink`), the memory-pressure and idle shrinking GCs whose slices
 run from allocation or interrupt checks, and GCs inside nested event loops
@@ -1137,6 +1137,18 @@ and environment keys were never updated when a script died or moved.
   JIT functions (`wjhelpImpl`'s call, construct and initialize paths) come from
   a helper that JIT code called, so an outer frame is already counted. Worker
   runtimes, which never run the JIT, are unaffected.
+- **Baked constants are not what the pin protects.** A constant outlives the
+  frame, so it goes stale after any compaction, frame live or not. Every
+  GC-thing constant must load from a traced pool (const, shape and script
+  pools). The deopt-resume script spill used to bake the raw script pointer
+  when `WJInternScript` failed (the 8192-entry pool full, or
+  `GECKO_WJ_NOSCRIPTPOOL`). It now fails the compile there, as the const and
+  shape pools do.
+- **The depth is reset at idle.** `gWJExecDepth` is a plain counter. An unwind
+  that skipped a frame's decrement (a trap or host overflow, which in practice
+  ends the thread) would leave it above 0 and disable compaction for good.
+  `WasmJitDrainDeferred`, which the embedder calls between tasks with no
+  script on the stack, puts it back to 0 (logged under `GECKO_WJ_COMPACTDBG`).
 - **Re-checked at the compact slice.** `shouldCompact()` runs when a GC
   begins. An incremental shrinking GC can begin with no JIT frames live and
   reach the compact slice from an allocation under one. The Compact state now
@@ -1172,8 +1184,9 @@ asked). `GECKO_WJ_RESUMEGC=2` runs a shrinking GC at 0025's resume hook, and
   - Both arms print `COMPACT_BAD=0`, including after the released arenas are
     refilled. The JIT keeps values that live across a call in traced,
     relocated roots (call roots, the scratch slots and pools), so no
-    corruption could be provoked here. The pin is a guarantee for what the
-    roots may miss, not a fix for an observed crash.
+    corruption could be provoked here. The pin covers what those roots may
+    miss, values read into a local and reused after a call; it is not a fix
+    for an observed crash.
 - `bench/microbenches/script-keys.js` compiles 600 distinct functions per
   round, drops two thirds, runs a shrinking GC with no JIT frame live, and
   checks every result.
