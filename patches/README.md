@@ -985,18 +985,30 @@ Every read of a raw arg param now goes through it or is proven safe:
 | `Rest` staging | fixed (was the raw param) |
 | deopt-resume actuals graft | uses the helper (same behaviour as before) |
 | `GetFrameArgument` | uses the helper (same behaviour as before) |
-| `Parameter` value emission | uses the helper: the entry block's Parameters precede its GC points today, but the read no longer depends on that order |
-| `GetOp` / spill fallback for a Parameter with no copy local | uses the helper for formals; every value-typed Parameter gets a copy local, so the fallback is not expected to run |
-| `this` (`kWJThisParam`) fallback in `GetOp` / spill | safe: `this` always has a copy local, initialised in the prologue |
+| `Parameter` value emission, formals | uses the helper (1) |
+| `Parameter` value emission, `this` | safe: entry-block order (2) |
+| `GetOp` / spill fallback, formals | uses the helper (3) |
+| `GetOp` / spill fallback, `this` | safe: `this` always has a copy local |
 | prologue copy of each param into its copy local | safe: runs at entry, before any GC point |
 | prologue push of the actuals into the arg-root slots | safe: runs at entry, before any GC point |
 
-`bench/microbenches/args-gc.js` reproduces it in the shell. The test is a
-function that captures a formal (so it allocates a call object), reads
-`arguments`, and passes them through `apply`, plus the same shape with a rest
-parameter. Its result should be `ARGSGC=2700000`. Before the patch, a run with
-ordinary minor GCs printed `ARGSGC=2699866`, a wrong result from stale
-arguments; after it, three runs printed `2700000`, as did runs under GC zeal 7.
+1. The entry block's Parameters precede its GC points today, but the read no
+   longer depends on that order.
+2. The `THIS_SLOT` branch still reads `kWJThisParam` raw. `this` has no
+   arg-root shadow slot; the read is safe because the entry block's
+   Parameters precede its GC points.
+3. Every value-typed Parameter gets a copy local, so the fallback is not
+   expected to run.
+
+`bench/microbenches/args-gc.js` reproduces it in the shell, one half per
+staging op. Each half allocates a call object (a minor GC can run in its
+out-of-line path), then builds `arguments` or a rest array and passes it
+through `apply`. The `arguments` half captures a local copy, not the formal:
+a captured formal in a non-strict function makes the backend bail to the
+interpreter, so it would never reach the fixed staging. Expected output:
+`ARGSGC_ARGUMENTS=1650000` and `ARGSGC_REST=1050000`. Before the patch two
+runs printed 1649822/1049837 and 1649865/1049753; after it, both printed the
+expected values, as does the interpreter (`GECKO_NOWASMJIT=1`).
 
 ## Surf integration refresh
 
