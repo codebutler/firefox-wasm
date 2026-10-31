@@ -1,31 +1,95 @@
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index a35b76d4a2..2a306262c8 100644
+index a35b76d4a2..112d0aab20 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -1655,7 +1655,10 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+@@ -28,6 +28,7 @@
+ #include "jit/CompileInfo.h"
+ #include "jit/InlineScriptTree.h"  // BytecodeSite (precise bail op location)
+ #include "jit/IonTypes.h"  // IsResumeAfter
++#include "jit/JitScript.h"  // usesEnvironmentChain (resume env of an env-less frame)
+ #include "jit/MIR.h"
+ #include "jit/MIRGenerator.h"
+ #include "jit/MIRGraph.h"
+@@ -63,6 +64,7 @@ extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx);
+ #include "gc/ObjectKind-inl.h"  // gc::GetGCObjectKind (object-literal inline alloc)
+ #include "vm/GlobalObject.h"     // getArrayShapeWithDefaultProto (array inline alloc)
+ #include "vm/JSObject-inl.h"     // GuessArrayGCKind (array inline alloc)
++#include "vm/JSScript-inl.h"     // JSScript::global (resume env of an env-less frame)
+ #include "vm/StringType.h"       // JSString/JSRope/JSFatInlineString (inline rope concat)
+ #include "vm/StringFlags.h"      // StringFlags::ropeFlags / CharEncoding (inline rope concat)
+ #include "vm/EnvironmentObject.h"  // BlockLexicalEnvironmentObject (NewLexicalEnvironmentObject)
+@@ -1290,6 +1292,45 @@ static bool EmitObjPtr(Encoder& e, WJBackend& be, MDefinition* v) {
+   return GetLocal(e, uint32_t(be.local(v)));
+ }
+ 
++// The outer frame's environment for a resume when the compile holds no env
++// root (patch 0025). Warp builds an env only for a script that uses its
++// environment chain (WarpScriptOracle::createEnvironment, over
++// ScriptUsesEnvironmentChain: every JOF_USES_ENV op in ALL the bytecode,
++// Lambda, Arguments and pushed scopes included, plus any function needing an
++// environment object, which direct eval forces), and every FunctionEnvironment
++// roots the env. So without a root the RP env operand is either a constant
++// object (spilled through the traced constant pool) or, for NoEnvironment, the
++// slot's initial Undefined (MOsrEnvironmentChain is built only for a script
++// that uses its chain, WarpBuilder::startNewOsrPreHeaderBlock): the frame's remaining bytecode never reads its env,
++// so we hand the interpreter the realm's global lexical environment, a live
++// object reached through the same traced pool, rather than a value that could go
++// stale. Debuggee scripts never compile (WJBuildMember), so the Debugger cannot
++// see the substitute. Anything else fails the compile.
++static bool EmitUnrootedOuterEnv(Encoder& e, WJBackend& be,
++                                 const jit::CompileInfo& info,
++                                 MDefinition* envOp) {
++  if (envOp->isConstant() && envOp->type() == MIRType::Object &&
++      envOp->toConstant()->toObjectOrNull())
++    return EmitObjPtr(e, be, envOp);
++  // Undefined-typed, not only a constant (past a loop head the slot is a phi
++  // of the entry's and the OSR block's Undefined constants), or optimized out
++  // (the operand is dead, which is the point).
++  JSScript* script = info.script();
++  if ((envOp->type() == MIRType::Undefined ||
++       envOp->type() == MIRType::MagicOptimizedOut) &&
++      script->hasJitScript() &&
++      !script->jitScript()->usesEnvironmentChain()) {
++    JSObject* lex = &script->global().lexicalEnvironment();
++    uintptr_t slot = WJInternConstant(JS::ObjectValue(*lex).asRawBits());
++    if (!slot) return false;
++    return e.writeOp(Op::I32Const) && e.writeVarS32(int32_t(slot)) &&
++           e.writeOp(Op::I64Load) && e.writeVarU32(3) && e.writeVarU32(0) &&
++           e.writeOp(Op::I32WrapI64);
++  }
++  js::wasm::gWJBailReason = "resume-env-unrooted";
++  return false;
++}
++
+ // Sound deopt: box the resume point's live state [this,args,locals,stack] into
+ // gWJResumeVals, record pc + stack depth, and call wjhelp(WJH_RESUME), which
+ // rebuilds a PBL frame and finishes the function there.
+@@ -1564,7 +1605,11 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+     if (!e.writeOp(Op::I32Const) ||
+         !e.writeVarS32(int32_t(uintptr_t(&gWJResumeEnvPtr[f]))))
+       return false;
+-    if (!EmitObjPtr(e, be, rp->getOperand(info.environmentChainSlot()))) {
++    if (f == nframes - 1 && !be.useEnvRoot) {
++      if (!EmitUnrootedOuterEnv(e, be, info,
++                                rp->getOperand(info.environmentChainSlot())))
++        return false;
++    } else if (!EmitObjPtr(e, be, rp->getOperand(info.environmentChainSlot()))) {
+       if (f == nframes - 1 && be.useEnvRoot) {
+         uintptr_t rootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
+         if (!GetLocal(e, be.envRootIdx) || !e.writeOp(Op::I32Const) ||
+@@ -1655,7 +1700,11 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
            !e.writeVarU32(3) || !e.writeVarU32(0) || !e.writeOp(Op::I32WrapI64))
          return false;
      } else if (f == nframes - 1) {
 -      if (!GetLocal(e, be.envLocal)) return false;
-+      // Unreachable: every compile roots its env (see useEnvRoot above). The
-+      // un-rooted envLocal may be stale here, so refuse rather than spill it.
-+      js::wasm::gWJBailReason = "resume-env-unrooted";
-+      return false;
++      // No env root: never envLocal, which may be stale here (see
++      // EmitUnrootedOuterEnv).
++      if (!EmitUnrootedOuterEnv(e, be, info,
++                                rp->getOperand(info.environmentChainSlot())))
++        return false;
      } else if (!e.writeOp(Op::I32Const) || !e.writeVarS32(0)) {
        return false;
      }
-@@ -16537,6 +16540,11 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
-       be.assign(ins);
-     }
-   }
-+  // Always root the env (patch 0025). A deopt resume hands the outer frame's
-+  // enclosing environment to the interpreter, and the snapshot traces it; it must
-+  // come from the persistent root slot, which a moving GC keeps current, never
-+  // from envLocal, which goes stale if a GC runs between entry and the deopt.
-+  be.useEnvRoot = true;
-   if (be.sharedFamily) {
-     // Shared-artifact compile: resume needs the runtime callee's script (loaded
-     // off envRootIdx+1), so root the callee+env unconditionally. Inlined frames
 diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
 index 21fc70597d..cb9752c6d1 100644
 --- a/js/src/wasm/WasmJitRuntime.cpp
@@ -341,3 +405,30 @@ index 21fc70597d..cb9752c6d1 100644
    if (rootLogM && trc->kind() != JS::TracerKind::Marking)
      fprintf(stderr, "[wjrootlog] === WJTraceRoots DONE ===\n");
  }
+diff --git a/js/src/wasm/WasmJitWarp.cpp b/js/src/wasm/WasmJitWarp.cpp
+index 632e26ac5e..dcaa30c05c 100644
+--- a/js/src/wasm/WasmJitWarp.cpp
++++ b/js/src/wasm/WasmJitWarp.cpp
+@@ -43,6 +43,7 @@
+ 
+ #include "jit/InlineScriptTree-inl.h"
+ #include "jit/JitScript-inl.h"
++#include "vm/JSScript-inl.h"  // JSScript::isDebuggee (debuggee compile bail)
+ #include "vm/Realm-inl.h"
+ #include "js/GCVector.h"
+ 
+@@ -135,6 +136,14 @@ static uint32_t gWJCompileSerial = 0;
+ static std::unique_ptr<WJMemberBuild> WJBuildMember(JSContext* cx,
+                                                   JSScript* script,
+                                                   bool forceMega, bool dump) {
++  // Debuggee code stays in PBL, as Ion leaves it to Baseline: PBL runs the
++  // Debugger hooks, and a deopt resume may hand an env-less frame a substitute
++  // environment the Debugger must never see (EmitUnrootedOuterEnv).
++  if (script->isDebuggee() || script->realm()->isDebuggee() ||
++      script->hasDebugScript()) {
++    js::wasm::gWJBailReason = "debuggee";
++    return nullptr;
++  }
+   // Functions with try/catch/finally (try-notes): our JIT propagates a thrown
+   // exception OUT of a function via a return flag, but has NO in-function CATCH
+   // landing pad. So a throw inside a try region unwinds PAST its own catch instead

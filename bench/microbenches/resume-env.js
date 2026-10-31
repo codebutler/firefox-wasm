@@ -7,7 +7,8 @@
 // the enclosing environment the resume supplied. Before the patch the run crashed
 // with "memory access out of bounds" (0024 with only the GC hook). Warp still
 // emits a FunctionEnvironment for `inner` (its bytecode reads the environment),
-// so this exercises the rooted path, not a function without an env root.
+// so this exercises the rooted path; the second loop covers a function without
+// an env root.
 var bad = 0;
 for (var c = 0; c < 60; c++) {
   // A separate script per round, so each round compiles and deopts afresh.
@@ -26,6 +27,23 @@ for (var c = 0; c < 60; c++) {
     var a = flip ? { v: "s", flag: true } : { v: i & 7, flag: false };
     var r = outer(i, a);
     if (r !== (flip ? i : (i & 7) + 1)) bad++;
+  }
+}
+// The same deopt in a function whose bytecode never touches its environment
+// (Warp's NoEnvironment): it holds no env root, so the resume hands the
+// interpreter the realm's global lexical environment. The resumed tail must
+// still compute with its own locals and arguments, and a GC inside the resume
+// must not see a stale environment.
+for (var c = 0; c < 60; c++) {
+  var plain = new Function("a", "b", `
+    var r = a.v + b;
+    if (a.flag) return a.v + ":" + b;
+    return r;`);
+  for (var i = 0; i < 6000; i++) {
+    var flip = i >= 4000 && (i % 50) === 49;
+    var a = flip ? { v: "s", flag: true } : { v: i & 7, flag: false };
+    var r = plain(a, i);
+    if (r !== (flip ? "s:" + i : (i & 7) + i)) bad++;
   }
 }
 print("RESUMEENV=" + bad);

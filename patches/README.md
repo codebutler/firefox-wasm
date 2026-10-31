@@ -1248,32 +1248,51 @@ one per nesting depth, from a reused pool, and `WJTraceRoots` traces every
 snapshot in the chain, so their pointers stay current across a GC. The OSR
 fast path reads the snapshot too.
 
-Every compile now roots its environment (`useEnvRoot` is always set). The
-outer frame's enclosing environment used to come from `envLocal` when the
-function had no `FunctionEnvironment`; `envLocal` is not a GC root, so a minor
-GC between entry and the deopt (for example in a function that closes over a
-fresh nursery call object but only reads it in a cold branch) left it stale,
-and the snapshot would then have traced a stale pointer. With the env always
-rooted, the spill reads the persistent root slot, which a moving GC keeps
-current; the `envLocal` spill path is gone (a compile that would need it
-fails). One visible change: when the resume point's own environment
-operand cannot be read, a function that used to have no env root spilled 0 for
-the frame's environment (the interpreter then used the canonical function's
-environment); it now gets the closure's environment from the root slot.
+The outer frame's environment and enclosing environment no longer come from
+`envLocal`, which is not a GC root: a minor GC between entry and the deopt
+would leave it stale, and the snapshot would then trace a stale pointer. A
+function with an env root (`useEnvRoot`: any `FunctionEnvironment`, or the
+argument, callee and rest operations) spills the persistent root slot, which a
+moving GC keeps current. A function without one never holds an environment it
+reads. Warp builds an environment only for a script that uses its chain
+(`WarpScriptOracle::createEnvironment` over `ScriptUsesEnvironmentChain`,
+which scans ALL the bytecode for `JOF_USES_ENV` ops, `Lambda` and `Arguments`
+included, and counts any function that needs an environment object, which a
+direct `eval` forces), and every such function gets a `FunctionEnvironment`.
+So the resume point's environment operand is either:
 
-No test can show the old `envLocal` hole in practice. Warp emits a
-`FunctionEnvironment` in the entry block whenever the script's bytecode uses its
-environment chain (`ScriptUsesEnvironmentChain`), cold branches included, and
-that already set `useEnvRoot`. Without one, the environment is either unused
-(`NoEnvironment`) or a compile-time constant object, which cannot be a fresh
-nursery call object. Always rooting closes the hole by construction rather than
-relying on that.
+- a constant object, spilled through the traced constant pool as both the
+  environment and the enclosing environment; or
+- for `NoEnvironment`, the slot's initial Undefined (a phi of the entry's and
+  the OSR block's Undefined past a loop head, since `MOsrEnvironmentChain` is
+  built only for a script that uses its chain), or optimized out. The frame's
+  remaining bytecode never reads its environment, so the resume hands the
+  interpreter the realm's global lexical environment, through the same traced
+  pool, rather than a value that could go stale.
+
+Any other operand on a frame without a root fails the compile
+(`resume-env-unrooted`). Octane and cdjs show no such bail.
+
+The one remaining observer of the substitute environment would be the
+Debugger (`Frame.environment`). The JIT had no Debugger gate; it now refuses
+to compile a debuggee script, a script in a debuggee realm, or a script with a
+debug script (breakpoints, step mode), the way Ion leaves debuggee code to
+Baseline. Not covered: a realm that becomes a debuggee after a function was
+compiled keeps calling the compiled code, as before this patch (calls between
+compiled functions bypass the interpreter's routing), and a resume in it gets
+the substitute. The test embed has no Debugger, so the gate is not exercised by
+a test.
+
+An earlier version rooted the environment in every compile. That cost 5% on
+Richards and 14% on DeltaBlue, so it was dropped for the above.
 
 `GECKO_WJ_RESUMEGC=1` (test only) forces a minor GC inside every resume, at
 entry and before each frame's reads. `bench/microbenches/resume-env.js` covers
 the enclosing environment (a closure over a fresh outer `let`, read only after
-a deopt); with only the GC hook it crashed with "memory access out of bounds",
-and with the patch it prints 0. `bench/microbenches/resume-gc.js`, run
+a deopt; with only the GC hook it crashed with "memory access out of bounds")
+and a function without an env root (2400 resumes through the global lexical
+environment); with the patch it prints 0, in every `GECKO_WJ_RESUMEGC` mode
+including the full GCs that 0026 adds. `bench/microbenches/resume-gc.js`, run
 with it, resumes 2000 frames (500 per shape), including resumes nested inside
 another resume's interpreter run; each line should print 0. With only the GC
 hook (no snapshot) the run crashed with "memory access out of bounds" in two of
