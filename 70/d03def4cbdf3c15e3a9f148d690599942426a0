@@ -1,0 +1,21 @@
+bench/microbenches/resume-env.js
+  s_390685797d98e1::t_db7778694a4bdc 49-93
+patches/README.md
+  s_390685797d98e1::t_61b40ff24a45e9 1265-1267,1282-1285,1297-1301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "70d03def4cbdf3c15e3a9f148d690599942426a0",
+  "prompts": {},
+  "sessions": {
+    "s_390685797d98e1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "20ba1471-3437-4fd1-8c1b-291787272cac",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
