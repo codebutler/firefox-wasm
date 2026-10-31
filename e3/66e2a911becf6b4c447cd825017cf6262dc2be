@@ -1,0 +1,19 @@
+patches/0020-DIAG-helpsite.patch
+  s_d26ea5b35e31f0::t_cdaa8b35ba9804 1-444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e366e2a911becf6b4c447cd825017cf6262dc2be",
+  "prompts": {},
+  "sessions": {
+    "s_d26ea5b35e31f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "974ffa7c-08d4-4ae2-8017-fc1a4227e8f4",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
