@@ -414,6 +414,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
     // chrome theme and content prefers-color-scheme track the host. Unset => the
     // native headless default (light). (Initial detection only; a host scheme flip
     // mid-session would need the loader to re-push the pref.)
+    // DIAG (revert before PR): GC zeal through the prefs. Gecko applies
+    // javascript.options.mem.gc_zeal.mode (default 0) after JS_GC_ZEAL is read,
+    // which clears the env setting on every runtime.
+    if (const char* zm = getenv("GECKO_GCZEAL_MODE")) {
+      mozilla::Preferences::SetInt("javascript.options.mem.gc_zeal.mode", atoi(zm));
+      if (const char* zf = getenv("GECKO_GCZEAL_FREQ"))
+        mozilla::Preferences::SetInt("javascript.options.mem.gc_zeal.frequency", atoi(zf));
+      printf("xul_init: gc_zeal.mode=%s freq=%s\n", zm,
+             getenv("GECKO_GCZEAL_FREQ") ? getenv("GECKO_GCZEAL_FREQ") : "default");
+    }
+
     if (const char* d = getenv("GECKO_DARK")) {
       mozilla::Preferences::SetInt("ui.systemUsesDarkTheme", atoi(d) ? 1 : 0);
       printf("xul_init: ui.systemUsesDarkTheme=%d (from host prefers-color-scheme)\n",
