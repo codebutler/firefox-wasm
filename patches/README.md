@@ -25,8 +25,8 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 20 patches (0020 and 0021 are reserved for a parallel change) apply in order and reverse back to the pristine selected source
-files. The WebGL patches and native stack quota patch apply unchanged. A full
+All 20 patches (0020 and 0021 are reserved for a parallel change) apply in
+order and reverse back to the pristine selected source files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
 The JS→WASM JIT itself lives in the pinned Gecko engine fork
