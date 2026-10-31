@@ -1,0 +1,24 @@
+bench/microbenches/host-reentry.js
+  h_74fbce6cd3ee90 10-11
+bench/microbenches/native-reentry.js
+  h_74fbce6cd3ee90 1-70
+bench/spidermonkey.js/embed.cpp
+  h_74fbce6cd3ee90 417-424
+patches/0020-runscript-observe-no-debug-table.patch
+  h_74fbce6cd3ee90 1-72
+patches/0021-host-stack-nesting-cap.patch
+  h_74fbce6cd3ee90 1-274
+patches/README.md
+  h_74fbce6cd3ee90 28-29,402-403,678,723,816-817,962-1109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "11d409c7806a156e9917e0611538afa2899eab05",
+  "prompts": {},
+  "humans": {
+    "h_74fbce6cd3ee90": {
+      "author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
