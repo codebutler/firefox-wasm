@@ -1,0 +1,23 @@
+bench/microbenches/wide-args.js
+  s_c5d56e78d89691::t_2bea2812e4c4d7 1-24
+patches/0023-wasmjit-args-metadata-slots.patch
+  s_c5d56e78d89691::t_a5424ff97a80b5 1-155
+patches/README.md
+  s_c5d56e78d89691::t_b18439f1e824a3 28,1013-1038
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d08b6809e35f42e0188fee5fc21d690bae7beb69",
+  "prompts": {},
+  "sessions": {
+    "s_c5d56e78d89691": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bbfeb54f-6644-4725-9893-2d5b957aa9ba",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

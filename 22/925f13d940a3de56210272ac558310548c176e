@@ -1,0 +1,23 @@
+bench/microbenches/resume-args.js
+  s_c5d56e78d89691::t_b2db7cff9a6123 7-14,18-21,30-31
+patches/README.md
+  s_c5d56e78d89691::t_a9b7121254dc80 1056-1061,1073-1076
+patches/0024-wasmjit-resume-args-object.patch
+  s_c5d56e78d89691::t_a838460ec5173a 61,64,77-80,83-85,91-96,125,146,153-154,156-161,170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "22925f13d940a3de56210272ac558310548c176e",
+  "prompts": {},
+  "sessions": {
+    "s_c5d56e78d89691": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bbfeb54f-6644-4725-9893-2d5b957aa9ba",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
