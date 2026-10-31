@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 20 patches (0020 and 0021 are reserved for a parallel change) apply in
+All 21 patches (0020 and 0021 are reserved for a parallel change) apply in
 order and reverse back to the pristine selected source files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -1009,6 +1009,32 @@ interpreter, so it would never reach the fixed staging. Expected output:
 `ARGSGC_ARGUMENTS=1650000` and `ARGSGC_REST=1050000`. Before the patch two
 runs printed 1649822/1049837 and 1649865/1049753; after it, both printed the
 expected values, as does the interpreter (`GECKO_NOWASMJIT=1`).
+
+## 0023-wasmjit-args-metadata-slots.patch
+
+`CreateArgumentsObject` and `Rest` stage every actual into
+`scratch[0..kWJMaxArgs-1]` and then their bookkeeping for the helper:
+the callee, environment and argc for an `arguments` object, numFormals and
+argc for a rest array. The bookkeeping went to fixed slots 8, 9 and 10. That
+was correct when the JIT took at most 8 actuals, but 0001 raised `kWJMaxArgs`
+to 16 and the entry guard admits up to 16. A call with 9 to 16 actuals had
+actuals 8-10 overwritten by the bookkeeping. The `arguments` object then held
+the callee and the environment object as elements, and a rest array was
+built from the same corrupted slots.
+
+The patch adds `kWJArgsMetaSlot = kWJMaxArgs` and moves the bookkeeping
+there, in the backend and in both helpers. A `static_assert` keeps it below
+the construct slots (`kWJCalleeSlot`). The slots stay inside the traced
+scratch range, so the callee and environment are still updated by a moving
+GC.
+
+`bench/microbenches/wide-args.js` calls three functions with 12 actuals:
+one reads `arguments`, one a rest array, one two formals plus a rest array.
+Each sums its actuals 200000 times; every half should print 15600000.
+Before the patch the `arguments` half threw `TypeError: can't convert ({})
+to primitive type` (the environment object among the actuals) and the rest
+halves printed 11815181 and 11807600. After it, two runs printed 15600000
+for all three, matching the interpreter (`GECKO_NOWASMJIT=1`).
 
 ## Surf integration refresh
 
