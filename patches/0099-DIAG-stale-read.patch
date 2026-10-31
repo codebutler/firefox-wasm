@@ -1,0 +1,609 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index ce6cf25c54..f2d327ea5e 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -94,6 +94,24 @@ uint32_t js::wasm::gWJGSExpect = 0;
+ using namespace js::jit;
+ using namespace js::wasm;
+ 
++// DIAG (revert before PR; GECKO_WJ_HELPSITE): every EmitHelperCallResult call
++// site gets an id, stored to gWJHelperSiteId before the call, and a line of
++// compile-time facts (script line, op, roots spilled, and the GC-thing values
++// live after the call whose locals were NOT spilled). The runtime prints them
++// for the helper calls that ran a minor GC ([wj-gchelper]).
++uint32_t gWJHelperSiteId = 0;
++static std::vector<std::string>* gWJHelperSiteInfo = nullptr;
++uint32_t WJAddHelperSite(std::string info) {
++  if (!gWJHelperSiteInfo) gWJHelperSiteInfo = new std::vector<std::string>();
++  gWJHelperSiteInfo->push_back(std::move(info));
++  return uint32_t(gWJHelperSiteInfo->size() - 1);
++}
++const char* WJHelperSiteInfo(uint32_t id) {
++  return (gWJHelperSiteInfo && id < gWJHelperSiteInfo->size())
++             ? (*gWJHelperSiteInfo)[id].c_str()
++             : "?";
++}
++
+ namespace {
+ 
+ static int gWJDbg = -1;
+@@ -484,6 +502,73 @@ static bool GetOp(Encoder& e, WJBackend& be, const MDefinition* d) {
+   return e.writeOp(Op::LocalTee) && e.writeVarU32(loc);
+ }
+ 
++// DIAG (revert before PR; GECKO_WJ_NOSTALEREAD=1 disables): a read of an
++// Object local, or of a Value local holding an object, whose cell's first word
++// has the low bit set reads a cell a GC has moved (the forwarding marker). Call
++// wjhelp(9001, siteId) so the runtime names the def. Stack-neutral; emitted
++// right after the value's local.get.
++static bool EmitStaleReadCheck(Encoder& e, WJBackend& be, const MDefinition* d,
++                               uint32_t l, bool isI64) {
++  static int staleRead = WJGETENV("GECKO_WJ_NOSTALEREAD") ? 0 : 1;
++  if (!staleRead) return true;
++  if (!isI64 && d->type() != MIRType::Object) return true;
++  {
++    char buf[240];
++    snprintf(buf, sizeof buf, "STALE-READ %s:%u def=%s#%u type=%s L%u ops:",
++             (gWJCurScript && gWJCurScript->filename()) ? gWJCurScript->filename() : "?",
++             gWJCurScriptLine, WJOpName(d->op()), unsigned(d->id()),
++             isI64 ? "Value" : "Object", l);
++    std::string info = buf;
++    for (size_t o = 0; o < d->numOperands() && o < 4; o++) {
++      const MDefinition* od = d->getOperand(o);
++      snprintf(buf, sizeof buf, " %s#%u(", WJOpName(od->op()), unsigned(od->id()));
++      info += buf;
++      for (size_t q = 0; q < od->numOperands() && q < 3; q++) {
++        snprintf(buf, sizeof buf, "%s%s#%u", q ? "," : "",
++                 WJOpName(od->getOperand(q)->op()), unsigned(od->getOperand(q)->id()));
++        info += buf;
++      }
++      info += ")";
++    }
++    snprintf(buf, sizeof buf, " block=%u", d->block() ? unsigned(d->block()->id()) : 0u);
++    info += buf;
++    uint32_t sid = WJAddHelperSite(std::move(info));
++    static int cnt = WJGETENV("GECKO_WJ_STALEREADCOUNT") ? 1 : 0;
++    static uint32_t emitted = 0;
++    if (cnt && (++emitted % 500) == 1)
++      fprintf(stderr, "[wj-staleread-emit] %u checks emitted (%s)\n", emitted,
++              isI64 ? "Value" : "Object");
++    const double kStaleKind = 9001.0;
++    if (!isI64) {
++      if (!e.writeOp(Op::LocalGet) || !e.writeVarU32(l) ||
++          !e.writeOp(Op::I32Load) || !e.writeVarU32(2) || !e.writeVarU32(0) ||
++          !e.writeOp(Op::I32Const) || !e.writeVarS32(1) || !e.writeOp(Op::I32And) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++    } else {
++      // tag == OBJECT (high 32 bits 0xFFFFFF8C on nunbox32)
++      if (!e.writeOp(Op::LocalGet) || !e.writeVarU32(l) ||
++          !e.writeOp(Op::I64Const) || !e.writeVarS64(32) || !e.writeOp(Op::I64ShrU) ||
++          !e.writeOp(Op::I32WrapI64) || !e.writeOp(Op::I32Const) ||
++          !e.writeVarS32(int32_t(0xFFFFFF8Cu)) || !e.writeOp(Op::I32Eq) ||
++          !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++      if (!e.writeOp(Op::LocalGet) || !e.writeVarU32(l) ||
++          !e.writeOp(Op::I32WrapI64) || !e.writeOp(Op::I32Load) || !e.writeVarU32(2) ||
++          !e.writeVarU32(0) || !e.writeOp(Op::I32Const) || !e.writeVarS32(1) ||
++          !e.writeOp(Op::I32And) || !e.writeOp(Op::If) || !e.writeFixedU8(0x40))
++        return false;
++    }
++    if (!e.writeOp(Op::F64Const) || !e.writeFixedF64(kStaleKind) ||
++        !e.writeOp(Op::F64Const) || !e.writeFixedF64(double(sid)) ||
++        !e.writeOp(Op::Call) || !e.writeVarU32(0) || !e.writeOp(Op::Drop) ||
++        !e.writeOp(Op::End))
++      return false;
++    if (isI64 && !e.writeOp(Op::End)) return false;
++  }
++  return true;
++}
++
+ static bool GetOpInner(Encoder& e, WJBackend& be, const MDefinition* d) {
+   // Slots/Elements are RAW INTERIOR pointers into an object's heap storage. A
+   // minor GC that moves the owning object invalidates them, so they must NEVER
+@@ -570,11 +655,14 @@ static bool GetOpInner(Encoder& e, WJBackend& be, const MDefinition* d) {
+         uint32_t(p->index()) >= kWJMaxArgs)
+       return false;
+     int32_t cl = be.local(d);
+-    if (cl >= 0) return e.writeOp(Op::LocalGet) && e.writeVarU32(uint32_t(cl));
++    if (cl >= 0)
++      return e.writeOp(Op::LocalGet) && e.writeVarU32(uint32_t(cl)) &&
++             EmitStaleReadCheck(e, be, d, uint32_t(cl), d->type() == MIRType::Value);
+     uint32_t pidx = (p->index() == MParameter::THIS_SLOT)
+                         ? kWJThisParam
+                         : (kWJArg0Param + uint32_t(p->index()));
+-    return e.writeOp(Op::LocalGet) && e.writeVarU32(pidx);
++    return e.writeOp(Op::LocalGet) && e.writeVarU32(pidx) &&
++           (d->type() != MIRType::Value || EmitStaleReadCheck(e, be, d, pidx, true));
+   }
+   // Unbox to a GC-POINTER type (Object/String/Symbol/BigInt): the unboxed value
+   // is a RAW heap pointer. Caching it in a local makes it go STALE across a
+@@ -650,7 +738,8 @@ static bool GetOpInner(Encoder& e, WJBackend& be, const MDefinition* d) {
+   }
+   int32_t l = be.local(d);
+   if (l < 0) return false;
+-  return e.writeOp(Op::LocalGet) && e.writeVarU32(uint32_t(l));
++  if (!e.writeOp(Op::LocalGet) || !e.writeVarU32(uint32_t(l))) return false;
++  return EmitStaleReadCheck(e, be, d, uint32_t(l), d->type() == MIRType::Value);
+ }
+ 
+ // Faithful mirror of GetOp's SUCCESS predicate (no emission). Used to decide
+@@ -2001,6 +2090,11 @@ static void WJCollectRoots(WJBackend& be, MInstruction* ins,
+   // serial A/B shows precise == rootAll on crashes (both 0) and faster. GECKO_WJ_ROOTALL=1
+   // forces the old conservative rooting (fallback). See [[gc-root-spill-lever]].
+   static int rootAll = WJGETENV("GECKO_WJ_ROOTALL") ? 1 : 0;
++  // DIAG (revert before PR): GECKO_WJ_ROOTWIDE roots every dominating GC-typed
++  // local (as ROOTALL) AND every non-dominating live def, Object and Value
++  // (ROOTLIVE + ROOTLIVEVAL), which ROOTALL alone turns off. The sound
++  // superset for an A/B of the rooting rules; off by default.
++  static int rootWide = WJGETENV("GECKO_WJ_ROOTWIDE") ? 1 : 0;
+   // DEBUG bisection (GECKO_WJ_ROOTADD): in NOROOTALL mode, additionally root all
+   // dominating values of a chosen op-category beyond the precise liveAfterSet -- to
+   // isolate WHICH category my dataflow liveness wrongly drops (the ~30% residual crash).
+@@ -2030,7 +2124,7 @@ static void WJCollectRoots(WJBackend& be, MInstruction* ins,
+     // gap (root only the direct-read Unbox locals, not all). See [[uglify-rooting-crash]].
+     static int unboxRoot = WJGETENV("GECKO_WJ_UNBOXROOT") ? 1 : 0;
+     bool unboxObj = isObj && d->op() == Op_::Unbox && unboxRoot;
+-    bool root = rootAll || isStrCell || unboxObj || liveAfterSet.count(d);
++    bool root = rootAll || rootWide || isStrCell || unboxObj || liveAfterSet.count(d);
+     if (!root && rootAddCat) {
+       Op_ op = d->op();
+       if (rootAddCat == 99) root = true;
+@@ -2058,7 +2152,7 @@ static void WJCollectRoots(WJBackend& be, MInstruction* ins,
+   // pointers are kept fresh by GetOp rematerialization, not rooting.
+   MBasicBlock* insBlock = ins->block();
+   MIRGraph& graph = insBlock->graph();
+-  if (!rootAll) {
++  if (!rootAll || rootWide) {
+     // Compute the EXACT root-set live immediately after ins: start from the block's
+     // live-out (proper fixpoint) and walk backward to ins, applying per-instruction
+     // kill(def)/gen(operand root-sets). Sound for loops/remat (unlike the old walk).
+@@ -2128,12 +2222,12 @@ static void WJCollectRoots(WJBackend& be, MInstruction* ins,
+   // (stab/tokreal.js) without touching postcss #19 (a DIFFERENT-block non-dominating value).
+   // GECKO_WJ_ROOTLIVEKEEPSAMEBLK reverts. See stability-fuzzer-and-gcstress memory.
+   static int rlSameBlkSkip = WJGETENV("GECKO_WJ_ROOTLIVEKEEPSAMEBLK") ? 0 : 1;
+-  if (!rootAll && rootLive) {
++  if ((!rootAll || rootWide) && rootLive) {
+     for (const MDefinition* d : liveAfterSet) {
+       if (rlSameBlkSkip && d->block() == insBlock) continue;
+       bool isObj = d->type() == MIRType::Object;
+       bool isVal = d->type() == MIRType::Value;
+-      if (((isObj || (isVal && rootLiveVal))) && be.local(d) >= 0)
++      if (((isObj || (isVal && (rootLiveVal || rootWide)))) && be.local(d) >= 0)
+         add(const_cast<MDefinition*>(d), isObj);
+     }
+   }
+@@ -2233,6 +2327,77 @@ static bool EmitHelperCallResult(Encoder& e, WJBackend& be, MInstruction* ins,
+     for (uint32_t k = 0; k < nRoots; k++) fprintf(stderr, " %u", rootLocal[k]);
+     fprintf(stderr, "\n");
+   }
++  static int helpSite = WJGETENV("GECKO_WJ_NOHELPSITE") ? 0 : 1;
++  if (helpSite) {
++    char buf[200];
++    snprintf(buf, sizeof buf, "%s:%u op=%s#%u kind=%d site=%g roots=%zu",
++             (gWJCurScript && gWJCurScript->filename()) ? gWJCurScript->filename() : "?",
++             gWJCurScriptLine, WJOpName(ins->op()), unsigned(ins->id()), kind, site,
++             rootLocal.size());
++    std::string info = buf;
++    std::unordered_set<uint32_t> spilled(rootLocal.begin(), rootLocal.end());
++    MBasicBlock* ib = ins->block();
++    std::unordered_set<const MDefinition*> afterIns;
++    {
++      bool seen = false;
++      for (MInstructionIterator it = ib->begin(); it != ib->end(); it++) {
++        if (seen) afterIns.insert(*it);
++        if (*it == ins) seen = true;
++      }
++    }
++    auto usedAfter = [&](MDefinition* D) {
++      for (MUseIterator u = D->usesBegin(); u != D->usesEnd(); u++) {
++        if (!u->consumer()->isDefinition()) continue;
++        MDefinition* C = u->consumer()->toDefinition();
++        if (C->block() == ib ? afterIns.count(C) != 0
++                             : (ib->dominates(C->block()) && C->block() != ib))
++          return true;
++      }
++      return false;
++    };
++    int nUn = 0;
++    info += " unrooted=[";
++    auto consider = [&](MDefinition* D) {
++      MIRType t = D->type();
++      if (t != MIRType::Object && t != MIRType::Value && t != MIRType::String) return;
++      if (D->isConstant() || D == ins) return;
++      int32_t l = be.local(D);
++      if (l < 0 || spilled.count(uint32_t(l))) return;
++      if (!usedAfter(D)) return;
++      if (nUn++ < 8) {
++        snprintf(buf, sizeof buf, "%s#%u/L%d ", WJOpName(D->op()), unsigned(D->id()), l);
++        info += buf;
++      }
++    };
++    for (MBasicBlockIterator b = ib->graph().begin(); b != ib->graph().end(); b++) {
++      if (!b->dominates(ib)) continue;
++      for (MPhiIterator ph = b->phisBegin(); ph != b->phisEnd(); ph++) consider(*ph);
++      for (MInstructionIterator it = b->begin(); it != b->end(); it++) {
++        if (*b == ib && *it == ins) break;
++        consider(*it);
++      }
++    }
++    snprintf(buf, sizeof buf, "] n=%d next:", nUn);
++    info += buf;
++    int nNext = 0;
++    for (MInstructionIterator it = ib->begin(); it != ib->end() && nNext < 4; it++) {
++      if (!afterIns.count(*it)) continue;
++      nNext++;
++      snprintf(buf, sizeof buf, " %s#%u(", WJOpName(it->op()), unsigned(it->id()));
++      info += buf;
++      for (size_t o = 0; o < it->numOperands() && o < 4; o++) {
++        snprintf(buf, sizeof buf, "%s%u", o ? "," : "", unsigned(it->getOperand(o)->id()));
++        info += buf;
++      }
++      info += ")";
++    }
++    uint32_t hid = WJAddHelperSite(std::move(info));
++    uintptr_t hsAddr = uintptr_t(static_cast<void*>(&gWJHelperSiteId));
++    if (!e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(hsAddr)) ||
++        !e.writeOp(Op::I32Const) || !e.writeVarS32(int32_t(hid)) ||
++        !e.writeOp(Op::I32Store) || !e.writeVarU32(2) || !e.writeVarU32(0))
++      return false;
++  }
+   uintptr_t rootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
+   uintptr_t spAddr = uintptr_t(static_cast<void*>(&gWJRootSP));
+   auto emitSPAdjust = [&](int32_t delta) -> bool {
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 7186b07ade..40d6ac26c2 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -356,6 +356,19 @@ void WJClearPropIC() {
+ // address the emitted wasm can compute from). Args at [0..nargs), `this` at
+ // [kWJThisSlot], result at [kWJResultSlot]. GC-traced by WJTraceRoots.
+ alignas(8) uint64_t gWJScratch[js::wasm::kWJScratchSlots];
++// DIAG (revert before PR; GECKO_WJ_HELPSITE): helper calls that ran a minor GC.
++extern uint32_t gWJHelperSiteId;
++const char* WJHelperSiteInfo(uint32_t id);
++struct WJGcHelperRec {
++  uint32_t siteId, kind, site;
++  uint64_t gcBefore, gcAfter;
++  uint64_t scratch[4];
++};
++static WJGcHelperRec gWJGcHelperRing[16];
++static uint32_t gWJGcHelperN = 0;
++// DIAG (revert before PR): the last wjhelp kind/site, printed by [wj-oobroot].
++static uint32_t gWJLastHelperKind = 0;
++static uint32_t gWJLastHelperSite = 0;
+ 
+ uint64_t gWJWasmRuns = 0;
+ uint64_t gWJFastCalls = 0;
+@@ -3020,7 +3033,24 @@ extern "C" EMSCRIPTEN_KEEPALIVE double wjhelp(double kindF, double siteF) {
+       (void*)wjact == gWJEntryAct) {
+     wjact->asJit()->setJSExitFP(gWJEntryExitFP);
+   }
++  static int helpSiteOn = getenv("GECKO_WJ_NOHELPSITE") ? 0 : 1;
++  uint32_t hsId = gWJHelperSiteId;
++  uint64_t hsGc = 0;
++  uint64_t hsScratch[4] = {0, 0, 0, 0};
++  if (helpSiteOn && wjcx) {
++    hsGc = wjcx->runtime()->gc.minorGCCount();
++    memcpy(hsScratch, gWJScratch, sizeof hsScratch);
++  }
+   double r = wjhelpImpl(kindF, siteF);
++  if (helpSiteOn && wjcx && wjcx->runtime()->gc.minorGCCount() != hsGc) {
++    WJGcHelperRec& rec = gWJGcHelperRing[gWJGcHelperN++ % 16];
++    rec.siteId = hsId;
++    rec.kind = uint32_t(kindF);
++    rec.site = uint32_t(siteF);
++    rec.gcBefore = hsGc;
++    rec.gcAfter = wjcx->runtime()->gc.minorGCCount();
++    memcpy(rec.scratch, hsScratch, sizeof hsScratch);
++  }
+   if (wjact && wjact->isJit() && wjSavedExitFP) {
+     wjact->asJit()->setJSExitFP(wjSavedExitFP);
+   }
+@@ -3077,6 +3107,26 @@ static void WJCheckCallValues(JSContext* cx, uint32_t site, JS::HandleValue this
+   for (size_t i = 0; i < argv.length(); i++) report("arg", int(i), argv[i]);
+ }
+ static double wjhelpImpl(double kindF, double siteF) {
++  if (kindF == 9001.0) {
++    // DIAG: the JIT read a moved (forwarded) cell from a local (GetOp check).
++    static uint32_t n = 0;
++    if (n++ < 20) {
++      JSContext* scx = js::TlsContext.get();
++      fprintf(stderr, "[wj-staleread] siteId=%u minorGC=%llu | %s\n", uint32_t(siteF),
++              scx ? (unsigned long long)scx->runtime()->gc.minorGCCount() : 0ull,
++              WJHelperSiteInfo(uint32_t(siteF)));
++      uint32_t total = gWJGcHelperN < 16 ? gWJGcHelperN : 16;
++      for (uint32_t k = 0; k < total && k < 4; k++) {
++        const WJGcHelperRec& rec = gWJGcHelperRing[(gWJGcHelperN - 1 - k) % 16];
++        fprintf(stderr, "[wj-staleread]  gc#%u siteId=%u kind=%u gc %llu->%llu | %s\n", k,
++                rec.siteId, rec.kind, (unsigned long long)rec.gcBefore,
++                (unsigned long long)rec.gcAfter, WJHelperSiteInfo(rec.siteId));
++      }
++    }
++    return 0.0;
++  }
++  gWJLastHelperKind = uint32_t(kindF);  // DIAG
++  gWJLastHelperSite = uint32_t(siteF);
+   int kind = int(kindF);
+   // DEBUG (GECKO_WJ_VALIDATEHELPER): validate GC-tagged Values staged in the
+   // scratch slots (and the call callee) on EVERY helper entry. Catches a stale
+@@ -5829,6 +5879,82 @@ static double wjhelpImpl(double kindF, double siteF) {
+     JS::RootedValue rv(cx);
+     static int applyValDbg = getenv("GECKO_WJ_CALLDBG") ? 1 : 0;
+     if (applyValDbg) {
++      // DIAG (revert before PR; build 2): an element whose shape word is not a
++      // live cell is the #2192 stale pointer. Say where it sits (nursery or
++      // tenured, offset in its 1 MiB chunk), whether the JIT's inline bump wrote
++      // its header (word before the cell == gWJObjHeaderWord), and where the
++      // nursery is now. Everything is bounds-checked: the class name is not read.
++      {
++        uint64_t mem = uint64_t(__builtin_wasm_memory_size(0)) << 16;
++        auto inHeap = [&](uintptr_t a) { return a >= 64 && uint64_t(a) + 32 <= mem; };
++        for (size_t i = 0; i < av.length(); i++) {
++          if (!av[i].isObject()) continue;
++          uintptr_t p = uintptr_t(&av[i].toObject());
++          bool pIn = inHeap(p);
++          uintptr_t shapeWord = pIn ? *reinterpret_cast<uint32_t*>(p) : 0;
++          bool live = pIn && inHeap(shapeWord) &&
++                      js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(shapeWord));
++          if (live) continue;
++          uintptr_t a = uintptr_t(arrObj.get());
++          uintptr_t pos = gWJNurseryPosAddr ? *reinterpret_cast<uint32_t*>(gWJNurseryPosAddr) : 0;
++          uintptr_t end = gWJNurseryPosAddr
++                              ? *reinterpret_cast<uint32_t*>(
++                                    gWJNurseryPosAddr +
++                                    js::Nursery::offsetOfCurrentEndFromPosition())
++                              : 0;
++          uint32_t hdr = (pIn && p >= 8) ? *reinterpret_cast<uint32_t*>(p - 8) : 0;
++          uint32_t hdr4 = (pIn && p >= 4) ? *reinterpret_cast<uint32_t*>(p - 4) : 0;
++          js::gc::GCRuntime& gc = cx->runtime()->gc;
++          static uint64_t sn = 0;
++          if (++sn <= 20) {
++            fprintf(stderr,
++                    "[wj-stale] site=%u elem[%zu]=%#lx chunkOff=%#lx inNursery=%d "
++                    "shapeWord=%#lx hdr[-8]=%#x hdr[-4]=%#x jitHdr=%#lx "
++                    "nursery pos=%#lx end=%#lx sameChunkAsEnd=%d semispace=%d "
++                    "minorGC=%llu majorGC=%llu arr=%#lx arrChunkOff=%#lx "
++                    "arrInNursery=%d elems=%#lx initLen=%u cap=%u lastHelper=%u/%u\n",
++                    unsigned(siteF), i, (unsigned long)p,
++                    (unsigned long)(p & (js::gc::ChunkSize - 1)),
++                    pIn ? int(js::gc::IsInsideNursery(reinterpret_cast<js::gc::Cell*>(p))) : -1,
++                    (unsigned long)shapeWord, hdr, hdr4,
++                    (unsigned long)gWJObjHeaderWord, (unsigned long)pos,
++                    (unsigned long)end,
++                    int((p & ~(js::gc::ChunkSize - 1)) == ((end - 1) & ~(js::gc::ChunkSize - 1))),
++                    int(cx->nursery().semispaceEnabled()),
++                    (unsigned long long)gc.minorGCCount(),
++                    (unsigned long long)gc.majorGCCount(), (unsigned long)a,
++                    (unsigned long)(a & (js::gc::ChunkSize - 1)),
++                    int(js::gc::IsInsideNursery(arrObj.get())),
++                    (unsigned long)uintptr_t(arrObj->as<js::NativeObject>().getElementsHeader()),
++                    len, arrObj->as<js::NativeObject>().getDenseCapacity(),
++                    gWJLastHelperKind, gWJLastHelperSite);
++          }
++          {
++            uint32_t total = gWJGcHelperN < 16 ? gWJGcHelperN : 16;
++            fprintf(stderr, "[wj-gchelper] %u helper calls ran a minor GC (last %u):\n",
++                    gWJGcHelperN, total);
++            for (uint32_t k = 0; k < total; k++) {
++              const WJGcHelperRec& rec = gWJGcHelperRing[(gWJGcHelperN - 1 - k) % 16];
++              int inScratch = -1;
++              for (int q = 0; q < 4; q++)
++                if (uint32_t(rec.scratch[q]) == uint32_t(p)) inScratch = q;
++              fprintf(stderr,
++                      "[wj-gchelper]  #%u siteId=%u kind=%u site=%u gc %llu->%llu "
++                      "X-in-scratch=%d scratch=%llx,%llx,%llx,%llx | %s\n",
++                      k, rec.siteId, rec.kind, rec.site,
++                      (unsigned long long)rec.gcBefore, (unsigned long long)rec.gcAfter,
++                      inScratch, (unsigned long long)rec.scratch[0],
++                      (unsigned long long)rec.scratch[1],
++                      (unsigned long long)rec.scratch[2],
++                      (unsigned long long)rec.scratch[3], WJHelperSiteInfo(rec.siteId));
++            }
++          }
++          // The stale cell would crash the class-name prints below; stop here
++          // with a clean, named abort instead.
++          fprintf(stderr, "[wj-stale] aborting on stale apply element\n");
++          MOZ_CRASH("wj-stale apply element");
++        }
++      }
+       if (!arrObj->is<js::ArrayObject>()) {
+         fprintf(stderr, "[wj-calldbg] applyarray args object class=%s\n",
+                 arrObj->getClass()->name);
+@@ -7571,6 +7697,44 @@ static inline void WJDbgLogRoot(JSTracer* trc, const char* cat, uint32_t idx,
+           (void*)o, (unsigned long)classWord);
+ }
+ 
++// DIAG (revert before PR; GECKO_WJ_OOBROOT=0 disables): a root whose bits point
++// past the end of linear memory traps inside IsCellPointerValid (it reads the
++// chunk header) before any [wj-badroot] line can print. Check the address first,
++// for every tracer kind, log the table and index, and skip: an address outside
++// memory is never a live cell.
++static inline bool WJRootOutOfHeap(JSTracer* trc, uintptr_t p, const char* cat,
++                                   uint32_t idx, uint64_t bits) {
++  static int off = getenv("GECKO_WJ_OOBROOT") && getenv("GECKO_WJ_OOBROOT")[0] == '0';
++  if (off) return false;
++  uint64_t mem = uint64_t(__builtin_wasm_memory_size(0)) << 16;
++  if (p == 0) return false;  // boxed null object: not a cell, skipped by the tracer
++  if (uint64_t(p) >= 64 && uint64_t(p) + 32 <= mem) return false;
++  static uint32_t n = 0;
++  if (n++ < 200)
++    fprintf(stderr,
++            "[wj-oobroot] %s[%u] bits=%016llx cell=%#lx mem=%llu kind=%d sp=%u "
++            "jitdepth=%d resumeActive=%d lastHelper=%u/%u SKIPPED\n",
++            cat, idx, (unsigned long long)bits, (unsigned long)p,
++            (unsigned long long)mem, int(trc->kind()), gWJRootSP, int(gWJJitDepth),
++            int(gWJResumeActive), gWJLastHelperKind, gWJLastHelperSite);
++  return true;
++}
++template <typename T>
++static inline void WJTraceGuardedRoot(JSTracer* trc, T** slot, const char* cat,
++                                      uint32_t idx) {
++  if (*slot && WJRootOutOfHeap(trc, uintptr_t(*slot), cat, idx, uint64_t(uintptr_t(*slot))))
++    return;
++  js::TraceRoot(trc, slot, cat);
++}
++// DIAG: [wj-tracephase] N before each root table during a major GC. A phase with
++// no successor and no oobroot/badroot line means the table's container itself is
++// corrupt, not one of its values.
++static inline void WJTracePhase(JSTracer* trc, int phase) {
++  static int on = getenv("GECKO_WJ_TRACEPHASE") ? 1 : 0;
++  if (on && trc->kind() == JS::TracerKind::Marking)
++    fprintf(stderr, "[wj-tracephase] %d\n", phase);
++}
++
+ // Trace a JIT Value-root slot, GUARDING against a GC-tagged-but-INVALID cell during
+ // MAJOR-GC marking. A stale/garbage staging or spill slot whose bits happen to carry an
+ // object/string tag but a dangling pointer would otherwise be pushed to the mark stack and
+@@ -7583,6 +7747,12 @@ static inline void WJDbgLogRoot(JSTracer* trc, const char* cat, uint32_t idx,
+ // IsCellPointerValid, so there we must trace unconditionally (the existing, working path).
+ static inline void WJTraceValueRoot(JSTracer* trc, uint64_t* slot, const char* cat,
+                                     uint32_t idx) {
++  {
++    JS::Value v0 = JS::Value::fromRawBits(*slot);
++    if (v0.isGCThing() &&
++        WJRootOutOfHeap(trc, uintptr_t(v0.toGCThing()), cat, idx, *slot))
++      return;
++  }
+   if (trc->kind() == JS::TracerKind::Marking) {
+     JS::Value v = JS::Value::fromRawBits(*slot);
+     if (v.isGCThing()) {
+@@ -7612,6 +7782,7 @@ static inline void WJTraceValueRoot(JSTracer* trc, uint64_t* slot, const char* c
+         uintptr_t shapeWord = uintptr_t(*reinterpret_cast<uint32_t*>(
+             reinterpret_cast<char*>(c) + offsetof(JS::shadow::Object, shape)));
+         dangling =
++            WJRootOutOfHeap(trc, shapeWord, "shapeword-of", idx, *slot) ||
+             !js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(shapeWord));
+       } else {
+         // For a non-object GC thing (string/symbol/bigint) a stale spill can likewise
+@@ -7643,6 +7814,7 @@ template <typename T, typename Slot>
+ static inline void WJTracePtrRoot(JSTracer* trc, Slot* slot, const char* cat) {
+   uintptr_t raw = (uintptr_t)(*slot);
+   if (raw == 0) return;  // empty slot
++  if (WJRootOutOfHeap(trc, raw, cat, 0, uint64_t(raw))) return;  // DIAG
+   if (trc->kind() == JS::TracerKind::Marking) {
+     if (!js::gc::IsCellPointerValid(reinterpret_cast<js::gc::Cell*>(raw))) {
+       static int logBad = getenv("GECKO_WJ_ROOTVALIDATE") ? 1 : 0;
+@@ -7666,44 +7838,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+     fprintf(stderr, "[wjtrace] #%llu kind=%d\n", (unsigned long long)(++n),
+             int(trc->kind()));
+   }
++  WJTracePhase(trc, 1);
+   for (uint32_t i = 0; i <= js::wasm::kWJThisSlot; i++) {
+     WJDbgLogRoot(trc, "scratch", i, &gWJScratch[i]);
+     WJTraceValueRoot(trc, &gWJScratch[i], "wjscratch", i);
+   }
+   // Deferred-compile queue: keep queued scripts live + pointer-current across the
+   // defer window (enqueue in one task, drain at a later idle/task boundary).
++  WJTracePhase(trc, 2);
+   for (JSScript*& s : gWJDeferQueue) {
+-    js::TraceRoot(trc, &s, "wjdeferq");
++    WJTraceGuardedRoot(trc, &s, "wjdeferq", 0);
+   }
+   // Family representatives: keep the script the shared artifact was compiled
+   // from live + pointer-current. It is both the member-compat gcthing
+   // reference and the owner of every gcthing cell baked into the artifact.
++  WJTracePhase(trc, 3);
+   if (gFamilies) {
+     for (auto& kv : *gFamilies) {
+-      if (kv.second.rep) js::TraceRoot(trc, &kv.second.rep, "wjfamrep");
++      if (kv.second.rep) WJTraceGuardedRoot(trc, &kv.second.rep, "wjfamrep", 0);
+     }
+   }
++  WJTracePhase(trc, 4);
+   for (JSScript*& s : gWJCohortPending) {
+-    js::TraceRoot(trc, &s, "wjcohortq");
++    WJTraceGuardedRoot(trc, &s, "wjcohortq", 0);
+   }
++  WJTracePhase(trc, 5);
+   for (auto& pr : gWJCallEdges) {
+-    js::TraceRoot(trc, &pr.first, "wjedge-caller");
+-    js::TraceRoot(trc, &pr.second, "wjedge-callee");
++    WJTraceGuardedRoot(trc, &pr.first, "wjedge-caller", 0);
++    WJTraceGuardedRoot(trc, &pr.second, "wjedge-callee", 0);
+   }
++  WJTracePhase(trc, 6);
+   for (uint32_t i = 0; i < gWJConstPoolCount; i++) {
+     WJDbgLogRoot(trc, "const", i, &gWJConstPool[i]);
+     WJTraceValueRoot(trc, &gWJConstPool[i], "wjconst", i);
+   }
++  WJTracePhase(trc, 7);
+   for (uint32_t i = 0; i < gWJShapePoolCount; i++) {
+     WJTracePtrRoot<js::Shape>(trc, &gWJShapePool[i], "wjshape");
+   }
+   // Deopt-resume script pool: trace+RELOCATE so the deopt spill (which loads these
+   // slots at runtime) stores a GC-current script into gWJResumeScriptPtr under compaction.
++  WJTracePhase(trc, 8);
+   for (uint32_t i = 0; i < gWJScriptPoolCount; i++) {
+     WJTracePtrRoot<JSScript>(trc, &gWJScriptPool[i], "wjscript");
+   }
+   // Per-class construct-cache `this` shapes: trace+relocate so cache-hit alloc
+   // uses a GC-current shape (and the key/env are re-validated on miss).
++  WJTracePhase(trc, 9);
+   for (int i = 0; i < kWJCtorCacheN; i++) {
+     WJTracePtrRoot<js::Shape>(trc, &gWJCC_shape[i], "wjcc");
+   }
+@@ -7711,6 +7892,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+   // Keeps cached shapes live and pointer-current, so a shape match is always
+   // correct (no stale/reused-pointer hazard). The paired offset stays valid
+   // because a Shape's property layout is immutable.
++  WJTracePhase(trc, 10);
+   {
+     uint32_t n = js::wasm::gWJNextPropSite * js::wasm::kWJPropWays;
+     for (uint32_t i = 0; i < n; i++) {
+@@ -7727,6 +7909,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+   // GetName IC: trace+relocate the cached holder object AND its shape so both
+   // stay pointer-current across a compacting GC (else the holder load reads a
+   // moved object / the shape guard compares a stale pointer -> wrong value).
++  WJTracePhase(trc, 11);
+   {
+     uint32_t n = js::wasm::gWJNextNameSite;
+     for (uint32_t i = 0; i < n; i++) {
+@@ -7736,6 +7919,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+       }
+     }
+   }
++  WJTracePhase(trc, 12);
+   // Polymorphic CALL IC: trace+relocate the cached callee SCRIPT pointers so the
+   // IC's `gWJCallFn[w] == callee->[JitInfoOrScript]` dispatch compare stays
+   // pointer-current across a GC that MOVES a cached script (nursery promotion on
+@@ -7756,10 +7940,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+     // and pointer-current or edges attribute to a dead/moved JSScript*.
+     for (uint32_t i = 1; i < js::wasm::gWJNextCallSite; i++) {
+       if (gWJCallSiteScript[i]) {
+-        js::TraceRoot(trc, &gWJCallSiteScript[i], "wjcallsite");
++        WJTraceGuardedRoot(trc, &gWJCallSiteScript[i], "wjcallsite", i);
+       }
+     }
+   }
++  WJTracePhase(trc, 13);
+   // Per-site ctor inline cache: callee fn, `this` shape, and ctor env are GC ptrs.
+   // If any moves and a slot isn't updated, the backend's `callee==gWJCtorCallee`
+   // gate would mis-hit / the cached shape would be stale -> trace them all.
+@@ -7772,6 +7957,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+       WJTracePtrRoot<JSObject>(trc, &gWJCtorEnv[i], "wjctorenv");
+     }
+   }
++  WJTracePhase(trc, 14);
+   uint32_t sp = gWJRootSP;
+   if (sp > js::wasm::kWJCallRootsSize) sp = js::wasm::kWJCallRootsSize;
+   // DEBUG (GECKO_WJ_SLOTWATCH=N): at each GC, dump slot N's contents + validity + script
+@@ -7787,7 +7973,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+       bool cellOk = false;
+       if (v.isObject()) {
+         js::gc::Cell* c = reinterpret_cast<js::gc::Cell*>(&v.toObject());
+-        cellOk = js::gc::IsCellPointerValid(c);
++        cellOk = !WJRootOutOfHeap(trc, uintptr_t(c), "slotwatch", wslot,
++                                  gWJCallRoots[wslot]) &&
++                 js::gc::IsCellPointerValid(c);
+         if (cellOk && v.toObject().is<JSFunction>()) {
+           JSFunction* fn = &v.toObject().as<JSFunction>();
+           kind = "fn";
+@@ -7807,6 +7995,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+   }
+   // Active deopt-resume spill area: the boxed pointers spilled at the deopt must
+   // survive a GC triggered between the spill and WJH_RESUME reading them.
++  WJTracePhase(trc, 15);
+   if (gWJResumeActive) {
+     uint32_t rc = gWJResumeValsCount;
+     if (rc > 1024) rc = 1024;
