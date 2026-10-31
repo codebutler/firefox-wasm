@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 26 patches apply in order and reverse back to the pristine selected source
+All 27 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -1366,6 +1366,61 @@ Regressions with the patch: `resume-gc` (`GECKO_WJ_RESUMEGC=1`), `args-gc`,
 The Octane and micro `--ab` checksums match. Octane earley and splay, six runs
 each, are within noise of the patch turned off by both switches (earley 13,452
 vs 13,520; splay 3,168 vs 2,971).
+
+## 0027-wasmjit-args-callobj.patch
+
+A JIT-compiled sloppy function that both has a CallObject (a closure captures
+one of its locals) and uses `arguments` built a broken mapped arguments object.
+The first full GC that marked one killed the thread with "memory access out of
+bounds" inside `MarkingTracerT::processMarkStackTop`.
+
+**Cause.** The `CreateArgumentsObject` lowering staged the environment for
+`WJH_NEWARGUMENTS` from the function's env root (`gWJCallRoots[envRootIdx]`).
+That root holds the env the function was called with: its FunctionEnvironment,
+the enclosing scope. It never holds the CallObject the prologue creates. Then:
+
+- `ArgumentsObject::createForWasmJit` takes the call object only when the
+  staged scope is a `CallObject`, so it got `nullptr`.
+- For a function that needs a call object and whose `arguments` aliases
+  formals, `MaybeForwardToCallObject` stored `ObjectValue(*nullptr)` in
+  `MAYBE_CALL_SLOT`. Its assertion is debug-only.
+- When no formal is closed over, reads of `arguments` never use that slot, so
+  results stayed correct.
+- Minor GCs skip a null object, so nothing failed until a major mark
+  dereferenced it.
+
+**How it was found.** 0025's resume hook running a full GC
+(`GECKO_WJ_RESUMEGC=3`) crashed `resume-gc.js` in its ARGS section. Recording
+the marker's current object, slot and value and dumping them from JS after
+the trap gave: `class=Arguments`, slot 2 (`MAYBE_CALL_SLOT`) =
+`0xffffff8c00000000`. Instrumenting `WJH_NEWARGUMENTS` showed the staged scope
+was always the global `LexicalEnvironment`.
+
+**Fix.** Stage the op's own `callObject` operand, which is what Warp passes to
+the VM, through the traced scratch slots (`EmitStageScratch`), as `MLambda`
+stages its environment. `WJH_NEWARGUMENTS` now crashes with a message if the
+staged scope is still not a `CallObject` for a function that needs one, rather
+than building an object that corrupts the next mark. The env root keeps its
+meaning: the FunctionEnvironment that `GetOp` rematerializes. The deopt-resume
+spill already uses the resume point's env operand.
+
+**Scope.** Every earlier JIT, master included, staged the env this way. Any
+JIT-on page whose sloppy code uses `arguments` inside a function with a
+closure can leave such an object for a later full GC to trip on. JIT-off
+builds are unaffected (PBL builds arguments objects itself).
+
+**Test.** `bench/microbenches/args-callobj-gc.js` keeps such arguments objects
+alive across plain `gc()` calls. It has no resume hook.
+
+| | `args-callobj-gc.js` | `resume-gc.js` with `GECKO_WJ_RESUMEGC=3` or `=2` |
+|---|---|---|
+| before | "memory access out of bounds" (2 of 2) | crash in ARGS (every run) |
+| JIT off | `ARGSCALLOBJ_BAD=0` | — |
+| after | `ARGSCALLOBJ_BAD=0` (2 of 2) | all three sections print 0 (2 of 2 each) |
+
+`resume-args`, `args-gc`, `wide-args`, `compact-under-jit`, `script-keys` and
+`host-reentry` print their expected values, and the Octane and micro `--ab`
+checksums match.
 
 ## Surf integration refresh
 
