@@ -1,0 +1,21 @@
+patches/0028-pbl-resume-handoff-per-thread.patch
+  s_2541cc69f91286::t_7841b6386baad0 1-79
+patches/README.md
+  s_2541cc69f91286::t_6d43a6f71140dd 28,1425-1476
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "240c33d2cd2b9f4d158673b7ec0dfb06e2e5b44b",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
