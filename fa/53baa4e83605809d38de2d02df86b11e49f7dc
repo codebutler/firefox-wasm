@@ -1,0 +1,23 @@
+bench/microbenches/args-callobj-gc.js
+  s_2541cc69f91286::t_e9c7b137347a03 1-25
+patches/0027-wasmjit-args-callobj.patch
+  s_2541cc69f91286::t_146bd6463abd9f 1-44
+patches/README.md
+  s_2541cc69f91286::t_3b5a4dc22cdbb9 28,1219-1273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fa53baa4e83605809d38de2d02df86b11e49f7dc",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
