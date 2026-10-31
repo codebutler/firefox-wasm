@@ -1,0 +1,27 @@
+bench/spidermonkey.js/embed.cpp
+  s_2541cc69f91286::t_679632bbdbe0c3 417-424
+bench/microbenches/native-reentry.js
+  s_2541cc69f91286::t_8341428a88d2ec 1-70
+patches/0021-host-stack-nesting-cap.patch
+  s_2541cc69f91286::t_18914e97c34f69 1-219
+bench/microbenches/host-reentry.js
+  s_2541cc69f91286::t_0dd9349b5a6f09 10-11
+patches/README.md
+  s_2541cc69f91286::t_d6448b4c84f2bd 28,676,721,980-1078
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e953db3d573b746c860040a30a79e3833ffbdb7e",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
