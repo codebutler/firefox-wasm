@@ -1,26 +1,22 @@
 diff --git a/gfx/gl/GLContextProviderEmscripten.cpp b/gfx/gl/GLContextProviderEmscripten.cpp
-index 7dcada5f80..8b823f44d7 100644
+index 7dcada5f80..4b716ab0f9 100644
 --- a/gfx/gl/GLContextProviderEmscripten.cpp
 +++ b/gfx/gl/GLContextProviderEmscripten.cpp
-@@ -27,6 +27,7 @@
- #include <emscripten/html5_webgl.h>
- #include <cstdio>
- #include <cstdlib>
-+#include <pthread.h>
- #include <cstring>
- #include <pthread.h>
+@@ -33,6 +33,13 @@
+ // The page canvas the embedder renders into (embed-xul/index.html: <canvas id="screen">).
+ #define MOZ_EMSCRIPTEN_GL_CANVAS "#screen"
  
-@@ -57,6 +58,9 @@ static bool ContentPassthroughEnabled() {
- // browser implicit-presents the OffscreenCanvas to its #screen placeholder. Requires
- // the final link's -sJSPI.
- extern "C" void gl_present_yield(void);
++// SpiderMonkey's per-thread interpreter nesting (vm/Interpreter.cpp), for the
++// suspend check in SwapBuffers. Declared at global scope: inside
++// mozilla::gl it would name a different, undefined function.
 +namespace js {
-+extern int32_t HostNestDepth();  // vm/Interpreter.cpp
++extern int32_t HostNestDepth();
 +}
++
+ namespace mozilla {
+ namespace gl {
  
- // Host-GPU image passthrough: when the compositor GL context is created on the
- // Renderer thread, record this thread's id + install the JS handler that uploads
-@@ -247,6 +251,19 @@ class GLContextEmscripten final : public GLContext {
+@@ -247,6 +254,19 @@ class GLContextEmscripten final : public GLContext {
      // yields, so yield here via JSPI: gl_present_yield suspends the wasm stack for one
      // macrotask (the present fires during it), then we resume. No
      // transferToImageBitmap / postMessage / #glout overlay -- #screen shows the frame.
@@ -31,7 +27,7 @@ index 7dcada5f80..8b823f44d7 100644
 +    static const bool sNestDbg = getenv("GECKO_WJ_SUSDBG") != nullptr;
 +    if (sNestDbg) {
 +      static uint32_t sYields = 0;
-+      int32_t nest = js::HostNestDepth();
++      int32_t nest = ::js::HostNestDepth();
 +      if (++sYields <= 3 || nest != 0) {
 +        fprintf(stderr, "[host-nest] suspend #%u nest=%d ptr=%lu\n",
 +                unsigned(sYields), int(nest), (unsigned long)pthread_self());
