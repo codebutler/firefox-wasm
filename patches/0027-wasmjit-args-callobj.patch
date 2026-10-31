@@ -1,8 +1,8 @@
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index 2cb3675dfb..a61d0c37a6 100644
+index 3b4f351a9d..d1ac9a725f 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -10797,8 +10797,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10798,8 +10798,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
      case MDefinition::Opcode::CreateArgumentsObject: {
        // Materialize `arguments` (block-0 op). Stage all kWJMaxArgs actuals (wasm
        // params kWJArg0Param+i; caller pads beyond argc), the runtime callee
@@ -14,7 +14,7 @@ index 2cb3675dfb..a61d0c37a6 100644
        // Only the outer running frame (inlined frames' args aren't staged here).
        // DEFAULT-ON again (GECKO_WJ_NOARGSOBJ disables). The >kWJMaxArgs-actuals
        // correctness bug (object sized to argc but only 8 actuals staged -> elements
-@@ -10823,7 +10824,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10824,7 +10825,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
          return false;
        uintptr_t rootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
        auto emitEnvRootLoad = [&](uint32_t byteOff) -> bool {
@@ -23,7 +23,7 @@ index 2cb3675dfb..a61d0c37a6 100644
          return e.writeOp(Op::LocalGet) && e.writeVarU32(be.envRootIdx) &&
                 e.writeOp(Op::I32Const) && e.writeVarS32(8) && e.writeOp(Op::I32Mul) &&
                 e.writeOp(Op::I32Const) && e.writeVarS32(int32_t(rootsBase)) &&
-@@ -10841,9 +10842,14 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+@@ -10842,9 +10843,14 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
            !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
            !e.writeVarU32((kWJArgsMetaSlot + 0) * 8))
          return false;
@@ -41,7 +41,7 @@ index 2cb3675dfb..a61d0c37a6 100644
          return false;
        if (!GetLocal(e, be.scratchBase) ||                          // [meta+2]=argc (raw)
            !GetLocal(e, be.actualArgcLocal) || !e.writeOp(Op::I64ExtendI32U) ||
-@@ -16480,9 +16486,10 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+@@ -16481,9 +16487,10 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
            }
            break;
          case MDefinition::Opcode::CreateArgumentsObject:
