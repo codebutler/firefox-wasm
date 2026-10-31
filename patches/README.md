@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 20 patches apply in order and reverse back to the pristine selected source
+All 21 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -673,7 +673,7 @@ guard had charged 151584 of its 298080 limit: the host stack ran out at about
 half the budget, before the suspend latch could fire. PBL alone overflows too:
 with the JIT off, a page recursing through `Function.prototype.apply` killed
 the thread at 469 levels. This patch does not fix that JIT-off case in a JSPI
-embedding (see the headroom check below).
+embedding (see the headroom check below); 0021's nesting cap does.
 
 - **PBL→JIT edge charge.** `WasmJitRunCall` adds a fixed cost to
   `gWJJitDepth` for the duration of the JIT call (default 12288,
@@ -718,7 +718,7 @@ embedding (see the headroom check below).
   still overflow. The probe therefore runs only where the JIT does (it would
   cost a 145 KB recursion per check and never fire). In the JS-only shell
   (no JSPI) it would cover JIT-off recursion too, but it is skipped there as
-  well.
+  well. 0021 closes the gap with a count of interpreter activations.
 - **Stackless over-recursion error (superseded by 0018; now opt-in with
   `GECKO_WJ_OVERSTACKLESS=1`).** The headroom `InternalError` is built by
   `JSContext::onOverRecursedStackless`: `message` is `"too much recursion"`,
@@ -976,6 +976,105 @@ there with 0016 (5 of 5 JIT-off loads) and turned out to be 0019's.
 This patch deletes the table, the counters and the print. The routing stays,
 as does `GECKO_WJ_NONATIVEOBS=1`; `GECKO_WJ_NOBSDBG` and `GECKO_WJ_NOBSFN` no
 longer do anything.
+
+## 0021-host-stack-nesting-cap.patch
+
+With the JIT off, a page that recursed through `Function.prototype.apply`
+killed the thread running it: V8's `RangeError: Maximum call stack size
+exceeded`, which wasm cannot catch, after 469 levels (3,771 frames: a 7-frame
+`PortableBaselineInterpret → ICCallFallback → InternalCallOrConstruct →
+fun_apply → js::Call → InternalCallOrConstruct → RunScript` cycle per level on
+top of ~490 base frames). A desktop build throws a catchable
+`InternalError: too much recursion` there.
+
+**Why nothing stopped it.** SpiderMonkey's recursion quota measures the C
+stack, which under emscripten is the linear-memory stack. The engine's wasm
+frames also take space on the host's own stack, and how much of each a level
+uses depends on the build, not on the code:
+
+| build | host stack / level | linear stack / level |
+|---|---|---|
+| JS-only embed (`-O1`), apply recursion | 3.2–3.3 KB (307 levels at node's 984 KB, 607 at 1968 KB) | 4.3 KB (126 levels at a 512 KB quota, 246 at 1 MB) |
+| optimized engine (`-O2` + wasm-opt), apply recursion | ~2.1 KB (469 levels) | not measured |
+| optimized engine, the host-boundary recursion 0010 measured | — | ~48 B (~9,469 levels at 452 KB) |
+
+So the quota cannot stand in for the host stack. Even before 0010 widened it
+(~452 KB → ~31 MB), the optimized engine let 0010's recursion run ~9,469
+levels deep, against a host stack that holds 469 apply levels. Scaling the quota by a measured ratio fails the
+same way: the ratio moves by well over an order of magnitude between builds
+and recursions, and lowering the quota would
+also cut recursion that really does use the linear stack, which 0010 fixed.
+
+The host stack cannot be measured either. In an embedding that runs the
+thread under JSPI, the engine's wasm frames sit on a secondary stack, while a
+JS import — and any wasm a JS import calls — runs on the central stack. In
+node 26, a JS function's recursion depth and a wasm export's depth called from
+that JS were the same with 0 or 40,000 frames already on the secondary stack.
+That is why 0015's headroom probe never fired with the JIT off. Wasm cannot
+catch the overflow (`try_table (catch_all)` lets V8's `RangeError` through,
+on either stack). Frame sizes do not help: the same wasm function's frame
+changed ~6× between Liftoff and TurboFan in a probe module (the engine's own
+frames moved by less than 5% in the embed).
+
+**What it counts.** Every interpreter activation is a C++ call on the host
+stack: a `PortableBaselineInterpret` activation, or a C++ `Interpret`
+activation entered from `RunScript` (async functions, generators, a debugger
+eval, ...). Calls from script to script stay inside one activation, so a plain
+recursion costs no host stack per level; a native that calls back into script
+starts a new one. The patch keeps a per-thread count of live activations
+(`js::HostNestEnter`/`HostNestExit`, which also replaces 0015's PBL-only
+`sPBLNest`), and an activation that would pass the cap reports
+`InternalError: too much recursion` (through the same report path as 0015's
+headroom check, so `GECKO_WJ_OVERSTACKLESS` applies) instead of entering.
+
+- **The cap.** `GECKO_HOST_NESTCAP`, default 320: about two thirds of what an
+  apply recursion fits in the optimized engine (469 levels). System code gets
+  32 more, as SpiderMonkey reserves `kSystemCodeBuffer`, so chrome running on
+  a content stack at the cap can still report the error. `0` turns the cap off
+  (A/B). It applies on every thread and whatever the JIT setting: with the JIT
+  on, PBL frames still fill the secondary stack while the headroom probe
+  watches the central one.
+- **Measured costs in the embed** (`-O1`, JIT off, node `--stack-size=1968`;
+  levels before V8's overflow without the cap): `apply`, `call`,
+  `Reflect.apply`, a sort comparator 607; an accessor 660; a `Proxy` trap 607;
+  `valueOf` 582; `toJSON` 535; `eval` 513; `new Function` 582. Liftoff-only
+  and TurboFan-only runs differ by under 5%. `eval` and `new Function` count
+  two activations a level, so the cap ends them at 162, although a level
+  costs only ~1.2× an apply level: the count over-charges them ~1.65×. An
+  activation costs 2–3.3 KB depending on the native between, so the count is
+  an estimate. `Array.prototype.map`
+  and `String.prototype.replace` callbacks are self-hosted, stay in one
+  activation, and end at SpiderMonkey's own limits (12,650 and 8,533) as
+  before.
+- **Open question: the default.** A page that legitimately nests more than
+  320 counted activations now gets an `InternalError` where it used to work.
+  Nested `eval` is the likely case (counted twice a level). Measure real
+  pages with the cap off and `GECKO_WJ_SUSDBG` before trusting 320.
+- **Gaps.** The cap is a count, not a measurement. A path whose levels cost
+  more host stack than an apply level (DOM bindings that call back into
+  script, say) has less margin, and one that costs more than about 1.5× an
+  apply level can still overflow before the cap; the high-water log below is
+  how to find one. The count is per thread, so with JSPI it also includes
+  activations on a suspended stack; that only makes it stricter. The JS-only
+  embed's frames are larger than the optimized engine's, so at node's default
+  984 KB stack it still overflows before 320 levels: run it with
+  `--stack-size=1968` (`bench/main.ts`'s children use 8000).
+- **Diagnostics.** `GECKO_WJ_SUSDBG` prints each thread's deepest nesting in
+  steps of 32 (`[host-nest] high=`) and the cap's reports (`[host-nest] cap`).
+- **Regression probe.** `bench/microbenches/native-reentry.js` recurses through
+  apply, an accessor, a Proxy trap, `toJSON` and a sort comparator; with the
+  cap each ends in an `InternalError` (`MICROSUM=8005`, JIT on or off). The
+  command is in its header: it needs `--stack-size=1968` and
+  `GECKO_PBL_STACKKB=65536`, because PBL's 4 MB heap stack fills first in that
+  harness and would hide the host overflow. With `GECKO_HOST_NESTCAP=0` it
+  crashes. `bench/spidermonkey.js/embed.cpp` now takes `GECKO_NATIVE_QUOTAKB`
+  (the quota, default 8 MB), which measured the linear cost above.
+
+Octane richards/deltablue/earley/raytrace and the call-chain/native-call/
+try-catch/kitchen-sink micros keep their `--ab` checksums, and
+`host-reentry` still prints `MICROSUM=3202` with the JIT on. PBL-mode
+throughput against a build without the patch was not measured; the cost is a
+thread-local increment and decrement and one compare per activation.
 
 ## Surf integration refresh
 

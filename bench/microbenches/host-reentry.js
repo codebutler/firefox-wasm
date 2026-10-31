@@ -7,8 +7,8 @@
 // JIT frames, and this overflowed V8's stack with an uncatchable RangeError
 // that killed the process. With 0015 and the JIT on, both recursions end in a
 // catchable InternalError (MICROSUM=3202); GECKO_PBL_HEADROOM=0 crashes. With
-// the JIT off the headroom probe does not run, so this overflows as it did
-// before 0015 (the JIT-off gap in patches/README.md).
+// the JIT off the headroom probe does not run; 0021's nesting cap covers that
+// case (see native-reentry.js).
 class Benchmark {
   setup() {
     this.depth = 200000;
