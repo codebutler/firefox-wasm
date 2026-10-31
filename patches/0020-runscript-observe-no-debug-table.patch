@@ -1,0 +1,72 @@
+diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
+index 450828f0c0..0fdda89b7d 100644
+--- a/js/src/vm/Interpreter.cpp
++++ b/js/src/vm/Interpreter.cpp
+@@ -478,9 +478,8 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+   // reaches the interpreter/PBL call-site observe hooks, so it would run in
+   // PBL forever. Observe it here and, once lowered, run the wasm entry
+   // directly -- the same dispatch the PBL IC scripted-call path uses.
+-  // Only where the JIT runs (patch 0016): the counters and the per-function
+-  // table below are unsynchronized statics, and DOM workers -- with the JIT
+-  // off too -- mutated them concurrently.
++  // Only where the JIT runs (patch 0016): the JIT's call counters are
++  // unsynchronized statics owned by the main runtime's thread.
+   static int sNoNativeObs = getenv("GECKO_WJ_NONATIVEOBS") ? 1 : 0;
+   if (!sNoNativeObs && js::wasm::WasmJitActiveOnThread() && state.isInvoke() &&
+       !state.asInvoke()->constructing() &&
+@@ -490,55 +489,11 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+     if (calleeObj.is<JSFunction>()) {
+       JSFunction* wjFun = &calleeObj.as<JSFunction>();
+       if (wjFun->isInterpreted() && !wjFun->isClassConstructor()) {
+-        static int noDbg = getenv("GECKO_WJ_NOBSDBG") ? 0 : 1;
+-        // The per-function table grows with every distinct script and keeps
+-        // dangling keys; it is opt-in (GECKO_WJ_NOBSFN=1) (patch 0016).
+-        static int perFnOn = (noDbg && getenv("GECKO_WJ_NOBSFN")) ? 1 : 0;
+-        static uint64_t calls = 0, routed = 0;
+-        static std::unordered_map<JSScript*, std::pair<uint64_t, std::string>> perFn;
+         // Cold clones (new-Function siblings) reach here before any per-script
+         // threshold: aggregate their calls into the shared-bytecode family so a
+         // hot family can arm its one shared compile (see WasmJitFamilyObserve).
+         js::wasm::WasmJitFamilyObserve(state.script());
+         bool obs = js::wasm::WasmJitObserveCall(state.script());
+-        if (obs) routed++;
+-        if (perFnOn) {
+-          auto& slot = perFn[state.script()];
+-          slot.first++;
+-          if (noDbg && slot.second.empty()) {
+-            // The JSScript* key may dangle by print time (script GC'd), so
+-            // resolve every display field eagerly now and never dereference
+-            // the key later.
+-            char buf[512];
+-            snprintf(buf, sizeof(buf), "%s:%u",
+-                     state.script()->filename() ? state.script()->filename()
+-                                              : "?",
+-                     unsigned(state.script()->lineno()));
+-            slot.second = buf;
+-            JSAtom* nm = wjFun->rawAtom();
+-            if (nm) {
+-              auto ps = js::AtomToPrintableString(cx, nm);
+-              if (ps) {
+-                slot.second += " ";
+-                slot.second += ps.get();
+-              }
+-            }
+-          }
+-        }
+-        if (noDbg && ++calls % 500000 == 0) {
+-          fprintf(stderr, "[wj-nobs] calls=%llu routed=%llu\n",
+-                  (unsigned long long)calls, (unsigned long long)routed);
+-          std::vector<std::pair<JSScript*, uint64_t>> v;
+-          if (perFnOn)
+-            for (auto& kv : perFn) v.push_back({kv.first, kv.second.first});
+-          std::partial_sort(v.begin(), v.begin() + std::min<size_t>(v.size(), 6),
+-                            v.end(),
+-                            [](auto& a, auto& b) { return a.second > b.second; });
+-          for (size_t i = 0; i < std::min<size_t>(v.size(), 6); i++)
+-            fprintf(stderr, "  #%zu %s n=%llu\n", i,
+-                    perFn[v[i].first].second.c_str(),
+-                    (unsigned long long)v[i].second);
+-        }
+         if (obs) {
+           uint64_t wbits;
+           js::wasm::gWJCallCallee = ObjectValue(calleeObj).asRawBits();
