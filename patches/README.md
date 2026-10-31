@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 23 patches (0020 and 0021 are reserved for a parallel change) apply in
+All 24 patches (0020 and 0021 are reserved for a parallel change) apply in
 order and reverse back to the pristine selected source files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -1116,6 +1116,92 @@ The JIT, and so `WJH_RESUME`, runs only on the main runtime's thread (0015,
 0016), so the snapshot chain and pool need no thread-local storage. Cost on
 cdjs, which resumes about four million times: 370.4 ms → 375.7 ms (+1.4%),
 two runs each.
+
+## 0026-wasmjit-no-compact-under-jit.patch
+
+A compacting GC moves tenured cells and updates every pointer the GC can see.
+Pointers wasm-JIT frames hold in wasm locals or baked constants are not among
+them. Compacting GCs can run while such frames are live in ordinary use: the
+last-ditch GC on a failing allocation (`attemptLastDitchGC`, always
+`GCOptions::Shrink`), the memory-pressure and idle shrinking GCs whose slices
+run from allocation or interrupt checks, and GCs inside nested event loops
+(sync XHR, modal dialogs). Separately, the JIT's tables keyed by a raw
+`JSScript*` (`gEntries`, `gWJFwdCache`) and the construct cache's raw function
+and environment keys were never updated when a script died or moved.
+
+- **No compaction under JIT frames.** `GCRuntime::isCompactingGCEnabled()`
+  returns false while `WasmJitFramesLive(rt)`: the main runtime with
+  `gWJExecDepth > 0`. A GC that would have compacted still collects, but
+  nothing moves. `gWJExecDepth` counts both ways into JIT code, the
+  `WasmJitRunCall` entry and `WJH_RESUME`'s OSR re-entry. The other calls into
+  JIT functions (`wjhelpImpl`'s call, construct and initialize paths) come from
+  a helper that JIT code called, so an outer frame is already counted. Worker
+  runtimes, which never run the JIT, are unaffected.
+- **Re-checked at the compact slice.** `shouldCompact()` runs when a GC
+  begins. An incremental shrinking GC can begin with no JIT frames live and
+  reach the compact slice from an allocation under one. The Compact state now
+  checks again: before compaction starts it is skipped; once started, no more
+  zones are compacted, as `abortGC` does. Zones compacted in earlier slices ran
+  with no JIT frames live, and their pointers were updated before those slices
+  returned.
+- **Script-keyed tables follow the GC.** `WasmJitSweepScriptTables` runs from
+  `GCRuntime::callWeakPointerZonesCallbacks` on the main runtime, so it runs
+  when a sweep group's weak pointers are swept and when compaction updates
+  pointers to moved cells. It drops entries whose script is dead and re-keys
+  moved ones. Re-keying moves the map node, so a `WJEntry`'s address, which
+  callers and the direct-mapped caches hold, does not change. Those caches are
+  cleared after any change, and the 32-slot construct cache is emptied each
+  time; it refills on its next miss.
+
+`GECKO_WJ_COMPACTUNDERJIT=1` lets compaction run under JIT frames again, and
+`GECKO_WJ_NOWEAKSWEEP=1` leaves the tables unswept (A/B for each half).
+`GECKO_WJ_COMPACTDBG` logs every compacting slice (`[wj-compact] relocated
+arenas=N jitLive=0|1`) and every skipped or stopped one; `GECKO_WJ_WEAKDBG`
+logs what the sweep dropped and re-keyed (`[wj-weak] dead= moved=`). The embed
+gains `gc()` and `gc("shrinking")` (a full non-incremental GC, shrinking when
+asked). `GECKO_WJ_RESUMEGC=2` runs a shrinking GC at 0025's resume hook, and
+`=3` a normal full GC.
+
+**What the tests show, and what they don't.**
+
+- `bench/microbenches/compact-under-jit.js` runs `gc("shrinking")` from a
+  function called by a JIT frame that holds a tenured object in a local.
+  - Patched: 0 compacting slices with a JIT frame live.
+  - With `GECKO_WJ_COMPACTUNDERJIT=1`: all 10 GCs compact under the frame,
+    relocating 157–324 arenas each.
+  - Both arms print `COMPACT_BAD=0`, including after the released arenas are
+    refilled. The JIT keeps values that live across a call in traced,
+    relocated roots (call roots, the scratch slots and pools), so no
+    corruption could be provoked here. The pin is a guarantee for what the
+    roots may miss, not a fix for an observed crash.
+- `bench/microbenches/script-keys.js` compiles 600 distinct functions per
+  round, drops two thirds, runs a shrinking GC with no JIT frame live, and
+  checks every result.
+  - The sweep dropped ~600 dead-script entries and re-keyed 171 moved scripts
+    per round, and printed `SCRIPTKEYS_BAD=0`.
+  - Unswept, it also printed 0: a stale entry needs a new, compiled script at
+    the reused address, which this test did not produce.
+- **The 0025 shrinking-GC crash is not compaction.** A shrinking GC injected
+  at the resume hook (`GECKO_WJ_RESUMEGC=2`) crashes with "memory access out
+  of bounds" in the `RESUMEGC_ARGS` section of `resume-gc.js` (2 of 2 runs).
+  - It still crashes with `GECKO_NO_COMPACT=1`, with this patch's pin, and
+    with each shrinking-only step skipped: relazification, JIT-code discard,
+    prop-map and source-URL purges.
+  - A normal full GC (`=3`) crashes the same way.
+  - The named stack is `MarkingTracerT::processMarkStackTop` ←
+    `markPhase` ← `NonIncrementalGC` ← `WJResumeInjectGC` ← `wjhelpImpl`. The
+    0025 snapshot's script, env, enclosing-env and callee roots were all valid
+    cells when it happened.
+  - So a full mark during an arguments-object resume reaches a garbage cell:
+    something reachable then is stale, and a minor GC cannot see it because it
+    never marks the tenured heap. The ENV and NESTED sections survive a full
+    GC at every resume. This is outside 0026.
+
+Regressions with the patch: `resume-gc` (`GECKO_WJ_RESUMEGC=1`), `args-gc`,
+`resume-args`, `wide-args` and `host-reentry` print their expected values.
+The Octane and micro `--ab` checksums match. Octane earley and splay, six runs
+each, are within noise of the patch turned off by both switches (earley 13,452
+vs 13,520; splay 3,168 vs 2,971).
 
 ## Surf integration refresh
 
