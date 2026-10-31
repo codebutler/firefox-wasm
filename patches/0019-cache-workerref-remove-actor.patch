@@ -1,0 +1,22 @@
+diff --git a/dom/cache/CacheWorkerRef.cpp b/dom/cache/CacheWorkerRef.cpp
+index baa66d012b..c79cf175da 100644
+--- a/dom/cache/CacheWorkerRef.cpp
++++ b/dom/cache/CacheWorkerRef.cpp
+@@ -84,11 +84,12 @@ void CacheWorkerRef::AddActor(ActorChild& aActor) {
+ void CacheWorkerRef::RemoveActor(ActorChild& aActor) {
+   NS_ASSERT_OWNINGTHREAD(CacheWorkerRef);
+ 
+-#if defined(RELEASE_OR_BETA)
+-  mActorList.RemoveElement(&aActor);
+-#else
+-  MOZ_DIAGNOSTIC_ASSERT(mActorList.RemoveElement(&aActor));
+-#endif
++  // The removal must not live inside the assertion: MOZ_DIAGNOSTIC_ASSERT
++  // compiles to nothing when diagnostic asserts are disabled, which left
++  // destroyed actors in the list for Notify() to call into.
++  const bool removed = mActorList.RemoveElement(&aActor);
++  MOZ_DIAGNOSTIC_ASSERT(removed);
++  (void)removed;
+ 
+   MOZ_ASSERT(!mActorList.Contains(&aActor));
+ 

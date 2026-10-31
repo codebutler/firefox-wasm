@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 18 patches apply in order and reverse back to the pristine selected source
+All 19 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -908,6 +908,53 @@ Follow-ups to 0017 from its review, plus 0015's report:
   flag. A JIT-on YouTube run hit a `js::ContextChecks` crash
   (`unreachable`) there: one element of a packed `ArrayObject` belonged to
   another compartment, while `this` and the callee did not.
+
+## 0019-cache-workerref-remove-actor.patch
+
+`CacheWorkerRef::RemoveActor` (dom/cache) removed the actor from its list
+inside the assertion on non-release builds:
+
+```cpp
+#if defined(RELEASE_OR_BETA)
+  mActorList.RemoveElement(&aActor);
+#else
+  MOZ_DIAGNOSTIC_ASSERT(mActorList.RemoveElement(&aActor));
+#endif
+```
+
+This build's configuration leaves `MOZ_DIAGNOSTIC_ASSERT` disabled while
+`RELEASE_OR_BETA` is undefined, so the macro, and the removal with it, compile
+to nothing. Why: `moz.configure` defines `MOZ_DIAGNOSTIC_ASSERT_ENABLED` only
+for debug builds or when `milestone.is_early_beta_or_earlier`, and on a
+non-`--as-milestone` build that comes from `build/defines.sh`. The pinned
+source's `build/defines.sh` sets `EARLY_BETA_OR_EARLIER=` (empty) on purpose:
+its comment says "Unset for this embedding", because live diagnostic asserts
+cost time in the hot paths PBL runs and turn benign nightly-only assertions
+into engine-killing crashes on real sites. On this `--disable-debug` build with
+milestone `153.0a1` it is therefore false: not a release or beta build, yet no
+diagnostic asserts either. That combination is a known hazard for future
+patches. Any code that relies on `!RELEASE_OR_BETA` implying live diagnostic
+asserts, such as a side effect inside `MOZ_DIAGNOSTIC_ASSERT`, silently loses
+it here. This patch leaves the configuration as it is. The extracted `RemoveActor` in the shipped `gecko.wasm` has no
+`RemoveElement` code. Every DOM Cache actor therefore stayed in its worker
+ref's list after it was destroyed. When the worker shut down,
+`CacheWorkerRef::Notify()` called the virtual `StartDestroy()` on each freed
+actor. A garbage vtable word ended the worker with `null function`. Memory
+reused by another object ended it with `function signature mismatch`, or called
+into that object and wrote to the heap every thread shares. The list never
+emptied, so no `CacheWorkerRef` or its `StrongWorkerRef` was ever freed.
+
+A trace of one load showed the sequence. An actor was added to a ref (`n=1`),
+removed from it (`contained=1 n=1`) and destroyed. At shutdown that ref still
+listed the actor, its vtable word `0x20021`, and the worker died calling it.
+Across two loads there were 132 removals and no `CacheWorkerRef` destructor
+call. Every worker death in these runs had this stack:
+`CacheWorkerRef::Create`'s lambda ← `WorkerRef::Notify` ←
+`WorkerPrivate::NotifyWorkerRefs`.
+
+The patch removes the element unconditionally and asserts on the result. A
+search of the tree for the same shape (`#if RELEASE_OR_BETA` with a side effect
+inside the `MOZ_DIAGNOSTIC_ASSERT` branch) finds only this site.
 
 ## Surf integration refresh
 
