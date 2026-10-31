@@ -1039,9 +1039,10 @@ in `RunScript`, always uses `ReportOverRecursed`.
   default and prints `[host-nest] ignoring GECKO_HOST_NESTCAP=…`. With the
   JIT on, `0` is not exactly the pre-0021 engine: the headroom check's
   gating (nested more than 24, 8 past the last pass) now counts C++
-  `Interpret` activations as well as PBL ones, so it may probe earlier. It applies on every thread and whatever the JIT setting: with the JIT
-  on, PBL frames still fill the secondary stack while the headroom probe
-  watches the central one.
+  `Interpret` activations as well as PBL ones, so it may probe earlier. The
+  cap applies on every thread and whatever the JIT setting: with the JIT on,
+  PBL frames still fill the secondary stack while the headroom probe watches
+  the central one.
 - **Measured costs in the embed** (`-O1`, JIT off, node `--stack-size=1968`;
   levels before V8's overflow without the cap): `apply`, `call`,
   `Reflect.apply`, a sort comparator 607; an accessor 660; a `Proxy` trap 607;
