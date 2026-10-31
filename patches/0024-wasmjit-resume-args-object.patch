@@ -1,0 +1,170 @@
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index cec5381080..9bab1b401c 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -295,6 +295,12 @@ static int gPBLWJResumeTraceN = 0;
+ // InitFunctionEnvironmentObjects (which would discard live mid-function env state
+ // -> navier wrong values). Cleared on consume.
+ static bool gPBLResumeKeepEnv = false;
++// JS->wasm JIT deopt resume: the resumed frame's arguments object when the deopt
++// is past JSOp::Arguments (set by WasmJitResumeViaPBL, consumed by the prologue
++// before anything can GC). Without it frame->argsObj() is whatever the reused
++// frame memory held, and JSOp::GetArg in a function whose arguments object
++// aliases its formals reads another call's arguments.
++static ArgumentsObject* gPBLResumeArgsObj = nullptr;
+ // JS->wasm JIT try/catch: when true, the deopt resume is due to an exception thrown
+ // inside a try region of a JIT'd function (signalled at an in-try call's intact
+ // flag-check, NOT via lossy wasm-EH unwinding). After reconstructing the frame at the
+@@ -6515,6 +6521,15 @@ PBIResult PortableBaselineInterpret(
+ 
+   if (CalleeTokenIsFunction(frame->calleeToken())) {
+     JSFunction* func = CalleeTokenToFunction(frame->calleeToken());
++    // JS->wasm JIT deopt resume past JSOp::Arguments: attach the frame's
++    // arguments object first (InitFunctionEnvironmentObjects below can GC, and
++    // the global is not traced; the frame is).
++    if (ArgumentsObject* resumeArgsObj = gPBLResumeArgsObj) {
++      gPBLResumeArgsObj = nullptr;
++      if (frame->script()->needsArgsObj()) {
++        frame->initArgsObj(*resumeArgsObj);
++      }
++    }
+     // JS->wasm JIT deopt resume: the calleeToken is the CANONICAL script
+     // function, whose environment() is wrong/null for a re-instantiated closure.
+     // When the resume supplies the correct runtime enclosing env, use it as the
+@@ -9950,7 +9965,8 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
+                          uint32_t pcOff, uint64_t* retBits,
+                          const uint64_t* osrStack, uint32_t osrStackDepth,
+                          JSObject* enclosingEnv, bool keepFrameEnv,
+-                         bool resumeInError, JSFunction* runtimeCallee) {
++                         bool resumeInError, JSFunction* runtimeCallee,
++                         ArgumentsObject* argsObj) {
+   // The RUNTIME callee (the actual closure instance) when the deopt spilled it;
+   // the canonical script->function() is WRONG for closures sharing a script --
+   // JSOp::Callee in the resumed frame would push a function whose environment()
+@@ -10098,6 +10114,7 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
+   gPBLResumeEnclosingEnv = enclosingEnv;
+   gPBLResumeKeepEnv = keepFrameEnv;
+   gPBLResumeInError = resumeInError;
++  gPBLResumeArgsObj = argsObj;
+   PBIResult ret = PortableBaselineInterpret<false, false, kHybridICsInterp>(
+       cx, state, stack, sp, envChain, &result, pc, isd, nullptr, nullptr,
+       nullptr, PBIResult::Ok, osrLocals, nLocals, osrStack, osrStackDepth);
+@@ -10121,6 +10138,7 @@ bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBits,
+   }
+   gPBLResumeEnclosingEnv = nullptr;
+   gPBLResumeKeepEnv = false;
++  gPBLResumeArgsObj = nullptr;
+   static int resumeResDbg = getenv("GECKO_WJ_RESUMERESDBG") ? 1 : 0;
+   if (resumeResDbg) {
+     fprintf(stderr, "[wj-resume-res] %s:%u pcOff=%u ret=%d result=%s/%g\n",
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index c32ccb968d..4ef52d5ba8 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -1580,6 +1580,32 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+     if (!e.writeOp(Op::I32Store) || !e.writeVarU32(2) || !e.writeVarU32(0))
+       return false;
+ 
++    // The frame's arguments object (boxed), from the resume point's args-object
++    // slot. Before JSOp::Arguments that slot is not an object (PBL creates the
++    // object itself) and the runtime ignores it; after it, PBL resumes past the
++    // op and must be handed the object, or its GetArg reads (when the arguments
++    // object aliases the formals) see a stale frame->argsObj().
++    if (!e.writeOp(Op::I32Const) ||
++        !e.writeVarS32(int32_t(uintptr_t(&gWJResumeArgsObj[f]))))
++      return false;
++    {
++      MDefinition* aoDef =
++          info.needsArgsObj() ? rp->getOperand(info.argsObjSlot()) : nullptr;
++      if (aoDef && aoDef->type() == MIRType::Object) {
++        if (!EmitObjPtr(e, be, aoDef) || !e.writeOp(Op::I64ExtendI32U) ||
++            !e.writeOp(Op::I64Const) ||
++            !e.writeVarS64(int64_t(uint64_t(TagWord(JSVAL_TYPE_OBJECT)) << 32)) ||
++            !e.writeOp(Op::I64Or))
++          return false;
++      } else if (aoDef && aoDef->type() == MIRType::Value && WJCanGetOp(be, aoDef)) {
++        if (!GetOp(e, be, aoDef)) return false;  // the runtime checks the tag
++      } else if (!e.writeOp(Op::I64Const) || !e.writeVarS64(0)) {
++        return false;
++      }
++    }
++    if (!e.writeOp(Op::I64Store) || !e.writeVarU32(3) || !e.writeVarU32(0))
++      return false;
++
+     // Enclosing env for the resumed frame's PBL prologue. The OUTERMOST frame
+     // (f == nframes-1) is THIS compiled function; its enclosing (captured) env is
+     // envLocal (= gWJCurrentEnv at entry = closure->environment()). The PBL
+diff --git a/js/src/wasm/WasmJitBackend.h b/js/src/wasm/WasmJitBackend.h
+index 9ddb278ddf..3eeb30e36f 100644
+--- a/js/src/wasm/WasmJitBackend.h
++++ b/js/src/wasm/WasmJitBackend.h
+@@ -362,6 +362,13 @@ extern uint32_t gWJResumePc[];          // resume bytecode offset, per frame
+ extern uint32_t gWJResumeStackDepth[];  // expr-stack depth, per frame
+ extern uint32_t gWJResumeScriptPtr[];   // JSScript* (i32), per frame
+ extern uint32_t gWJResumeEnvPtr[];      // JSObject* env chain (i32), per frame
++// The resumed frame's arguments object as a boxed Value, per frame (0 = none:
++// the script has no arguments object, or the deopt is before JSOp::Arguments).
++// A frame resumed after JSOp::Arguments never runs that op in PBL, so PBL must
++// be handed the object; in a non-strict function whose arguments object aliases
++// the formals, every JSOp::GetArg reads frame->argsObj(). Traced while a resume
++// is active.
++extern uint64_t gWJResumeArgsObj[];
+ // The function's ENCLOSING (captured) environment for the resumed frame -- i.e.
+ // the closure's environment() = gWJCurrentEnv at entry (snapshotted to envLocal).
+ // WJH_RESUME passes it so the PBL prologue sets up the frame env from the CORRECT
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index f0837c7cd6..2d727d3e5f 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -126,7 +126,8 @@ extern bool WasmJitResumeViaPBL(JSContext* cx, JSScript* script, uint64_t thisBi
+                                 JSObject* enclosingEnv = nullptr,
+                                 bool keepFrameEnv = false,
+                                 bool resumeInError = false,
+-                                JSFunction* runtimeCallee = nullptr);
++                                JSFunction* runtimeCallee = nullptr,
++                                ArgumentsObject* argsObj = nullptr);
+ }  // namespace pbl
+ }  // namespace js
+ 
+@@ -148,6 +149,7 @@ uint32_t gWJResumePc[kWJMaxResumeFrames] = {0};
+ uint32_t gWJResumeStackDepth[kWJMaxResumeFrames] = {0};
+ uint32_t gWJResumeScriptPtr[kWJMaxResumeFrames] = {0};
+ uint32_t gWJResumeEnvPtr[kWJMaxResumeFrames] = {0};
++uint64_t gWJResumeArgsObj[kWJMaxResumeFrames] = {0};
+ uint32_t gWJResumeEnclosingEnv[kWJMaxResumeFrames] = {0};
+ // The RUNTIME callee function for the resumed frame (0 -> canonical fallback).
+ // Closures sharing a script differ from script->function(); resuming with the
+@@ -3851,10 +3853,18 @@ static double wjhelpImpl(double kindF, double siteF) {
+                 int(rcValid), int(rcIsFun), int(rcInterp), rcScript,
+                 int(scriptMatch), gWJRootSP, int(gWJResumeActive));
+       }
++      // The frame's arguments object, if the deopt is after JSOp::Arguments:
++      // PBL resumes past that op, so it must be handed the object (read here,
++      // after any GC in an inner frame's resume, from the traced slot).
++      JS::Value argsObjV = JS::Value::fromRawBits(gWJResumeArgsObj[f]);
++      JS::Rooted<js::ArgumentsObject*> argsObj(
++          cx, argsObjV.isObject() && argsObjV.toObject().is<js::ArgumentsObject>()
++                  ? &argsObjV.toObject().as<js::ArgumentsObject>()
++                  : nullptr);
+       if (!js::pbl::WasmJitResumeViaPBL(cx, script, thisBits, args, nargs, env,
+                                         locals, nlocals, gWJResumePc[f], &rbits,
+                                         stack, depth, enclosingEnv, keepFrameEnv,
+-                                        inErr, runtimeCallee)) {
++                                        inErr, runtimeCallee, argsObj)) {
+         if (getenv("GECKO_WJ_DEPTHDBG")) {
+           JSContext* dcx = js::TlsContext.get();
+           fprintf(stderr,
+@@ -7819,6 +7829,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void WJTraceRoots(JSTracer* trc, void*) {
+       WJDbgLogRoot(trc, "resumeval", i, &gWJResumeVals[i]);
+       WJTraceValueRoot(trc, &gWJResumeVals[i], "wjresumeval", i);
+     }
++    // Each resumed frame's arguments object (boxed; 0 when there is none).
++    uint32_t nf = gWJResumeNFrames;
++    if (nf > js::wasm::kWJMaxResumeFrames) nf = js::wasm::kWJMaxResumeFrames;
++    for (uint32_t f = 0; f < nf; f++) {
++      if (gWJResumeArgsObj[f])
++        WJTraceValueRoot(trc, &gWJResumeArgsObj[f], "wjresumeargsobj", f);
++    }
+     // gWJResumeActuals is NOT traced: the graft consumes it into gWJResumeVals
+     // (traced) before any allocation, and stale slots from earlier deopts may
+     // hold dangling pointers (tracing them crashed the object-args repro).
