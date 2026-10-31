@@ -1,0 +1,23 @@
+bench/microbenches/resume-env.js
+  s_390685797d98e1::t_621d3b301a83a8 10-11,32-48
+patches/0025-wasmjit-resume-snapshot.patch
+  s_390685797d98e1::t_7c4eb966c1ae2d 2,5-80,85-89,408-434
+patches/README.md
+  s_390685797d98e1::t_327889b10c971e 1251-1287,1292-1295
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8669f314f0bfe90e05f1e229ca1f654b39a0ab3d",
+  "prompts": {},
+  "sessions": {
+    "s_390685797d98e1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "20ba1471-3437-4fd1-8c1b-291787272cac",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
