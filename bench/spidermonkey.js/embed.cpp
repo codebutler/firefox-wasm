@@ -414,7 +414,14 @@ int main(int argc, char** argv) {
   if (!js::UseInternalJobQueues(cx)) { fprintf(stderr, "[embed] UseInternalJobQueues failed\n"); return 1; }
   if (!JS::InitSelfHostedCode(cx)) { fprintf(stderr, "[embed] InitSelfHostedCode failed\n"); return 1; }
   JS_SetGCParameter(cx, JSGC_MAX_BYTES, 0xffffffff);
-  JS_SetNativeStackQuota(cx, 8 * 1024 * 1024);
+  // GECKO_NATIVE_QUOTAKB=<kb> sizes SpiderMonkey's recursion quota (the
+  // linear-memory C stack it measures); default 8 MB.
+  {
+    size_t quota = 8 * 1024 * 1024;
+    if (const char* q = getenv("GECKO_NATIVE_QUOTAKB"); q && *q)
+      quota = size_t(strtoul(q, nullptr, 10)) * 1024;
+    JS_SetNativeStackQuota(cx, quota);
+  }
   // Diagnostic: disable generational GC (nursery) entirely -> all objects are
   // tenured and never moved by a minor GC. Used to confirm whether a mid-render
   // minor GC moving a nursery object held stale in a wasm local is the raytrace
