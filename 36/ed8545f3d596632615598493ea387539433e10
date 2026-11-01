@@ -1,0 +1,21 @@
+patches/0025-wasmjit-resume-snapshot.patch
+  s_390685797d98e1::t_9ab4efc59b2178 1-37,39,42,46,50-62,75-82,91-92,94-95,98-99,102-105,117,126-127,131,460,471,477-479
+patches/README.md
+  s_390685797d98e1::t_84355aeb60f112 1270-1272,1277-1278,1284-1291,1315-1318
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "36ed8545f3d596632615598493ea387539433e10",
+  "prompts": {},
+  "sessions": {
+    "s_390685797d98e1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "20ba1471-3437-4fd1-8c1b-291787272cac",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
