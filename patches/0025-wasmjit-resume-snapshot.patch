@@ -1,24 +1,65 @@
+diff --git a/js/src/vm/Realm.cpp b/js/src/vm/Realm.cpp
+index 04f75ffe1f..228619d3c3 100644
+--- a/js/src/vm/Realm.cpp
++++ b/js/src/vm/Realm.cpp
+@@ -28,6 +28,7 @@
+ #include "vm/Iteration.h"
+ #include "vm/JSContext.h"
+ #include "wasm/WasmInstance.h"
++#include "wasm/WasmJit.h"  // WasmJitInvalidateAll (debuggee realm)
+ 
+ #include "gc/Marking-inl.h"
+ #include "gc/WeakMap-inl.h"
+@@ -476,6 +477,9 @@ void Realm::setIsDebuggee() {
+   if (!isDebuggee()) {
+     debugModeBits_ |= IsDebuggee;
+     runtimeFromMainThread()->incrementNumDebuggeeRealms();
++    // The wasm-JIT neither compiles nor runs debuggee code: discard what it
++    // compiled before this realm became a debuggee (see WasmJit.h).
++    js::wasm::WasmJitInvalidateAll("debuggee");
+   }
+ }
+ 
+diff --git a/js/src/wasm/WasmJit.h b/js/src/wasm/WasmJit.h
+index 1c10d73235..8e40741fb4 100644
+--- a/js/src/wasm/WasmJit.h
++++ b/js/src/wasm/WasmJit.h
+@@ -64,7 +64,9 @@ extern bool WasmJitInWasm();
+ // baked a fuse-guarded elision (e.g. the array-destructuring iterator
+ // protocol), and unlike Ion we register no per-script fuse dependencies --
+ // a full flush on this rare event is the sound equivalent. Re-warmed
+-// recompiles read the popped fuse and drop the elision.
++// recompiles read the popped fuse and drop the elision. Also called when a
++// realm becomes a debuggee (Realm::setIsDebuggee): debuggee code runs in PBL,
++// which runs the Debugger hooks. A frame already running finishes either way.
+ extern void WasmJitInvalidateAll(const char* reason);
+ 
+ // Aggregate always-on JIT counters into a JSON string (task #57 __wjStats).
 diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
-index a35b76d4a2..112d0aab20 100644
+index a35b76d4a2..ec31edff15 100644
 --- a/js/src/wasm/WasmJitBackend.cpp
 +++ b/js/src/wasm/WasmJitBackend.cpp
-@@ -28,6 +28,7 @@
- #include "jit/CompileInfo.h"
- #include "jit/InlineScriptTree.h"  // BytecodeSite (precise bail op location)
- #include "jit/IonTypes.h"  // IsResumeAfter
-+#include "jit/JitScript.h"  // usesEnvironmentChain (resume env of an env-less frame)
- #include "jit/MIR.h"
- #include "jit/MIRGenerator.h"
- #include "jit/MIRGraph.h"
-@@ -63,6 +64,7 @@ extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx);
+@@ -63,6 +63,7 @@ extern "C" void WJAddOsrTarget(uint32_t pcOff, uint32_t blockIdx);
  #include "gc/ObjectKind-inl.h"  // gc::GetGCObjectKind (object-literal inline alloc)
  #include "vm/GlobalObject.h"     // getArrayShapeWithDefaultProto (array inline alloc)
  #include "vm/JSObject-inl.h"     // GuessArrayGCKind (array inline alloc)
-+#include "vm/JSScript-inl.h"     // JSScript::global (resume env of an env-less frame)
++#include "vm/JSScript-inl.h"     // JSScript::global (resume env)
  #include "vm/StringType.h"       // JSString/JSRope/JSFatInlineString (inline rope concat)
  #include "vm/StringFlags.h"      // StringFlags::ropeFlags / CharEncoding (inline rope concat)
  #include "vm/EnvironmentObject.h"  // BlockLexicalEnvironmentObject (NewLexicalEnvironmentObject)
-@@ -1290,6 +1292,45 @@ static bool EmitObjPtr(Encoder& e, WJBackend& be, MDefinition* v) {
+@@ -1271,7 +1272,10 @@ static bool EmitObjPtr(Encoder& e, WJBackend& be, MDefinition* v) {
+       JSObject* obj = c->toObjectOrNull();
+       if (!obj) return e.writeOp(Op::I32Const) && e.writeVarS32(0);
+       uintptr_t slot = WJInternConstant(JS::ObjectValue(*obj).asRawBits());
+-      if (!slot) return false;
++      if (!slot) {
++        js::wasm::gWJBailReason = "const-pool-full";
++        return false;
++      }
+       return e.writeOp(Op::I32Const) && e.writeVarS32(int32_t(slot)) &&
+              e.writeOp(Op::I64Load) && e.writeVarU32(3) && e.writeVarU32(0) &&
+              e.writeOp(Op::I32WrapI64);
+@@ -1290,6 +1294,54 @@ static bool EmitObjPtr(Encoder& e, WJBackend& be, MDefinition* v) {
    return GetLocal(e, uint32_t(be.local(v)));
  }
  
@@ -31,11 +72,14 @@ index a35b76d4a2..112d0aab20 100644
 +// roots the env. So without a root the RP env operand is either a constant
 +// object (spilled through the traced constant pool) or, for NoEnvironment, the
 +// slot's initial Undefined (MOsrEnvironmentChain is built only for a script
-+// that uses its chain, WarpBuilder::startNewOsrPreHeaderBlock): the frame's remaining bytecode never reads its env,
-+// so we hand the interpreter the realm's global lexical environment, a live
-+// object reached through the same traced pool, rather than a value that could go
-+// stale. Debuggee scripts never compile (WJBuildMember), so the Debugger cannot
-+// see the substitute. Anything else fails the compile.
++// that uses its chain, WarpBuilder::startNewOsrPreHeaderBlock): the frame's
++// remaining bytecode never reads its env, so we hand the interpreter the
++// realm's global lexical environment, a live object reached through the same
++// traced pool, rather than a value that could go stale. Debuggee scripts never
++// compile (WJBuildMember), and a realm that becomes a debuggee discards all
++// compiled code (Realm::setIsDebuggee), so the Debugger cannot see the
++// substitute unless a frame already running finishes after that. Anything
++// else fails the compile.
 +static bool EmitUnrootedOuterEnv(Encoder& e, WJBackend& be,
 +                                 const jit::CompileInfo& info,
 +                                 MDefinition* envOp) {
@@ -44,15 +88,21 @@ index a35b76d4a2..112d0aab20 100644
 +    return EmitObjPtr(e, be, envOp);
 +  // Undefined-typed, not only a constant (past a loop head the slot is a phi
 +  // of the entry's and the OSR block's Undefined constants), or optimized out
-+  // (the operand is dead, which is the point).
++  // (the operand is dead, which is the point). The decision is the snapshot's
++  // own: the root script's environment kind is what made the slot Undefined.
 +  JSScript* script = info.script();
++  jit::WarpScriptSnapshot* root =
++      be.snapshot ? be.snapshot->rootScript() : nullptr;
 +  if ((envOp->type() == MIRType::Undefined ||
 +       envOp->type() == MIRType::MagicOptimizedOut) &&
-+      script->hasJitScript() &&
-+      !script->jitScript()->usesEnvironmentChain()) {
++      root && root->script() == script &&
++      root->environment().is<jit::NoEnvironment>()) {
 +    JSObject* lex = &script->global().lexicalEnvironment();
 +    uintptr_t slot = WJInternConstant(JS::ObjectValue(*lex).asRawBits());
-+    if (!slot) return false;
++    if (!slot) {
++      js::wasm::gWJBailReason = "const-pool-full";
++      return false;
++    }
 +    return e.writeOp(Op::I32Const) && e.writeVarS32(int32_t(slot)) &&
 +           e.writeOp(Op::I64Load) && e.writeVarU32(3) && e.writeVarU32(0) &&
 +           e.writeOp(Op::I32WrapI64);
@@ -64,7 +114,7 @@ index a35b76d4a2..112d0aab20 100644
  // Sound deopt: box the resume point's live state [this,args,locals,stack] into
  // gWJResumeVals, record pc + stack depth, and call wjhelp(WJH_RESUME), which
  // rebuilds a PBL frame and finishes the function there.
-@@ -1564,7 +1605,11 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+@@ -1564,7 +1616,12 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
      if (!e.writeOp(Op::I32Const) ||
          !e.writeVarS32(int32_t(uintptr_t(&gWJResumeEnvPtr[f]))))
        return false;
@@ -73,11 +123,12 @@ index a35b76d4a2..112d0aab20 100644
 +      if (!EmitUnrootedOuterEnv(e, be, info,
 +                                rp->getOperand(info.environmentChainSlot())))
 +        return false;
-+    } else if (!EmitObjPtr(e, be, rp->getOperand(info.environmentChainSlot()))) {
++    } else if (!EmitObjPtr(e, be,
++                           rp->getOperand(info.environmentChainSlot()))) {
        if (f == nframes - 1 && be.useEnvRoot) {
          uintptr_t rootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
          if (!GetLocal(e, be.envRootIdx) || !e.writeOp(Op::I32Const) ||
-@@ -1655,7 +1700,11 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
+@@ -1655,7 +1712,11 @@ static bool EmitDeoptResumeInline(Encoder& e, WJBackend& be) {
            !e.writeVarU32(3) || !e.writeVarU32(0) || !e.writeOp(Op::I32WrapI64))
          return false;
      } else if (f == nframes - 1) {
@@ -406,7 +457,7 @@ index 21fc70597d..cb9752c6d1 100644
      fprintf(stderr, "[wjrootlog] === WJTraceRoots DONE ===\n");
  }
 diff --git a/js/src/wasm/WasmJitWarp.cpp b/js/src/wasm/WasmJitWarp.cpp
-index 632e26ac5e..dcaa30c05c 100644
+index 632e26ac5e..e7b637eca4 100644
 --- a/js/src/wasm/WasmJitWarp.cpp
 +++ b/js/src/wasm/WasmJitWarp.cpp
 @@ -43,6 +43,7 @@
@@ -417,13 +468,15 @@ index 632e26ac5e..dcaa30c05c 100644
  #include "vm/Realm-inl.h"
  #include "js/GCVector.h"
  
-@@ -135,6 +136,14 @@ static uint32_t gWJCompileSerial = 0;
+@@ -135,6 +136,16 @@ static uint32_t gWJCompileSerial = 0;
  static std::unique_ptr<WJMemberBuild> WJBuildMember(JSContext* cx,
                                                    JSScript* script,
                                                    bool forceMega, bool dump) {
 +  // Debuggee code stays in PBL, as Ion leaves it to Baseline: PBL runs the
 +  // Debugger hooks, and a deopt resume may hand an env-less frame a substitute
-+  // environment the Debugger must never see (EmitUnrootedOuterEnv).
++  // environment the Debugger must never see (EmitUnrootedOuterEnv). Code
++  // compiled before its realm became a debuggee is discarded then
++  // (Realm::setIsDebuggee), so this gate keeps it from recompiling.
 +  if (script->isDebuggee() || script->realm()->isDebuggee() ||
 +      script->hasDebugScript()) {
 +    js::wasm::gWJBailReason = "debuggee";

@@ -1267,25 +1267,28 @@ So the resume point's environment operand is either:
   guard); or
 - for `NoEnvironment`, the slot's initial Undefined (a phi of the entry's and
   the OSR block's Undefined past a loop head, since `MOsrEnvironmentChain` is
-  built only for a script that uses its chain), or optimized out. The frame's
-  remaining bytecode never reads its environment, so the resume hands the
+  built only for a script that uses its chain), or optimized out, read off
+  the Warp snapshot's root environment kind. The frame's remaining bytecode
+  never reads its environment, so the resume hands the
   interpreter the realm's global lexical environment, through the same traced
   pool, rather than a value that could go stale.
 
 Any other operand on a frame without a root fails the compile
-(`resume-env-unrooted`). Octane and cdjs show no such bail.
+(`resume-env-unrooted`; a full constant pool is `const-pool-full`). Octane and
+cdjs show no such bail.
 
 The one remaining observer of the substitute environment would be the
 Debugger (`Frame.environment`). The JIT had no Debugger gate; it now refuses
 to compile a debuggee script, a script in a debuggee realm, or a script with a
 debug script (breakpoints, step mode), the way Ion leaves debuggee code to
-Baseline. Entry is not gated (a check on every interpreter-to-JIT call
-measured as a likely cost on a call-heavy microbench and was dropped). Not
-covered: a realm that becomes a debuggee after a function was compiled keeps
-calling the compiled code, as before this patch (calls between
-compiled functions bypass the interpreter's routing), and a resume in it gets
-the substitute. The test embed has no Debugger, so the gate is not exercised by
-a test.
+Baseline. A realm that becomes a debuggee discards all compiled code
+(`Realm::setIsDebuggee` calls `WasmJitInvalidateAll`, the flush a popped fuse
+uses), so neither interpreter-to-JIT entries nor calls between compiled
+functions reach old code afterwards; the gate keeps it from recompiling. This
+also closes the older hole of compiled code skipping the Debugger's hooks. As
+with a fuse pop, a frame already running finishes in its compiled code, and a
+deopt resume of such a frame can still hand the interpreter the substitute.
+The test embed has no Debugger, so neither gate is exercised by a test.
 
 An earlier version rooted the environment in every compile. That cost 5% on
 Richards and 14% on DeltaBlue, so it was dropped for the above.
@@ -1309,7 +1312,10 @@ Not covered by the test: a resume with inlined frames (several frames in one
 resume), where the outer frames are read after the inner ones run. No shape
 tried here, and nothing in Octane or cdjs, produced such a resume, so the
 "nested resume clobbers an outer frame" case is fixed by construction but not
-exercised. A forced shrinking (compacting) GC at the same point still crashes,
+exercised. The constant pool is a permanent strong root, so a global lexical
+environment interned for a resume keeps that environment and its global
+alive, as the pool already does for the functions and objects compiled code
+uses. A forced shrinking (compacting) GC at the same point still crashes,
 before any frame is read; that is a different question (compaction while JIT
 frames are live) and is not addressed here.
 
