@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 27 patches apply in order and reverse back to the pristine selected source
+All 28 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -1477,6 +1477,79 @@ alive across plain `gc()` calls. It has no resume hook.
 `resume-args`, `args-gc`, `wide-args`, `compact-under-jit`, `script-keys` and
 `host-reentry` print their expected values, and the Octane and micro `--ab`
 checksums match.
+
+## 0028-pbl-resume-handoff-per-thread.patch
+
+`WasmJitResumeViaPBL` hands a deopt resume's state to the PBL activation it
+starts through four statics: the enclosing environment, the keep-the-frame-env
+flag, the arguments object and the resume-in-error flag. The next activation's
+prologue consumes them. They were process-wide (a comment still said
+"Single-threaded shell"), so the next function activation on *any* thread
+consumed them.
+
+What went wrong when a DOM or service worker started a function in the window
+between the main thread setting them and entering PBL:
+
+- The worker took the main runtime's enclosing environment as its own frame
+  environment. `InitFunctionEnvironmentObjects` then failed `ContextChecks`
+  (`unreachable`), or a class check read the other runtime's cell (out of
+  bounds). These are the two signatures of the service-worker deaths in a
+  fetch handler's `new Promise(executor)`.
+- The worker could attach the main thread's arguments object to its frame.
+- The main thread's resumed frame silently fell back to the canonical
+  environment and had no arguments object.
+
+Only JIT resumes set these, so the race needs the JIT on.
+
+**Fix.** The four are `thread_local`. They are set and consumed on the same
+thread. Nothing traces them; only the prologue's over-recursion error paths can
+GC before they are consumed, and WasmJitResumeViaPBL clears them after
+PBL returns, as before.
+
+**Audit of the class.** These are the mutable process-wide globals that a
+thread other than the main runtime's can reach in PBL, the interpreter, the
+JIT and the GC hooks the fork adds:
+
+| state | where | status |
+|---|---|---|
+| `gPBLResumeEnclosingEnv`, `gPBLResumeKeepEnv`, `gPBLResumeArgsObj`, `gPBLResumeInError` | PBL prologue, every thread | **thread_local (this patch)** |
+| task-#60 frame-walk ring (`gWjWalk`, `gWjWalkN`, `gWjWalkAct`) | `TraceJitFrames`, every thread's GC | **thread_local (this patch)**; diagnostic only, but a shared ring mixed threads' frames in the post-mortem. `WJDumpCrashState` now dumps the calling thread's ring |
+| PBL unwind carry (`gPBLUnwinding`, FP, SP, exception, stack) | PBL | thread_local since 0018 |
+| headroom pass level (`sLastPassNest`), interpreter nesting | PBL, `RunScript` | thread_local (0015, 0021) |
+| `gWJCallCallee` | `RunScript` observe block, C++ `Interpret` call path, PBL scripted-call IC | main-only: each write sits behind `WasmJitActiveOnThread`/`WasmJitObserveCall` (0015, 0016) |
+| `gWJJitDepth` (PBL activation charge) | `WJHostActivation` | main-only: `WasmJitPblCharge` is 0 off the JIT's thread |
+| `gEntries`, families, pools, scratch, call roots, the deferred queue | `WasmJitPreCall`/`ObserveCall`/`FamilyObserve`/`RunCall` | main-only: each returns at `WJThreadAllowed()` first |
+| fuse-pop invalidation, depth calibration | `WasmJitInvalidateAll`, `wj_set_depth_limit` | main-only: return on worker runtimes (0016) |
+| JIT roots, script-table sweep, the compaction pin | `RootMarking`, `callWeakPointerZonesCallbacks`, `isCompactingGCEnabled` | main-only: gated on `!parentRuntime` (0016, 0026) |
+| `gWJExecDepth` reads (`WasmJitInWasm`, `WasmJitFramesLive`) | decompiler, GC | written only on the JIT's thread; readers gate on the thread or runtime |
+| `gPBLWJResumeTraceN`, `WJExitFPDbg` state, log throttles (`static uint64_t n`) | PBL | proven safe: active only under a debug env var, or used only to rate-limit log lines; nothing reads them to decide behaviour |
+| `getenv`-cached function statics | throughout | proven safe: those initialized with a static initializer are thread-safe one-time init; those using a lazy `-1` sentinel race benignly, because every thread writes the same value |
+
+**Test.** The JS-only shell is single-threaded, so it cannot race two
+runtimes; a fetch-handler-shaped stress test there (async handler → PBL →
+`new Promise(executor)`, 30,000 events, gc zeal 7/1, 7/13 and 5) never failed
+before or after. The evidence is a browser diagnostic build that carried this
+patch, counted the worker activations that ran while another thread's
+hand-off was pending (`[pbl-steal]`, the ones the old statics would have let
+the worker consume), and checked every function activation's environment
+before `InitFunctionEnvironmentObjects` (`[pbl-envchk]`):
+
+| arm | worker deaths | app deaths | `[pbl-steal]` | `[pbl-envchk] BAD` |
+|---|---|---|---|---|
+| JIT on, heavy video site ×25 | 0 (3 in 64 before) | 0 | in 2 runs | 0 |
+| JIT off ×8 | 0 | 0 | 0 | 0 |
+
+Two loads raced exactly as described and, with this patch, nothing died.
+Zero deaths in 25 against 3 in 64 is weak on its own (P ≈ 0.3); the steal
+count is the direct evidence that the window is hit in real loads.
+
+**What this does not settle.** The same environment-at-entry crash was once
+seen on a service worker with the JIT off, where nothing sets these statics.
+Eight JIT-off loads with the environment check found nothing, which at that
+sighting's rate (1 in 17) is expected about 60% of the time, so a second
+cause stays open. The check catches a bad environment at function entry;
+a stale environment that only goes bad later in the frame would need a
+different probe.
 
 ## Surf integration refresh
 
