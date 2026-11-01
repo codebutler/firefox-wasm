@@ -25,7 +25,7 @@ against the new pin with these resolutions:
   traced script pool for ordinary/inlined scripts. Both paths survive script
   relocation instead of emitting a stale compile-time pointer.
 
-All 24 patches apply in order and reverse back to the pristine selected source
+All 25 patches apply in order and reverse back to the pristine selected source
 files. The WebGL patches and native stack quota patch apply unchanged. A full
 Linux build and Surf runtime validation are required for each new artifact.
 
@@ -1225,6 +1225,104 @@ After it, two runs printed 0 for all three, matching the interpreter
 shape (its arguments object does not alias the formals) and a shape that
 assigns a formal (no such function was seen to deopt-resume, so the stale
 `SetArg` path is not reached today).
+
+## 0025-wasmjit-resume-snapshot.patch
+
+A deopt resume (`WJH_RESUME`) read the state the emitted spill left in the
+`gWJResume*` globals frame by frame, after earlier work that can run a GC or
+another resume:
+
+- the script, environment, enclosing environment and runtime callee were raw
+  pointers that no GC updated, read after `ensureHasJitScript` (which can
+  allocate) and, for an outer frame, after the inner frames' whole interpreter
+  runs;
+- a resume nested inside an inner frame's interpreter run overwrote every
+  global, and its exit cleared `gWJResumeActive`, so an outer frame read the
+  nested resume's state from untraced storage.
+
+`WJH_RESUME` now copies the whole spill (values, per-frame layout, and the
+script, environment, enclosing environment, callee and arguments object of
+each frame) into a snapshot of its own at entry, before anything can
+allocate, and the frame loop reads only that copy. Snapshots form a chain,
+one per nesting depth, from a reused pool, and `WJTraceRoots` traces every
+snapshot in the chain, so their pointers stay current across a GC. The OSR
+fast path reads the snapshot too.
+
+The outer frame's environment and enclosing environment no longer come from
+`envLocal`, which is not a GC root: a minor GC between entry and the deopt
+would leave it stale, and the snapshot would then trace a stale pointer. A
+function with an env root (`useEnvRoot`: any `FunctionEnvironment`, or the
+argument, callee and rest operations) spills the persistent root slot, which a
+moving GC keeps current. A function without one never holds an environment it
+reads. Warp builds an environment only for a script that uses its chain
+(`WarpScriptOracle::createEnvironment` over `ScriptUsesEnvironmentChain`,
+which scans ALL the bytecode for `JOF_USES_ENV` ops, `Lambda` and `Arguments`
+included, and counts any function that needs an environment object, which a
+direct `eval` forces), and every such function gets a `FunctionEnvironment`.
+So the resume point's environment operand is either:
+
+- a constant object, spilled through the traced constant pool as both the
+  environment and the enclosing environment (Warp gives only module and global
+  scripts a constant environment, and those never compile, so this is a
+  guard); or
+- for `NoEnvironment`, the slot's initial Undefined (a phi of the entry's and
+  the OSR block's Undefined past a loop head, since `MOsrEnvironmentChain` is
+  built only for a script that uses its chain), or optimized out, read off
+  the Warp snapshot's root environment kind. The frame's remaining bytecode
+  never reads its environment, so the resume hands the
+  interpreter the realm's global lexical environment, through the same traced
+  pool, rather than a value that could go stale.
+
+Any other operand on a frame without a root fails the compile
+(`resume-env-unrooted`; a full constant pool is `const-pool-full`). Octane and
+cdjs show no such bail.
+
+The one remaining observer of the substitute environment would be the
+Debugger (`Frame.environment`). The JIT had no Debugger gate; it now refuses
+to compile a debuggee script, a script in a debuggee realm, or a script with a
+debug script (breakpoints, step mode), the way Ion leaves debuggee code to
+Baseline. A realm that becomes a debuggee discards all compiled code
+(`Realm::setIsDebuggee` calls `WasmJitInvalidateAll`, the flush a popped fuse
+uses), so neither interpreter-to-JIT entries nor calls between compiled
+functions reach old code afterwards; the gate keeps it from recompiling. This
+also closes the older hole of compiled code skipping the Debugger's hooks. As
+with a fuse pop, a frame already running finishes in its compiled code, and a
+deopt resume of such a frame can still hand the interpreter the substitute.
+The test embed has no Debugger, so neither gate is exercised by a test.
+
+An earlier version rooted the environment in every compile. That cost 5% on
+Richards and 14% on DeltaBlue, so it was dropped for the above.
+
+`GECKO_WJ_RESUMEGC=1` (test only) forces a minor GC inside every resume, at
+entry and before each frame's reads. `bench/microbenches/resume-env.js` covers
+the enclosing environment (a closure over a fresh outer `let`, read only after
+a deopt; with only the GC hook it crashed with "memory access out of bounds")
+and functions without an env root (resumes through the global lexical
+environment: at entry, mid-body, inside a loop, and in a frame that throws to
+its caller; the nested ones are created inside an outer function's call
+object, so their real closure environment differs from the substitute); with
+the patch it prints 0, in every `GECKO_WJ_RESUMEGC` mode
+including the full GCs that 0026 adds. `bench/microbenches/resume-gc.js`, run
+with it, resumes 2000 frames (500 per shape), including resumes nested inside
+another resume's interpreter run; each line should print 0. With only the GC
+hook (no snapshot) the run crashed with "memory access out of bounds" in two of
+two runs; with the patch both runs printed 0, matching the interpreter.
+
+Not covered by the test: a resume with inlined frames (several frames in one
+resume), where the outer frames are read after the inner ones run. No shape
+tried here, and nothing in Octane or cdjs, produced such a resume, so the
+"nested resume clobbers an outer frame" case is fixed by construction but not
+exercised. The constant pool is a permanent strong root, so a global lexical
+environment interned for a resume keeps that environment and its global
+alive, as the pool already does for the functions and objects compiled code
+uses. A forced shrinking (compacting) GC at the same point still crashes,
+before any frame is read; that is a different question (compaction while JIT
+frames are live) and is not addressed here.
+
+The JIT, and so `WJH_RESUME`, runs only on the main runtime's thread (0015,
+0016), so the snapshot chain and pool need no thread-local storage. Cost on
+cdjs, which resumes about four million times: 370.4 ms → 375.7 ms (+1.4%),
+two runs each.
 
 ## Surf integration refresh
 
