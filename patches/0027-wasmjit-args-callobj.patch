@@ -1,0 +1,79 @@
+diff --git a/js/src/wasm/WasmJitBackend.cpp b/js/src/wasm/WasmJitBackend.cpp
+index 3b4f351a9d..d1ac9a725f 100644
+--- a/js/src/wasm/WasmJitBackend.cpp
++++ b/js/src/wasm/WasmJitBackend.cpp
+@@ -10798,8 +10798,9 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+     case MDefinition::Opcode::CreateArgumentsObject: {
+       // Materialize `arguments` (block-0 op). Stage all kWJMaxArgs actuals (wasm
+       // params kWJArg0Param+i; caller pads beyond argc), the runtime callee
+-      // (gWJCallRoots[envRootIdx+1]), the env (gWJCallRoots[envRootIdx]) and the
+-      // argc snapshot, then WJH_NEWARGUMENTS -> ArgumentsObject::createForWasmJit.
++      // (gWJCallRoots[envRootIdx+1]), the op's callObject operand (the frame's
++      // CallObject, or its env when it has none) and the argc snapshot, then
++      // WJH_NEWARGUMENTS -> ArgumentsObject::createForWasmJit.
+       // Only the outer running frame (inlined frames' args aren't staged here).
+       // DEFAULT-ON again (GECKO_WJ_NOARGSOBJ disables). The >kWJMaxArgs-actuals
+       // correctness bug (object sized to argc but only 8 actuals staged -> elements
+@@ -10824,7 +10825,7 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+         return false;
+       uintptr_t rootsBase = uintptr_t(static_cast<void*>(&gWJCallRoots[0]));
+       auto emitEnvRootLoad = [&](uint32_t byteOff) -> bool {
+-        // push boxed gWJCallRoots[envRootIdx] at byteOff (0=env, 8=callee)
++        // push boxed gWJCallRoots[envRootIdx] at byteOff (8 = the callee)
+         return e.writeOp(Op::LocalGet) && e.writeVarU32(be.envRootIdx) &&
+                e.writeOp(Op::I32Const) && e.writeVarS32(8) && e.writeOp(Op::I32Mul) &&
+                e.writeOp(Op::I32Const) && e.writeVarS32(int32_t(rootsBase)) &&
+@@ -10842,9 +10843,14 @@ static bool EmitValue(Encoder& e, WJBackend& be, MInstruction* ins) {
+           !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
+           !e.writeVarU32((kWJArgsMetaSlot + 0) * 8))
+         return false;
+-      if (!GetLocal(e, be.scratchBase) || !emitEnvRootLoad(0) ||  // [meta+1]=env
+-          !e.writeOp(Op::I64Store) || !e.writeVarU32(3) ||
+-          !e.writeVarU32((kWJArgsMetaSlot + 1) * 8))
++      // [meta+1]=env: the op's callObject operand, the frame's CallObject when
++      // the function has one (patch 0027). The entry env root holds the env the
++      // function was called with, which for such a function is the ENCLOSING
++      // scope; handed to createForWasmJit it made a mapped arguments object
++      // whose MAYBE_CALL_SLOT was ObjectValue(nullptr), and the next full GC
++      // to mark it read through the null pointer.
++      if (!EmitStageScratch(e, be, ins->toCreateArgumentsObject()->callObject(),
++                            kWJArgsMetaSlot + 1))
+         return false;
+       if (!GetLocal(e, be.scratchBase) ||                          // [meta+2]=argc (raw)
+           !GetLocal(e, be.actualArgcLocal) || !e.writeOp(Op::I64ExtendI32U) ||
+@@ -16481,9 +16487,10 @@ bool js::wasm::WJEmitBody(MIRGenerator& mir, MIRGraph& graph, uint32_t nargs,
+           }
+           break;
+         case MDefinition::Opcode::CreateArgumentsObject:
+-          // Materializing `arguments` needs the actual arg count (snapshot),
+-          // the runtime callee (envRootIdx+1) and the env (envRootIdx) staged
+-          // for WJH_NEWARGUMENTS -> ArgumentsObject::createForWasmJit.
++          // Materializing `arguments` needs the actual arg count (snapshot) and
++          // the runtime callee (envRootIdx+1, so the env root too) staged for
++          // WJH_NEWARGUMENTS -> ArgumentsObject::createForWasmJit; the env it
++          // gets is the op's callObject operand (patch 0027).
+           if (b->info().script() == be.info->script()) {
+             be.usesArgc = true;
+             be.usesCallee = true;
+diff --git a/js/src/wasm/WasmJitRuntime.cpp b/js/src/wasm/WasmJitRuntime.cpp
+index 1951cbcb07..ea2e17fe9a 100644
+--- a/js/src/wasm/WasmJitRuntime.cpp
++++ b/js/src/wasm/WasmJitRuntime.cpp
+@@ -5528,6 +5528,17 @@ static double wjhelpImpl(double kindF, double siteF) {
+     for (uint32_t i = 0; i < argc; i++) {
+       actuals[i] = JS::Value::fromRawBits(gWJScratch[i]);
+     }
++    // A mapped arguments object whose formals the CallObject aliases keeps
++    // that CallObject in MAYBE_CALL_SLOT; createForWasmJit takes it from the
++    // staged scope. Anything else there would store ObjectValue(nullptr), which
++    // the next full GC dereferences, so fail loudly here instead (patch 0027).
++    if (callee->needsCallObject() && callee->hasBytecode() &&
++        callee->nonLazyScript()->argsObjAliasesFormals() &&
++        !scopeChain->is<js::CallObject>()) {
++      fprintf(stderr, "[wj-args] staged scope is %s, not the CallObject\n",
++              scopeChain->getClass()->name);
++      MOZ_CRASH("WJH_NEWARGUMENTS: staged scope is not the frame's CallObject");
++    }
+     js::ArgumentsObject* obj =
+         js::ArgumentsObject::createForWasmJit(cx, callee, scopeChain, actuals, argc);
+     if (!obj) return 1.0;
