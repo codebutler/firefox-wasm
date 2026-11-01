@@ -1526,9 +1526,30 @@ JIT and the GC hooks the fork adds:
 | `getenv`-cached function statics | throughout | proven safe: those initialized with a static initializer are thread-safe one-time init; those using a lazy `-1` sentinel race benignly, because every thread writes the same value |
 
 **Test.** The JS-only shell is single-threaded, so it cannot race two
-runtimes. The evidence comes from a browser diagnostic build that carried
-this patch and counted the worker activations the old statics would have
-consumed (results pending).
+runtimes; a fetch-handler-shaped stress test there (async handler → PBL →
+`new Promise(executor)`, 30,000 events, gc zeal 7/1, 7/13 and 5) never failed
+before or after. The evidence is a browser diagnostic build that carried this
+patch, counted the worker activations that ran while another thread's
+hand-off was pending (`[pbl-steal]`, the ones the old statics would have let
+the worker consume), and checked every function activation's environment
+before `InitFunctionEnvironmentObjects` (`[pbl-envchk]`):
+
+| arm | worker deaths | app deaths | `[pbl-steal]` | `[pbl-envchk] BAD` |
+|---|---|---|---|---|
+| JIT on, heavy video site ×25 | 0 (3 in 64 before) | 0 | in 2 runs | 0 |
+| JIT off ×8 | 0 | 0 | 0 | 0 |
+
+Two loads raced exactly as described and, with this patch, nothing died.
+Zero deaths in 25 against 3 in 64 is weak on its own (P ≈ 0.3); the steal
+count is the direct evidence that the window is hit in real loads.
+
+**What this does not settle.** The same environment-at-entry crash was once
+seen on a service worker with the JIT off, where nothing sets these statics.
+Eight JIT-off loads with the environment check found nothing, which at that
+sighting's rate (1 in 17) is expected about 60% of the time, so a second
+cause stays open. The check catches a bad environment at function entry;
+a stale environment that only goes bad later in the frame would need a
+different probe.
 
 ## Surf integration refresh
 
