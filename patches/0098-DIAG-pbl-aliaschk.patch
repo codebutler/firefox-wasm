@@ -1,0 +1,159 @@
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 21d4f31..ba54875 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -75,6 +75,9 @@
+ #  include "vm/Weval.h"
+ WEVAL_DEFINE_GLOBALS()
+ #endif
++#if defined(__EMSCRIPTEN__)
++#  include <emscripten/heap.h>  // DIAG 0098 (revert before PR)
++#endif
+ 
+ #if defined(__EMSCRIPTEN__)
+ namespace js {
+@@ -6171,6 +6174,94 @@ uint8_t* GetICInterpreter() {
+  * -----------------------------------------------
+  */
+ 
++#if defined(__EMSCRIPTEN__)
++// DIAG (revert before PR), #2197 JIT-off: validate every environment on an
++// aliased-variable access before PBL uses it, and remember each frame's env
++// at entry. GECKO_PBL_ALIASCHK=0 turns it off.
++struct PBLDiagEnvEnt {
++  JSScript* script;
++  JSObject* env;
++  uint64_t minorGC;
++};
++static thread_local PBLDiagEnvEnt tPBLDiagEnvRing[16];
++static thread_local uint32_t tPBLDiagEnvN = 0;
++static bool PBLDiagOn() {
++  static const bool on = [] {
++    const char* v = getenv("GECKO_PBL_ALIASCHK");
++    return !(v && strcmp(v, "0") == 0);
++  }();
++  return on;
++}
++static void PBLDiagNoteEntry(JSContext* cx, JSScript* script, JSObject* env) {
++  if (!PBLDiagOn()) return;
++  PBLDiagEnvEnt& e = tPBLDiagEnvRing[tPBLDiagEnvN++ & 15];
++  e.script = script;
++  e.env = env;
++  e.minorGC = cx->runtime()->gc.minorGCCount();
++}
++static const char* PBLDiagBadCell(JSContext* cx, JSObject* env) {
++  uintptr_t a = uintptr_t(env);
++  if (!env) return "null";
++  if (a >= uintptr_t(emscripten_get_heap_size()) || (a & 7)) return "out-of-heap";
++  if (!js::gc::IsCellPointerValid(env)) return "invalid-cell";
++  if (env->compartment() != cx->compartment()) return "other-compartment";
++  return nullptr;
++}
++static void PBLDiagReport(JSContext* cx, const char* op, const char* why,
++                          unsigned hop, unsigned hops, JSObject* env,
++                          BaselineFrame* frame, jsbytecode* pc, uint32_t slot,
++                          uint32_t span) {
++  JSScript* sc = frame->script();
++  bool inHeap = env && uintptr_t(env) < uintptr_t(emscripten_get_heap_size());
++  fprintf(stderr,
++          "[pbl-aliaschk] BAD %s op=%s hop=%u/%u env=%p envNursery=%d slot=%u "
++          "span=%u worker=%d minorGC=%llu majorGC=%llu frameEnv=%p %s:%u pc=%u\n",
++          why, op, hop, hops, (void*)env,
++          int(inHeap && js::gc::IsInsideNursery(env)), unsigned(slot),
++          unsigned(span), int(cx->runtime()->parentRuntime != nullptr),
++          (unsigned long long)cx->runtime()->gc.minorGCCount(),
++          (unsigned long long)cx->runtime()->gc.majorGCCount(),
++          (void*)frame->environmentChain(),
++          sc->filename() ? sc->filename() : "?", unsigned(sc->lineno()),
++          unsigned(pc - sc->code()));
++  for (uint32_t i = 0; i < 16 && i < tPBLDiagEnvN; i++) {
++    const PBLDiagEnvEnt& e = tPBLDiagEnvRing[(tPBLDiagEnvN - 1 - i) & 15];
++    if (e.script == sc) {
++      fprintf(stderr,
++              "[pbl-aliaschk]   frame entry env=%p minorGC=%llu (%u entries ago)\n",
++              (void*)e.env, (unsigned long long)e.minorGC, unsigned(i));
++      break;
++    }
++  }
++}
++static void PBLDiagCheckAliased(JSContext* cx, BaselineFrame* frame,
++                                jsbytecode* pc, const char* op) {
++  if (!PBLDiagOn()) return;
++  EnvironmentCoordinate ec(pc);
++  JSObject* env = frame->environmentChain();
++  unsigned hops = ec.hops();
++  for (unsigned h = 0;; h++) {
++    if (const char* why = PBLDiagBadCell(cx, env)) {
++      PBLDiagReport(cx, op, why, h, hops, env, frame, pc, ec.slot(), 0);
++      return;
++    }
++    if (!env->is<EnvironmentObject>()) {
++      if (env->is<DebugEnvironmentProxy>()) return;  // debugger: not checked
++      PBLDiagReport(cx, op, "not-environment", h, hops, env, frame, pc,
++                    ec.slot(), 0);
++      return;
++    }
++    if (h == hops) break;
++    env = &env->as<EnvironmentObject>().enclosingEnvironment();
++  }
++  uint32_t span = env->as<NativeObject>().slotSpan();
++  if (ec.slot() >= span) {
++    PBLDiagReport(cx, op, "slot-past-span", hops, hops, env, frame, pc,
++                  ec.slot(), span);
++  }
++}
++#endif
++
+ template <bool Specialized>
+ static MOZ_ALWAYS_INLINE EnvironmentObject& getEnvironmentFromCoordinate(
+     BaselineFrame* frame, EnvironmentCoordinate ec) {
+@@ -6572,6 +6663,9 @@ PBIResult PortableBaselineInterpret(
+                      frame->environmentChain());
+       }
+     }
++#if defined(__EMSCRIPTEN__)
++    PBLDiagNoteEntry(ctx.frameMgr.cxForLocalUseOnly(), frame->script(), frame->environmentChain());
++#endif
+   }
+ 
+   if (!Specialized) {
+@@ -8497,6 +8591,9 @@ PBIResult PortableBaselineInterpret(
+                 GOTO_ERROR();
+               }
+             }
++#if defined(__EMSCRIPTEN__)
++            PBLDiagNoteEntry(ctx.frameMgr.cxForLocalUseOnly(), frame->script(), frame->environmentChain());
++#endif
+             // 10. Set debug flag, if appropriate.
+             if (frame->script()->isDebuggee()) {
+               TRACE_PRINTF("Script is debuggee\n");
+@@ -9157,6 +9254,9 @@ PBIResult PortableBaselineInterpret(
+       }
+ 
+       CASE(InitAliasedLexical) {
++#if defined(__EMSCRIPTEN__)
++        PBLDiagCheckAliased(ctx.frameMgr.cxForLocalUseOnly(), frame, pc, "InitAliasedLexical");
++#endif
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+         EnvironmentObject& obj =
+             getEnvironmentFromCoordinate<Specialized>(frame, ec);
+@@ -9263,6 +9363,9 @@ PBIResult PortableBaselineInterpret(
+       CASE(GetAliasedDebugVar) {
+         static_assert(JSOpLength_GetAliasedVar ==
+                       JSOpLength_GetAliasedDebugVar);
++#if defined(__EMSCRIPTEN__)
++        PBLDiagCheckAliased(ctx.frameMgr.cxForLocalUseOnly(), frame, pc, "GetAliasedVar");
++#endif
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+         EnvironmentObject& obj =
+             getEnvironmentFromCoordinate<Specialized>(frame, ec);
+@@ -9359,6 +9462,9 @@ PBIResult PortableBaselineInterpret(
+       }
+ 
+       CASE(SetAliasedVar) {
++#if defined(__EMSCRIPTEN__)
++        PBLDiagCheckAliased(ctx.frameMgr.cxForLocalUseOnly(), frame, pc, "SetAliasedVar");
++#endif
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+         EnvironmentObject& obj =
+             getEnvironmentFromCoordinate<Specialized>(frame, ec);

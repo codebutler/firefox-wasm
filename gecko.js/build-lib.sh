@@ -165,7 +165,7 @@ if [ "${GECKO_RELEASE:-}" = "1" ] && [ "${NO_WASM_OPT:-}" != "1" ]; then
   # better module in a fraction of the wall time over this ~235MB binary. Do NOT add
   # `--converge`: it re-runs the whole pipeline to a fixpoint, which is effectively
   # unbounded on a module this large. Override with $GECKO_WASMOPT_FLAGS.
-  WASMOPT_FLAGS="${GECKO_WASMOPT_FLAGS:--all -O4 -O3}"
+  WASMOPT_FLAGS="${GECKO_WASMOPT_FLAGS:--all -O4 -O3 -g}"
   echo ">> wasm-opt $WASMOPT_FLAGS  (release, on gecko.wasm)"
   # shellcheck disable=SC2086  # intentional word-splitting of the flag string
   "$WASMOPT" $WASMOPT_FLAGS "$PKG/wasm/gecko.wasm" -o "$PKG/wasm/gecko.wasm.opt" \
