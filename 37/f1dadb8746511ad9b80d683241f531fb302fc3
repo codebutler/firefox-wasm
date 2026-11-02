@@ -1,0 +1,21 @@
+gecko.js/build-lib.sh
+  s_2541cc69f91286::t_af45421827cd82 168
+patches/0098-DIAG-pbl-aliaschk.patch
+  s_2541cc69f91286::t_8d6a61ec9507c2 1-159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "37f1dadb8746511ad9b80d683241f531fb302fc3",
+  "prompts": {},
+  "sessions": {
+    "s_2541cc69f91286": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcb1284f-e83e-4fa1-926b-0df503f35af8",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
