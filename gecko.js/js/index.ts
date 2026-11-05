@@ -6,14 +6,12 @@
 // render a web page is baked into gecko.data; anything else (chrome UI, etc.) is
 // supplied by the consumer through an `fs` provider (readFile/readdir).
 
-// gecko.js (emscripten glue) is inlined into this bundle as a source string and run
-// from a Blob URL, so consumers never serve it; gecko.data is inlined too, so the ONLY
-// artifact the consumer serves is the wasm (GeckoOptions.wasm). emscripten 6.0.x no longer emits a separate
-// *.worker.js; pthread workers spawn from the main module via mainScriptUrlOrBlob.
+// The engine factory is an ES module. Pthreads import the same factory through
+// a module entrypoint; no engine JavaScript is evaluated from source strings.
 import { encodePickerReply } from './picker-encoding';
 import { PickerChunkEncoder, preparePickerStream } from './picker-stream';
 import { assembleSave } from './save-assembly';
-import geckoSource from '../wasm/gecko.js?source';
+import createGecko from '../wasm/gecko-engine.mjs';
 import { ZSTDDecoder } from 'zstddec';
 // gecko.data is baked into this bundle, zstd-compressed (decoded at load with
 // zstddec), so consumers serve only the wasm. gecko-assets.json (also inlined) says
@@ -129,6 +127,8 @@ export interface GeckoPopup {
 }
 
 export interface GeckoOptions {
+  /** Module worker entrypoint; defaults to gecko-pthread.mjs beside the bundle. */
+  pthreadUrl?: string;
   /**
    * The page canvas the engine composites into. In software mode it receives
    * BGRA frames blitted via a 2D context. In GPU mode (env.GECKO_GPU set) the
@@ -283,34 +283,6 @@ interface GeckoModule {
 }
 type GeckoFactory = (opts: Record<string, unknown>) => Promise<GeckoModule>;
 
-// The engine glue is a classic emscripten MODULARIZE build (EXPORT_ES6 + pthread is
-// unreliable in this emsdk). Both it and the pthread worker are inlined as source
-// (asset/source) and run from Blob URLs, so nothing has to be served for them.
-const toBlobUrl = (src: string) => URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
-
-
-let _engine: Promise<GeckoFactory> | undefined;
-function loadEngine(): Promise<GeckoFactory> {
-  return (_engine ??= new Promise<GeckoFactory>((resolve, reject) => {
-    // A page may import a new disc while the previous bundle is still cached.
-    // Its JS factory must stay paired with its own wasm and pthread source.
-    // Keep the classic glue's semantics, but scope its variables to this load.
-    const key = '__geckoFactory_' + crypto.randomUUID().replaceAll('-', '');
-    const globals = globalThis as Record<string, unknown>;
-    const url = toBlobUrl(`(function(){\n${geckoSource}\n;globalThis[${JSON.stringify(key)}] = createGecko;\n})();`);
-    const s = document.createElement('script');
-    const cleanup = () => { delete globals[key]; s.remove(); URL.revokeObjectURL(url); };
-    s.src = url; s.async = true;
-    s.onload = () => {
-      const f = globals[key] as GeckoFactory | undefined;
-      cleanup();
-      f ? resolve(f) : reject(new Error('gecko.js: engine evaluated but createGecko is missing'));
-    };
-    s.onerror = () => { cleanup(); reject(new Error('gecko.js: failed to evaluate the bundled engine')); };
-    document.head.appendChild(s);
-  }));
-}
-
 interface Cmd {
   op: number; evType?: number; x?: number; y?: number; button?: number;
   buttons?: number; clickCount?: number; modifiers?: number; keyCode?: number;
@@ -342,7 +314,6 @@ export class Gecko {
   private lifetime = new AbortController();
   private initializing: Promise<void> | null = null;
   private startingModule: Partial<GeckoModule> | null = null;
-  private engineUrl: string | null = null;
   private paintFrame: number | null = null;
   private gpuWrap: HTMLElement | null = null;
 
@@ -488,7 +459,6 @@ export class Gecko {
     const wasmUrl = this.opts.wasm.url;
     const wasmCompressed = this.opts.wasm.compressed ?? false;
 
-    const createGecko = await this.untilClosed(loadEngine());
     this.alive();
 
     let resolveReady!: () => void;
@@ -609,11 +579,9 @@ export class Gecko {
     // Keep dictionary storage, but restore Object methods: the generated
     // pthread loader calls Module.propertyIsEnumerable when copying handlers.
     Object.setPrototypeOf(moduleOpts, Object.prototype);
-    // pthread workers load the (bundled) runtime from this Blob (emscripten 6.0.x spawns
-    // them from the main module, no separate *.worker.js). The wasm is supplied directly
-    // via instantiateWasm (below) and gecko.data via getPreloadedPackage, so emscripten
-    // never fetches by filename -- locateFile is only honored if the consumer overrides it.
-    moduleOpts.mainScriptUrlOrBlob = this.engineUrl = toBlobUrl(geckoSource);
+    // The pthread runtime is an ES module, served beside the bundle. Hosts
+    // with their own worker bootstrap can supply its URL explicitly.
+    moduleOpts.mainScriptUrlOrBlob = this.opts.pthreadUrl ?? new URL('./gecko-pthread.mjs', import.meta.url).href;
     if (this.opts.locateFile) moduleOpts.locateFile = this.opts.locateFile;
     // Hand the runtime our canvas as Module.canvas — emscripten's canonical
     // "this is the app's canvas" slot. The OffscreenCanvas transfer path checks
@@ -792,7 +760,7 @@ export class Gecko {
     // The factory mutates this exact object before allocating its first worker.
     // Own it now, so destroy can stop a boot whose factory/READY never settles.
     this.startingModule = moduleOpts as Partial<GeckoModule>;
-    this.mod = await this.untilClosed(createGecko(moduleOpts));
+    this.mod = await this.untilClosed((createGecko as GeckoFactory)(moduleOpts));
     this.startingModule = null;
     this.alive();
     await this.untilClosed(ready);
@@ -937,8 +905,6 @@ export class Gecko {
     this.mod = this.startingModule = null;
     try { runtime?.geckoDispose?.(); }
     catch (error) { console.warn('[gecko-lifecycle] cleanup failed', error); }
-    if (this.engineUrl) URL.revokeObjectURL(this.engineUrl);
-    this.engineUrl = null;
     this.cmd = 0;
     this.popupCanvas?.remove();
     this.popupCanvas = null;

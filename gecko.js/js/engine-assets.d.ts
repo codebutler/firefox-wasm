@@ -15,3 +15,8 @@ declare module '*.json' {
   const value: { dataCompressed: boolean; dataSize: number; wasmCompressed: boolean; wasmSize: number };
   export default value;
 }
+
+declare module "*gecko-engine.mjs" {
+  const factory: (options: any) => Promise<any>;
+  export default factory;
+}
