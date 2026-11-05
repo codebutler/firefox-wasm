@@ -6,7 +6,7 @@ import vm from 'node:vm';
 
 const runtimeSource = readFileSync(new URL('./runtime-lifecycle.js', import.meta.url), 'utf8');
 const source = stripTypeScriptTypes(readFileSync(new URL('./js/index.ts', import.meta.url), 'utf8')
-  .replace(/^import .*;$/gm, '').replace('export class Gecko', 'class Gecko').replace('export default Gecko;', '')) + '\nglobalThis.Gecko = Gecko;';
+  .replace(/^import .*;$/gm, '').replaceAll('import.meta.url', JSON.stringify(new URL('./dist/gecko.js', import.meta.url).href)).replace('export class Gecko', 'class Gecko').replace('export default Gecko;', '')) + '\nglobalThis.Gecko = Gecko;';
 const never = () => new Promise(() => {});
 function wrapper(factory = never) {
   const revoked = [], warnings = [], frames = new Map();
@@ -14,7 +14,7 @@ function wrapper(factory = never) {
   const context = vm.createContext({
     console: {...console, warn(...args) {warnings.push(args);}}, Blob, AbortController, DOMException, TextEncoder, TextDecoder,
     Uint8Array, Int32Array, Atomics, performance, setTimeout, clearTimeout,
-    URL: { createObjectURL() { return 'blob:engine'; }, revokeObjectURL(url) { revoked.push(url); } },
+    URL: class extends URL { static createObjectURL() { return 'blob:engine'; } static revokeObjectURL(url) { revoked.push(url); } },
     requestAnimationFrame(fn) { frames.set(++nextFrame, fn); return nextFrame; },
     cancelAnimationFrame(id) { frames.delete(id); },
     fetch: async () => ({ arrayBuffer: async () => new ArrayBuffer(8) }),
@@ -23,8 +23,7 @@ function wrapper(factory = never) {
     ZSTDDecoder: class { async init() {} },
   });
   vm.runInContext(source, context);
-  context.factory = factory;
-  vm.runInContext('loadEngine = async () => factory', context);
+  context.createGecko = factory;
   const canvas = { width: 20, height: 20, getContext() { return {}; }, style: {} };
   return { g: new context.Gecko({canvas, wasm: {url: '/engine.wasm'}, forwardInput: false}), revoked, frames, warnings };
 }
@@ -90,11 +89,9 @@ test('download and host-write errors reach the selected destination without repo
 test('a runtime hook failure cannot interrupt wrapper resource release', () => {
   const {g, revoked, warnings} = wrapper();
   g.mod = {geckoDispose() {throw Error('bad runtime hook');}};
-  g.engineUrl = 'blob:engine';
-  g.destroy();
+    g.destroy();
   assert.equal(g.mod, null);
-  assert.equal(g.engineUrl, null);
-  assert.deepEqual(revoked, ['blob:engine']);
+  assert.deepEqual(revoked, []);
   assert.equal(warnings.length, 1);
 });
 
@@ -113,7 +110,7 @@ test('destroy during unresolved factory cancels init and releases early runtime'
   await assert.rejects(pending, {name: 'AbortError'});
   assert.equal(stopped, 1);
   assert.equal(g.mod, null); assert.equal(g.startingModule, null);
-  assert.deepEqual(revoked, ['blob:engine']);
+  assert.deepEqual(revoked, []);
   await assert.rejects(g.init(), {name: 'AbortError'});
 });
 

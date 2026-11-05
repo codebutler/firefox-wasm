@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "build:engine": "bash build-lib.sh",
-    "build:bundle": "rspack build",
+    "build:bundle": "node module-glue.mjs && rspack build",
     "build:types": "tsc",
     "build": "pnpm run build:engine && pnpm run build:bundle && pnpm run build:types",
     "typecheck": "tsc --noEmit"

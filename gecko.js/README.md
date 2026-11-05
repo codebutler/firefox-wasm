@@ -172,3 +172,18 @@ A worker assembles the Blob; large payload encoding does not run on the browser
 main thread. Temporary files and destination authority are released after
 completion, failure or cancellation. This is a buffered download path, not a
 streaming API or download manager. Without `onSave`, saving is cancelled.
+
+## Engine modules
+
+The embedding wrapper imports `gecko-engine.mjs` as an ES module. Serve it
+alongside `gecko.js` and `gecko-pthread.mjs`; each pthread imports the same
+factory through that module entrypoint. `GeckoOptions.pthreadUrl` lets an
+embedder supply a capability-installing module bootstrap instead.
+
+`module-glue.mjs` runs after the engine's existing post-link patches and
+from `build:bundle`. It exports the linked factory, selects module workers,
+and exposes an explicit `startPthread()` entrypoint, without evaluating
+JavaScript source at runtime. The link remains classic MODULARIZE because
+this pinned emsdk's EXPORT_ES6 pthread bootstrap is unreliable. Its Node
+environment probe is disabled at this build step: the engine uses the same
+web capabilities when embedded in Bun, where a Node-shaped `process` exists.

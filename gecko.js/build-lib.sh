@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the gecko.js engine artifacts: stage the engine libs + minimal GRE, then
 # emcc-link embed-xul.cpp + libxul into wasm/gecko.{js,wasm,data,worker.js}.
-# Classic emscripten MODULARIZE (createGecko) so the ESM library loads it via
-# script injection.
+# Link MODULARIZE glue, then module-glue.mjs emits the ES module factory
+# and explicit module-worker entrypoint after the post-link patches.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"          # gecko.js (package root)
 PKG="$HERE"                                    # gecko.js
@@ -201,3 +201,7 @@ printf '{"dataCompressed":true,"dataSize":%s,"wasmCompressed":%s,"wasmSize":%s}\
   > "$PKG/wasm/gecko-assets.json"
 echo ">> assets: gecko.data.zst $(du -h "$PKG/wasm/gecko.data.zst" | cut -f1)$([ "$WASM_COMPRESSED" = true ] && echo " + gecko.wasm.zst $(du -h "$PKG/wasm/gecko.wasm.zst" | cut -f1)")  (wasmCompressed=$WASM_COMPRESSED)"
 exit "$rc"
+
+# Emit the importable engine factory after all post-link glue patches.
+mkdir -p "$PKG/dist"
+node "$PKG/module-glue.mjs"

@@ -10,10 +10,11 @@ const digest = path => createHash('sha256').update(readFileSync(resolve(root, pa
 const makefile = readFileSync(resolve(root, 'Makefile'), 'utf8');
 const engineCommit = makefile.match(/^FIREFOX_REF\s*:=\s*([0-9a-f]{40})$/m)?.[1];
 if (!engineCommit) throw new Error('Expected an exact FIREFOX_REF commit');
-const files = readdirSync(resolve(root, 'gecko.js/dist')).filter(name => /^(gecko\.js|gecko\.wasm(?:\.zst)?|gecko-assets\.json)$/.test(name));
+const files = readdirSync(resolve(root, 'gecko.js/dist')).filter(name => /^(gecko\.js|gecko-engine\.mjs|gecko-pthread\.mjs|gecko\.wasm(?:\.zst)?|gecko-assets\.json)$/.test(name));
 if (!files.includes('gecko.js') || !files.some(name => /^gecko\.wasm/.test(name))) throw new Error('Missing runnable engine artifacts');
 const sourcePaths = [
   ...readdirSync(resolve(root, 'patches')).filter(name => name.endsWith('.patch')).map(name => 'patches/' + name),
+  'gecko.js/module-glue.mjs', 'gecko.js/js/index.ts', 'gecko.js/rspack.config.js',
   'gecko.js/patch-emsdk-webgl.mjs', 'gecko.js/patch-emsdk-wasmfs.mjs',
 ];
 const provenance = {

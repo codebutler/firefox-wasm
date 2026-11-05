@@ -1,12 +1,6 @@
-// Bundles the TypeScript library (js/index.ts) into an ESM dist/gecko.js and
-// ships the emscripten engine artifacts (gecko.mjs/.wasm/.data/.worker.js, built
-// by build-lib.sh into wasm/) alongside it.
-//
-// gecko.js (the emscripten glue) and gecko.worker.js (the pthread worker) are
-// INLINED into the bundle as source strings (imported with `?source` ->
-// asset/source) and loaded from Blob URLs at runtime, so consumers never serve
-// them. Only the two big binaries -- gecko.wasm and gecko.data -- ship next to the
-// bundle as assets the consumer serves (see GeckoOptions.assetBase).
+// The wrapper statically imports gecko-engine.mjs. Its pthread entrypoint
+// imports that same factory; no JavaScript source strings are evaluated.
+// gecko.data remains inlined as binary data, and the wasm is consumer-served.
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import rspack from '@rspack/core';
@@ -16,6 +10,8 @@ const wasm = (f) => path.resolve(here, 'wasm', f);
 
 export default {
   target: 'web',
+  externalsType: 'module',
+  externals: { '../wasm/gecko-engine.mjs': './gecko-engine.mjs' },
   mode: 'production',
   entry: './js/index.ts',
   experiments: { outputModule: true },
@@ -28,6 +24,7 @@ export default {
   },
   resolve: { extensions: ['.ts', '.js', '.mjs'] },
   module: {
+    parser: { javascript: { url: false, importMeta: false } },
     rules: [
       {
         test: /\.ts$/,
@@ -47,6 +44,7 @@ export default {
   plugins: [
     new rspack.CopyRspackPlugin({
       patterns: [
+        { from: wasm('gecko-engine.mjs'), to: 'gecko-engine.mjs' },
         // gecko.js + gecko.worker.js (asset/source) and gecko.data.zst (asset/inline,
         // zstd) + gecko-assets.json (JSON import) are all INLINED into the bundle.
         // The only artifact the consumer serves is the wasm: raw gecko.wasm in debug,
